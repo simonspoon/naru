@@ -4912,8 +4912,10 @@ impl Store {
     /// `parents` (their subtasks, at any depth) — the same `todo`-and-not-
     /// blocked rule and the same priority-then-id ordering as
     /// [`Store::next_task`], scoped to a set of subtrees instead of a project.
-    /// The parents themselves are never candidates. Returns `None` when
-    /// `parents` is empty or nothing under them is actionable.
+    /// The parents themselves are never candidates, and nothing under a
+    /// claimed `in_progress` task (owner set) is either — the claim holder
+    /// works that subtree (naru task 2660). Returns `None` when `parents` is
+    /// empty or nothing under them is actionable.
     ///
     /// Like any project-scoped read, this ignores `projects.archived`; a
     /// subtask shares its parent's project, so the caller has already chosen
@@ -4932,11 +4934,22 @@ impl Store {
         let exclude_param = parents.len() + 1;
         // `UNION` (not `UNION ALL`) so a malformed parent cycle terminates
         // instead of recursing forever.
+        //
+        // The walk never descends through a *held* task — `in_progress` with
+        // an owner, i.e. a live claim (`docs/claims.md`): whoever holds it
+        // works its subtree, so a `todo` subtask it just created is not the
+        // watcher's to hand out (naru task 2660, where a supervisor's own
+        // fresh subtask got a second supervisor dispatched onto it). An
+        // unowned `in_progress` parent is not a hold, so it still fans out.
         let sql = format!(
             "WITH RECURSIVE sub(id) AS ( \
-                 SELECT id FROM tasks WHERE parent_id IN ({placeholders}) \
+                 SELECT c.id FROM tasks c JOIN tasks p ON p.id = c.parent_id \
+                 WHERE c.parent_id IN ({placeholders}) \
+                 AND NOT (p.status = 'in_progress' AND p.owner IS NOT NULL) \
                  UNION \
                  SELECT c.id FROM tasks c JOIN sub ON c.parent_id = sub.id \
+                 JOIN tasks p ON p.id = sub.id \
+                 WHERE NOT (p.status = 'in_progress' AND p.owner IS NOT NULL) \
              ) \
              SELECT {TASK_COLUMNS} FROM tasks t WHERE t.id IN (SELECT id FROM sub) \
              AND t.status = 'todo' AND NOT {BLOCKED_EXPR} \

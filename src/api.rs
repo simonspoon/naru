@@ -17457,6 +17457,84 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
     }
 
     #[test]
+    fn queue_watcher_tick_skips_subtasks_under_a_claimed_umbrella() {
+        // naru task 2660: a supervisor holding a claim on its parent created a
+        // `todo` subtask it meant to work itself, and the next tick dispatched
+        // a second supervisor onto it in the same checkout. A claimed
+        // (owner set) in_progress task's subtree belongs to its holder -- at
+        // any depth -- while an unowned in_progress umbrella still fans out.
+        //
+        // SAFETY: ENV_LOCK gives this test exclusive access to
+        // MESA_CLAUDE_BIN for its duration.
+        let _env = attachments::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::core::library::test_home::with_home_dir(|_| {
+            let stub_dir = tempfile::tempdir().unwrap();
+            let log_path = stub_dir.path().join("bg.log");
+            let bin = stub_claude_bg(stub_dir.path(), &log_path);
+            unsafe { std::env::set_var("MESA_CLAUDE_BIN", &bin) };
+
+            let (_dir, state) = test_state();
+            let proj_dir = tempfile::tempdir().unwrap();
+            let project = new_project(&state, Some(proj_dir.path().to_str().unwrap()));
+
+            // The race: umbrella claimed by its supervisor, fresh todo child.
+            let outsider = new_task(&state, project);
+            let parent = new_task(&state, project);
+            state
+                .store
+                .lock()
+                .unwrap()
+                .claim_task(parent, "supervisor-session", false)
+                .unwrap();
+            let child = new_subtask(&state, project, parent, "its own subtask");
+
+            queue_watcher_tick(&state);
+            let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+            assert_eq!(
+                log.lines().count(),
+                0,
+                "a claimed umbrella's subtask is its holder's: {log:?}"
+            );
+            let get = |id| state.store.lock().unwrap().get_task(id).unwrap().status;
+            assert_eq!(get(child), Status::Todo);
+            assert_eq!(get(outsider), Status::Todo, "no fallback to the backlog");
+
+            // Nested: an unowned umbrella over a claimed child over a todo
+            // grandchild -- the grandchild is still the claim holder's.
+            set_status(&state, parent, Status::Done);
+            set_status(&state, child, Status::Done);
+            let top = new_task(&state, project);
+            let mid = new_subtask(&state, project, top, "claimed mid");
+            let grandchild = new_subtask(&state, project, mid, "grandchild");
+            set_status(&state, top, Status::InProgress);
+            state
+                .store
+                .lock()
+                .unwrap()
+                .claim_task(mid, "mid-session", false)
+                .unwrap();
+            queue_watcher_tick(&state);
+            let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+            assert_eq!(log.lines().count(), 0, "nested hold respected: {log:?}");
+            assert_eq!(get(grandchild), Status::Todo);
+
+            // Releasing the claim makes the subtree fair game again.
+            state.store.lock().unwrap().release_task(mid).unwrap();
+            queue_watcher_tick(&state);
+            let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+            assert_eq!(log.lines().count(), 1, "released subtree fans out: {log:?}");
+            assert!(
+                log.contains(&format!("/execute-naru-task {grandchild}")),
+                "{log:?}"
+            );
+
+            unsafe { std::env::remove_var("MESA_CLAUDE_BIN") };
+        });
+    }
+
+    #[test]
     fn queue_watcher_tick_never_dispatches_backlog_tasks() {
         // `backlog` is the agent-side opt-out an orchestrating agent relies on
         // (mesa task 613, `docs/queue-watcher.md`): tasks it authored and

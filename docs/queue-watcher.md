@@ -108,10 +108,23 @@ because someone ran `mesa serve`.
   - Residual, inherent to the "status, not liveness" signal above: a *new*
     subtask created under an already-`in_progress` task mid-run turns that
     task into an umbrella, so the next tick dispatches the new child
-    alongside whoever holds the parent. That is the feature the ticket asked
+    alongside whoever holds the parent — when nobody holds a *claim* on it
+    (an owned parent is the next bullet's case). That is the feature the ticket asked
     for; it is only surprising if the parent was a leaf when its agent
     started. An agent that means to orchestrate its own children takes the
     `backlog` opt-out below rather than racing the tick.
+  - **A claimed umbrella's subtree is its holder's** (naru task 2660). The
+    `next_subtask` walk never descends through an `in_progress` task with an
+    owner (a live claim, `docs/claims.md`), at any depth, so a `todo` subtask
+    a supervisor creates under the task it holds is never dispatched to a
+    second agent — the race that put two supervisors on task 1885. Only an
+    *unowned* `in_progress` parent (a plain status flip) fans out; releasing
+    the claim (`naru task release`) hands the subtree back to the watcher. A
+    project whose every umbrella is claimed dispatches nothing, exactly like
+    an exhausted subtree — so a holder that dies without releasing wedges its
+    subtree until someone releases or closes the claim; `stale_claims` is the
+    signal for that. Regression:
+    `api::tests::queue_watcher_tick_skips_subtasks_under_a_claimed_umbrella`.
   - Regressions: `api::tests::queue_watcher_tick_dispatches_subtask_under_in_progress_parent`
     (whole lifecycle: first child dispatched, siblings and unrelated tasks
     wait, exhausted subtree does not fall back, closing the umbrella resumes
@@ -125,10 +138,11 @@ because someone ran `mesa serve`.
   creates them `--status backlog` and flips each to `in_progress` at the
   moment it hands the work out. Left as `todo`, they are simply unclaimed
   work in a project the watcher serves, and it will dispatch one within a
-  tick — correctly, by its own rule. Note what does *not* help: a `claim`
-  does not gate dispatch (`next_task` only ever returns `todo` rows, so the
-  claim is already invisible to it), and `updated_at` freshness is not
-  consulted at all. Regression:
+  tick — correctly, by its own rule — unless they sit under a task the
+  agent holds a claim on (above). Note what does *not* help: a claim on the
+  new task itself does not gate dispatch (`next_task` only ever returns
+  `todo` rows, so the claim is already invisible to it), and `updated_at`
+  freshness is not consulted at all. Regression:
   `api::tests::queue_watcher_tick_never_dispatches_backlog_tasks` (both picks,
   plus release-to-`todo` dispatching normally, so the opt-out is proven to be
   the status and nothing else).
