@@ -56,6 +56,7 @@ import { isNavLinkClick, loadMainCollapsed, saveMainCollapsed } from './mainColl
 import { isPhone, onPhoneTierChange, usePhoneTier } from './phoneTier'
 import { useSpatialNav } from './spatialNav'
 import { useFetch } from './useFetch'
+import { publishStale, staleBuild, subscribeBuildCheck } from './buildCheck'
 import { usagePct, usageSeverity } from './usageMeter'
 import { useVisualViewportHeightVar } from './visualViewport'
 
@@ -404,10 +405,36 @@ function App() {
     pollMs: 5000,
   })
   const unread = unreadCount(inbox)
-  // Which build am I looking at? Fetched once — a running server's version
-  // cannot change, so no `pollMs`. Pure decoration: no error branch, and
-  // nothing renders until it lands (a placeholder would be noise).
-  const { data: naruVersion } = useFetch(() => getNaruVersion(), 'naru-version')
+  // Which build am I looking at? No `pollMs`: a running server's version
+  // cannot change, only a restarted one's. Pure decoration: no error branch,
+  // and nothing renders until it lands (a placeholder would be noise).
+  //
+  // A restart at a new build (naru task 2656, `buildCheck.ts`): the commit the
+  // page loaded with is kept, and the version is re-read on focus (useFetch),
+  // on the tab becoming visible, and when LiveHub sees its stream reconnect.
+  // A different commit shows the reload banner; nothing reloads by itself.
+  const { data: naruVersion, refetch: refetchVersion } = useFetch(
+    () => getNaruVersion(),
+    'naru-version',
+  )
+  const [loadedCommit, setLoadedCommit] = useState<string | null>(null)
+  if (loadedCommit === null && naruVersion) setLoadedCommit(naruVersion.commit)
+  const buildStale = staleBuild(loadedCommit, naruVersion?.commit ?? null)
+  useEffect(() => {
+    publishStale(buildStale)
+  }, [buildStale])
+  useEffect(() => {
+    const check = () => void refetchVersion()
+    const onVisible = () => {
+      if (!document.hidden) check()
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    const off = subscribeBuildCheck(check)
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible)
+      off()
+    }
+  }, [refetchVersion])
 
   // The inbox and its three sub-views (mesa task 845). One page, one fetch:
   // capture group 1 names the slice to show, and its absence is the "New"
@@ -802,6 +829,14 @@ function App() {
   return (
     <>
       <DoneToasts />
+      {buildStale && (
+        <div className="build-banner" role="status" aria-live="polite">
+          <span className="build-banner-text">Naru updated</span>
+          <button type="button" onClick={() => window.location.reload()}>
+            Reload
+          </button>
+        </div>
+      )}
       <header>
         <a className="brand" href="#/">
           <svg className="brand-mark" viewBox="0 0 64 64" role="img" aria-hidden="true">

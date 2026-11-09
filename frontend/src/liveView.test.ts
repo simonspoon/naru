@@ -56,6 +56,13 @@ describe('viewLine', () => {
     )
   })
 
+  it('leads with the old-build part only when the page is stale', () => {
+    expect(viewLine({ ...base, staleBuild: true })).toMatch(/^old build, reload · p29 /)
+    expect(viewLine({ ...base, staleBuild: false })).toBe(viewLine(base))
+    const long = viewLine({ ...base, staleBuild: true, item: 'x'.repeat(400) })
+    expect(long.startsWith('old build, reload')).toBe(true)
+  })
+
   it('omits unknown parts', () => {
     expect(
       viewLine({

@@ -56,6 +56,7 @@ import {
 } from '../liveBoard'
 import { autoSendIdleMs, fragmentGraceMs, silenceWaitMs } from '../liveCapture'
 import { currentContext, sameContext, subscribeContext } from '../liveContext'
+import { pageStale, requestBuildCheck, subscribeStale } from '../buildCheck'
 import { agentsLabel, openAgents, sectionFor, viewLine } from '../liveView'
 import { mayHold, SegmentChain } from '../liveDrain'
 import { DiscardLedger, liveCancelVerdict, micCapturing } from '../liveCancel'
@@ -846,6 +847,16 @@ export function LiveHub({
   )
   const session = data?.session ?? null
   const agentEnded = data?.agent_ended ?? null
+  // The poll coming back after failing is the server restarting — maybe at a
+  // new build, so have `App` re-read `/api/version` (naru task 2656).
+  const pollFailed = useRef(false)
+  useEffect(() => {
+    if (error !== null) pollFailed.current = true
+    else if (pollFailed.current) {
+      pollFailed.current = false
+      requestBuildCheck()
+    }
+  }, [error])
   const live = isLive(session)
   const offer = data?.offer ?? null
   // The native host, decided once (see below where it matters most). The
@@ -1840,6 +1851,7 @@ export function LiveHub({
         boardOpen: hasBoards && boardShown,
         boardId: boardShowing.current,
         navCollapsed,
+        staleBuild: pageStale(),
       })
   })
 
@@ -2663,6 +2675,9 @@ export function LiveHub({
       let lastSeq = 0
       ws.onopen = () => {
         ws.send(controlStart(conversationKey(id), seedMode(lastMicFor.current, id)))
+        // A reopened stream is the server back from a restart, maybe at a new
+        // build (naru task 2656).
+        if (attempt > 0) requestBuildCheck()
       }
       ws.onmessage = (m) => {
         const ev = parseControlEvent(m.data)
@@ -4151,9 +4166,12 @@ export function LiveHub({
     // A change of focus on the page already open is the fourth trigger: same
     // route, different answer to "what is this?".
     const offContext = subscribeContext(reportRoute)
+    // So is the page learning it is on an old build: the view line says so.
+    const offStale = subscribeStale(reportRoute)
     return () => {
       window.removeEventListener('hashchange', reportRoute)
       offContext()
+      offStale()
       if (reportTimer.current !== null) window.clearTimeout(reportTimer.current)
     }
   }, [reportRoute])

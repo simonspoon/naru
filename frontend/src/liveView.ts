@@ -45,6 +45,9 @@ export interface ViewParts {
   boardOpen: boolean
   boardId: number | null
   navCollapsed: boolean
+  /** The page loaded an older build than the server now runs (naru task
+   *  2656, `buildCheck.ts`), so "tap reload" applies. Optional: absent = no. */
+  staleBuild?: boolean
 }
 
 function clip(value: string | null, max: number): string | null {
@@ -95,6 +98,8 @@ export function agentsLabel(ids: string[]): string | null {
  */
 export function viewLine(parts: ViewParts): string {
   const out: string[] = []
+  // First, so the cap below can never cut the one part that asks for action.
+  if (parts.staleBuild) out.push('old build, reload')
   const name = clip(parts.projectName, PART_MAX)
   if (parts.projectId !== null)
     out.push(

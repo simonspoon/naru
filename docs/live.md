@@ -2697,6 +2697,15 @@ Bounded at `LIVE_VIEW_MAX` (300 chars) in `Store` — over it is `validation`
 to the same number, so it never sends one the store would refuse. Bounded, so
 `--quiet` keeps it on both a turn and a session.
 
+**Old build** (naru task 2656): when the page is older than the server, the
+line leads with `old build, reload`, so the agent says "tap reload" only then.
+The page keeps the `/api/version` commit it first read and re-reads it on
+window focus, on the tab becoming visible, and when `LiveHub` sees its stream
+come back (the control socket reopening, or the live poll succeeding after
+a failure). No polling loop of its own. A different commit shows a
+"Naru updated" banner with a Reload button (`frontend/src/buildCheck.ts`). An
+`unknown` commit never counts, and the page never reloads by itself.
+
 ## Seeing the screen (`mesa live look`, task 895)
 
 Everything above tells the agent *where the person is*. None of it tells it

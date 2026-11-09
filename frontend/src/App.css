@@ -12276,6 +12276,45 @@ select.library-model-badge {
   }
 }
 
+/* "Naru updated" banner (naru task 2656, buildCheck.ts): the done toast's card,
+   centred under the header in cyan, with the one Reload press. */
+.build-banner {
+  position: fixed;
+  top: 3.5rem;
+  left: 0;
+  right: 0;
+  width: fit-content;
+  margin: 0 auto;
+  z-index: 1400;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.5rem 0.6rem 0.5rem 0.85rem;
+  background: var(--panel-raised);
+  border: 1px solid var(--cyan);
+  color: var(--text-h);
+  box-shadow: 0 0 14px rgba(var(--cyan-rgb), 0.35);
+  animation: done-toast-in 0.25s ease-out;
+}
+
+.build-banner-text {
+  font-family: var(--font-sans);
+  font-weight: 600;
+}
+
+.build-banner button {
+  color: var(--bg);
+  background: var(--cyan);
+  border-color: var(--cyan);
+  font-weight: 600;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .build-banner {
+    animation: none;
+  }
+}
+
 /* --- Dock (mesa task 1567, docs/dock.md) ----------------------------------
    The desktop tiers' panel layout: a split tree of tab groups beside the
    pinned nav. Surfaces, rings and radii are the style guide's tokens; nothing
