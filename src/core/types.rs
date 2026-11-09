@@ -128,6 +128,23 @@ pub struct Project {
     /// `local_path`: `Store::update_project` moves the outgoing value in and
     /// takes the incoming one out.
     pub previous_paths: Vec<String>,
+    /// How to restart this project's long-running dev server once a queued
+    /// task lands (naru task 2647, `docs/run-profile.md`); `null` = none, and
+    /// nothing is ever restarted. Set only from the CLI (`project update
+    /// --run-restart`): it is a shell command, so the API never writes it.
+    pub run_profile: Option<RunProfile>,
+}
+
+/// A project's run profile (naru task 2647): after the queue watcher sees a
+/// dispatched task of the project close with a commit citing it, it runs
+/// `restart` detached under `bash -c` in `dir` (else the project's
+/// `local_path`) and, if `health` is set, polls that URL for a 2xx.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct RunProfile {
+    pub restart: String,
+    pub dir: Option<String>,
+    pub health: Option<String>,
 }
 
 /// One recent tool call in an [`AgentSession`]'s trail (naru task 1879).

@@ -339,6 +339,7 @@ function project(overrides: Partial<Project> = {}): Project {
     parent_id: null,
     shared_notebook: false,
     previous_paths: [],
+    run_profile: null,
     ...overrides,
   }
 }

@@ -15,7 +15,7 @@
 //! - The built frontend (`frontend/dist`, embedded at compile time) is served
 //!   at `/`, with SPA fallback to `index.html` (spec Requirement 9).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -286,6 +286,9 @@ struct AppState {
     /// `in_progress` (closed, deleted or moved by hand) and when the task is
     /// parked. In memory like `todo_dispatched`, so a restart forgives it.
     todo_requeued: Arc<Mutex<HashMap<i64, u32>>>,
+    /// Run-profile landings (naru task 2647) waiting for their commit to
+    /// reach the project's HEAD, and the projects with a restart in flight.
+    run_landings: Arc<Mutex<RunLandings>>,
     /// Task id → the queue-watcher's last failed spawn for it (mesa task 1338):
     /// the task's `updated_at` as the watcher's own revert left it, and the
     /// error texts already filed as inbox alerts. The watcher skips a task
@@ -1999,6 +2002,9 @@ struct DispatchedSession {
     nudged_at: Option<Instant>,
     stall_notified: bool,
     stall_filed: bool,
+    /// This landing has been handed to the run-profile queue (naru task
+    /// 2647, [`RunLandings`]), so later passes do not queue it again.
+    restarted: bool,
 }
 
 impl DispatchedSession {
@@ -2016,6 +2022,7 @@ impl DispatchedSession {
             nudged_at: None,
             stall_notified: false,
             stall_filed: false,
+            restarted: false,
         }
     }
 }
@@ -2504,6 +2511,7 @@ fn file_reaper_alert(
 /// sessions mesa can no longer see, and a failing stop keeps its entry so a
 /// transient failure retries.
 fn todo_reaper_tick(state: &AppState) {
+    run_landings_tick(state);
     stale_claim_sweep(state);
     archive_stall_alerts(state);
     let dispatched: Vec<(String, DispatchedSession)> = {
@@ -2581,6 +2589,10 @@ fn todo_reaper_tick(state: &AppState) {
                 now,
                 after,
             );
+        }
+        if status == Some(Status::Done) && !dispatch.superseded && !memory.restarted {
+            memory.restarted = true;
+            lock_run_landings(state).pending.insert(task_id, now);
         }
         match verdict {
             ReapVerdict::Keep => {}
@@ -2743,6 +2755,136 @@ fn todo_reaper_tick(state: &AppState) {
         }
         remember_dispatch(state, &job_id, memory);
     }
+}
+
+/// Run-profile bookkeeping (naru task 2647): landings seen `done` but not yet
+/// restarted, with when they were first seen, and the projects whose restart
+/// is running now — one at a time per project, so two close landings never
+/// run the same restart script at once.
+#[derive(Default)]
+struct RunLandings {
+    pending: HashMap<i64, Instant>,
+    busy: HashSet<i64>,
+}
+
+/// How long a landing waits for its commit to reach the project's HEAD (a
+/// worktree branch merged back) before it is dropped with a note.
+const RUN_LANDING_WINDOW: Duration = Duration::from_secs(15 * 60);
+
+fn lock_run_landings(state: &AppState) -> std::sync::MutexGuard<'_, RunLandings> {
+    match state.run_landings.lock() {
+        Ok(l) => l,
+        Err(e) => e.into_inner(),
+    }
+}
+
+enum RunLanding {
+    /// No such task, or its project has no run profile: drop it.
+    Never,
+    /// No commit citing it in HEAD yet, or a restart of the project is
+    /// running: try again next pass.
+    Wait,
+    Fired,
+}
+
+/// One pass over the pending landings (`docs/run-profile.md`). Runs on every
+/// reaper pass, before the reaper's own early return, since a landing
+/// outlives the dispatch entry that queued it.
+fn run_landings_tick(state: &AppState) {
+    let pending: Vec<(i64, Instant)> = {
+        let l = lock_run_landings(state);
+        if l.pending.is_empty() {
+            return;
+        }
+        l.pending.iter().map(|(t, at)| (*t, *at)).collect()
+    };
+    for (task_id, since) in pending {
+        let drop = match fire_run_profile(state, task_id) {
+            RunLanding::Never | RunLanding::Fired => true,
+            RunLanding::Wait if since.elapsed() >= RUN_LANDING_WINDOW => {
+                let note = format!(
+                    "Run profile: not restarted: no commit citing task {task_id} reached \
+                     the project's checked-out HEAD within {} minutes.",
+                    RUN_LANDING_WINDOW.as_secs() / 60
+                );
+                eprintln!("queue-watcher: {note}");
+                let mut store = match state.store.lock() {
+                    Ok(s) => s,
+                    Err(e) => e.into_inner(),
+                };
+                let _ = store.add_task_note(task_id, &note, None);
+                true
+            }
+            RunLanding::Wait => false,
+        };
+        if drop {
+            lock_run_landings(state).pending.remove(&task_id);
+        }
+    }
+}
+
+/// Fires one landing's restart (naru task 2647) once a commit citing the task
+/// since its claim is in the project's checked-out HEAD: on a thread of its
+/// own (the restart and the health wait take up to
+/// [`crate::core::run_profile::HEALTH_WAIT`]), recording the outcome as a
+/// task note and, with a live session, a live result.
+fn fire_run_profile(state: &AppState, task_id: i64) -> RunLanding {
+    let found = {
+        let store = match state.store.lock() {
+            Ok(s) => s,
+            Err(e) => e.into_inner(),
+        };
+        store.get_task(task_id).ok().and_then(|t| {
+            let project = store.get_project(t.project_id).ok()?;
+            project.run_profile.as_ref()?;
+            let since = t.claimed_at.unwrap_or(t.created_at);
+            Some((project, since))
+        })
+    };
+    let Some((project, since)) = found else {
+        return RunLanding::Never;
+    };
+    if lock_run_landings(state).busy.contains(&project.id) {
+        return RunLanding::Wait;
+    }
+    let Some(sha) = project
+        .local_path
+        .as_deref()
+        .and_then(|dir| crate::core::git::commit_citing_task_in_head(dir, &since, task_id))
+    else {
+        return RunLanding::Wait;
+    };
+    if !lock_run_landings(state).busy.insert(project.id) {
+        return RunLanding::Wait;
+    }
+    let store = state.store.clone();
+    let landings = state.run_landings.clone();
+    std::thread::spawn(move || {
+        let outcome = crate::core::run_profile::restart(
+            &project,
+            crate::core::run_profile::log_path(project.id),
+        );
+        let text = format!(
+            "Task {task_id} landed in {} (commit {sha}): {outcome}.",
+            project.name
+        );
+        eprintln!("queue-watcher: {text}");
+        {
+            let mut store = match store.lock() {
+                Ok(s) => s,
+                Err(e) => e.into_inner(),
+            };
+            let _ = store.add_task_note(task_id, &format!("Run profile: {outcome}."), None);
+            if matches!(store.current_live_session(), Ok(Some(_))) {
+                let _ = store.add_live_result(&text);
+            }
+        }
+        match landings.lock() {
+            Ok(mut l) => l.busy.remove(&project.id),
+            Err(e) => e.into_inner().busy.remove(&project.id),
+        };
+    });
+    RunLanding::Fired
 }
 
 /// Whether some live agent still works on `task_id`, claimed by `owner`
@@ -2968,6 +3110,7 @@ fn remember_dispatch(state: &AppState, job_id: &str, memory: DispatchedSession) 
         entry.nudged_at = memory.nudged_at;
         entry.stall_notified = memory.stall_notified;
         entry.stall_filed = memory.stall_filed;
+        entry.restarted = memory.restarted;
     }
 }
 
@@ -3240,6 +3383,7 @@ pub fn serve(flags: ServeFlags) -> crate::core::Result<()> {
         cost_relay_seeded: Arc::new(Mutex::new(HashMap::new())),
         todo_dispatched: Arc::new(Mutex::new(HashMap::new())),
         todo_requeued: Arc::new(Mutex::new(HashMap::new())),
+        run_landings: Arc::new(Mutex::new(RunLandings::default())),
         todo_spawn_failed: Arc::new(Mutex::new(HashMap::new())),
         script_runs: Arc::new(script_runs::Registry::new()),
     };
@@ -4505,6 +4649,8 @@ async fn update_project(
         sort_order: body.sort_order,
         parent_id: body.parent_id,
         shared_notebook: body.shared_notebook,
+        // The run profile is a shell command: CLI-only (naru task 2647).
+        ..Default::default()
     };
     let mut store = state.store.lock().unwrap();
     Ok(Json(store.update_project(id, &patch)?).into_response())
@@ -14689,6 +14835,7 @@ mod tests {
             cost_relay_seeded: Arc::new(Mutex::new(HashMap::new())),
             todo_dispatched: Arc::new(Mutex::new(HashMap::new())),
             todo_requeued: Arc::new(Mutex::new(HashMap::new())),
+            run_landings: Arc::new(Mutex::new(RunLandings::default())),
             todo_spawn_failed: Arc::new(Mutex::new(HashMap::new())),
             script_runs: Arc::new(script_runs::Registry::new()),
         };

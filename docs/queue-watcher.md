@@ -468,3 +468,10 @@ back to `todo` with the claim dropped, gets a note, and an `ask` row tells the
 live agent. A task with subtasks is left alone, an unlistable `claude` skips
 the pass, and the change is re-checked under the store lock. Gate:
 `scripts/queue-watcher-check.sh`.
+
+## Run profile (naru task 2647)
+
+A reaper pass that finds a dispatched task `done`, in a project with a run
+profile, and a commit citing the task, restarts the project's dev server once
+and reports the health check as a task note and a live result. Everything
+about it is in `docs/run-profile.md`.

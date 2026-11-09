@@ -943,6 +943,19 @@ EXAMPLES
         /// (`true`) or stop doing so (`false`)
         #[arg(long, group = "fields", value_name = "true|false")]
         shared_notebook: Option<bool>,
+        /// Run profile (docs/run-profile.md): the shell command that restarts
+        /// this project's dev server after a queued task lands with a commit;
+        /// pass "" to remove the whole profile
+        #[arg(long, group = "fields", value_name = "CMD")]
+        run_restart: Option<String>,
+        /// Run profile: the directory the restart command runs in (default:
+        /// the project's path); pass "" to clear it
+        #[arg(long, group = "fields", value_name = "DIR")]
+        run_dir: Option<String>,
+        /// Run profile: a URL that answers 2xx once the restarted server is up;
+        /// pass "" to clear it
+        #[arg(long, group = "fields", value_name = "URL")]
+        run_health: Option<String>,
         /// Print the project without its `description` instead of in full
         ///
         /// Deliberately outside the `fields` group: it is a modifier, so
@@ -6404,9 +6417,17 @@ fn run_project(cmd: ProjectCmd) -> Result<()> {
             sort_order,
             parent,
             shared_notebook,
+            run_restart,
+            run_dir,
+            run_health,
             quiet,
         } => {
             let id = resolve_project(&store, &project)?;
+            let run_dir = match run_dir {
+                None => None,
+                Some(d) if d.is_empty() => Some(None),
+                Some(d) => Some(Some(canonical_dir(Path::new(&d))?)),
+            };
             let local_path = match path {
                 None => None,
                 Some(p) if p.is_empty() => Some(None),
@@ -6428,6 +6449,9 @@ fn run_project(cmd: ProjectCmd) -> Result<()> {
                 sort_order,
                 parent_id,
                 shared_notebook,
+                run_restart: run_restart.map(clear_if_empty),
+                run_dir,
+                run_health: run_health.map(clear_if_empty),
             };
             print_project(&store.update_project(id, &patch)?, quiet);
         }
@@ -10252,6 +10276,7 @@ mod tests {
             parent_id: Some(7),
             shared_notebook: false,
             previous_paths: vec!["/tmp/old-p".into()],
+            run_profile: None,
         }
     }
 
@@ -10581,6 +10606,9 @@ mod tests {
                 // `project path add`/`remove` just wrote — echoing it back
                 // missing would read as "the write failed".
                 "previous_paths",
+                // Task 2647. Kept: three short strings, and the field
+                // `project update --run-*` just wrote.
+                "run_profile",
             ]),
             "Project gained/lost a field: decide whether it belongs in the \
              --quiet shape before updating this list",

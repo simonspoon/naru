@@ -18,7 +18,7 @@ TMP=$(mktemp -d)
 # A dispatch marks its project folder trusted in Claude Code's .claude.json
 # (naru task 2570); keep that edit out of the real one.
 export CLAUDE_CONFIG_DIR="$TMP/claude-config"
-trap 'rm -rf "$TMP"; for p in "${SERVER_PID:-}" "${HOLDER_CHILD:-}" "${HOLDER:-}"; do [ -n "$p" ] && kill "$p" 2>/dev/null; done; true' EXIT
+trap '[ -f "$TMP/rpRepo/pid" ] && kill "$(cat "$TMP/rpRepo/pid")" 2>/dev/null || true; rm -rf "$TMP"; for p in "${SERVER_PID:-}" "${HOLDER_CHILD:-}" "${HOLDER:-}"; do [ -n "$p" ] && kill "$p" 2>/dev/null; done; true' EXIT
 export MESA_DB="$TMP/mesa.db"
 # Pin the user config away from the real ~/.mesa/config.json: this gate
 # asserts the BUILT-IN spawn command, so a configured one must not leak in.
@@ -1335,6 +1335,166 @@ sleep 0.6  # several more passes: nothing may repeat
 [ "$("$MESA" ask list | jq --argjson t "$SW_OLD" '[.[] | select(.task_id == $t)] | length')" = 1 ] || fail "exactly one ask row for the swept task"
 [ "$("$MESA" task show "$SW_NEW" | jq -r .status)" = in_progress ] || fail "a fresh claim was swept"
 ok "a stale claim with no live agent goes back to todo with a note and one ask row, once; a fresh claim stays"
+kill "$SERVER_PID" 2>/dev/null; wait "$SERVER_PID" 2>/dev/null || true; SERVER_PID=""
+
+# ---- run profile (naru task 2647): a dispatched task of a project with a
+# run profile closes with a commit citing it -> the reaper pass restarts the
+# project's dev server (a real python http.server here), checks the health
+# URL, and records the outcome as a task note and a live result. A command
+# that fails, and a health URL that never answers 2xx, are reported. Own db,
+# port and stub; the stub lists every job `busy`, so the reaper never stops
+# one and only the run profile acts. ----
+
+RP_DB="$TMP/rp.db"
+RP_IDS="$TMP/rp-ids"
+touch "$RP_IDS"
+mkdir -p "$TMP/rpRepo"
+RP_DIR=$(cd "$TMP/rpRepo" && pwd -P)
+git -C "$RP_DIR" init -q
+git -C "$RP_DIR" -c user.email=t@t -c user.name=t commit -q --allow-empty -m root
+RP_STUB="$STUB_DIR/claude-rp"
+cat > "$RP_STUB" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = "--bg" ]; then
+  ID=rp\$(( \$(wc -l < "$RP_IDS") + 1 ))
+  echo "\$ID" >> "$RP_IDS"
+  echo "backgrounded · \$ID (idle — send a prompt to start)"
+  exit 0
+fi
+if [ "\$1" = "agents" ]; then
+  printf '['; FIRST=1
+  while read -r id; do
+    [ "\$FIRST" = 1 ] || printf ','; FIRST=0
+    printf '{"pid":424242,"id":"%s","cwd":"$RP_DIR","kind":"background","startedAt":1783000000000,"sessionId":"%s-0000-0000-0000-000000000000","name":"rp","status":"busy","state":"working"}' "\$id" "\$id"
+  done < "$RP_IDS"
+  printf ']\n'; exit 0
+fi
+exit 0
+EOF
+chmod +x "$RP_STUB"
+rp_mesa() { MESA_DB="$RP_DB" "$MESA" "$@"; }
+
+APP_PORT=$(free_port)
+HEALTH="http://127.0.0.1:$APP_PORT/"
+# The "dev server": started by hand, as in the evidence, pid in a file.
+cat > "$RP_DIR/restart.sh" <<EOF
+#!/usr/bin/env bash
+[ -f "$RP_DIR/pid" ] && kill "\$(cat "$RP_DIR/pid")" 2>/dev/null
+sleep 0.3
+python3 -m http.server $APP_PORT --bind 127.0.0.1 >/dev/null 2>&1 &
+echo \$! > "$RP_DIR/pid"
+EOF
+chmod +x "$RP_DIR/restart.sh"
+(cd "$RP_DIR" && ./restart.sh)
+for _ in $(seq 1 50); do curl -sf "$HEALTH" >/dev/null && break; sleep 0.1; done
+OLD_PID=$(cat "$RP_DIR/pid")
+
+STDOUT=$(rp_mesa project create "RunProf" --no-git); RPP=$(jq -r .id <<<"$STDOUT")
+rp_mesa project update "$RPP" --path "$RP_DIR" >/dev/null
+# Validation: a health URL before a restart command, and the real install,
+# are refused.
+run 1 env MESA_DB="$RP_DB" "$MESA" project update "$RPP" --run-health "$HEALTH"
+[ "$(jq -r .error.code <<<"$STDERR")" = validation ] || fail "a health URL with no profile must be validation: $STDERR"
+run 1 env MESA_DB="$RP_DB" "$MESA" project update "$RPP" --run-restart "scripts/self-deploy.sh"
+[ "$(jq -r .error.code <<<"$STDERR")" = validation ] || fail "a real-install restart must be validation: $STDERR"
+run 0 env MESA_DB="$RP_DB" "$MESA" project update "$RPP" --run-restart ./restart.sh --run-health "$HEALTH"
+[ "$(jqs '.run_profile.restart')|$(jqs '.run_profile.health')|$(jqs '.run_profile.dir')" = "./restart.sh|$HEALTH|null" ] ||
+  fail "project update must echo the run profile: $STDOUT"
+ok "project update sets a run profile and refuses a dangling or real-install one"
+
+RP_PORT=$(free_port)
+MESA_DB="$RP_DB" MESA_CLAUDE_BIN="$RP_STUB" MESA_WATCH_TODO_TICK_MS=150 MESA_RUN_HEALTH_WAIT_MS=2500 \
+  "$MESA" serve --port "$RP_PORT" --watch-queue >/dev/null 2>&1 &
+SERVER_PID=$!
+wait_for_server "$RP_PORT"
+STDOUT=$(rp_mesa live start --no-agent); RP_SESSION=$(jqs .id)
+
+rp_land() { # rp_land <task id> -> waits until it is in_progress, commits citing it, closes it
+  local t=$1
+  for _ in $(seq 1 50); do
+    [ "$(rp_mesa task show "$t" | jq -r .status)" = in_progress ] && break
+    sleep 0.1
+  done
+  [ "$(rp_mesa task show "$t" | jq -r .status)" = in_progress ] || fail "task $t was never dispatched"
+  sleep 1.1  # a commit strictly after the claim second
+  git -C "$RP_DIR" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "task $t: change"
+  rp_mesa task update "$t" --status done --no-artifact gate >/dev/null
+}
+rp_note() { # rp_note <task id> -> prints the run-profile note once it exists (waits up to 10s)
+  local n
+  for _ in $(seq 1 100); do
+    n=$(rp_mesa task show "$1" | jq -r '[.notes[].body | select(startswith("Run profile:"))] | .[0] // empty')
+    [ -n "$n" ] && { echo "$n"; return 0; }
+    sleep 0.1
+  done
+  fail "no run-profile note on task $1: $(rp_mesa task show "$1")"
+}
+rp_notes() { rp_mesa task show "$1" | jq '[.notes[].body | select(startswith("Run profile:"))] | length'; }
+rp_result() { sqlite3 "$RP_DB" "select text from live_results where session_id = $RP_SESSION and text like 'Task $1 landed in%'"; }
+
+STDOUT=$(rp_mesa task create "$RPP" "first change"); RT1=$(jqs .id)
+rp_land "$RT1"
+N=$(rp_note "$RT1")
+[ "$N" = "Run profile: restarted, healthy (HTTP 200 from $HEALTH)." ] || fail "healthy note wrong: $N"
+NEW_PID=$(cat "$RP_DIR/pid")
+[ "$NEW_PID" != "$OLD_PID" ] || fail "the dev server pid must change"
+! kill -0 "$OLD_PID" 2>/dev/null || fail "the old dev server must be gone"
+[ "$(curl -s -o /dev/null -w '%{http_code}' "$HEALTH")" = 200 ] || fail "the restarted server must answer 200"
+R=$(rp_result "$RT1")
+grep -Eq "^Task $RT1 landed in RunProf \(commit [0-9a-f]+\): restarted, healthy \(HTTP 200 from $HEALTH\)\.$" <<<"$R" ||
+  fail "live result must say restarted, healthy: $R"
+grep -q "restart: ./restart.sh" "$NARU_HOME/logs/run-$RPP.log" || fail "the restart must be logged in logs/run-<id>.log"
+sleep 1  # more passes: fired once only
+[ "$(rp_notes "$RT1")" = 1 ] || fail "a landing restarts once"
+ok "a landed task restarts the dev server once (new pid, health 200), noted on the task and in the live result"
+
+# A health URL that never answers 2xx is reported.
+rp_mesa project update "$RPP" --run-health "${HEALTH}missing" >/dev/null
+STDOUT=$(rp_mesa task create "$RPP" "second change"); RT2=$(jqs .id)
+rp_land "$RT2"
+N=$(rp_note "$RT2")
+grep -q "^Run profile: restarted, but ${HEALTH}missing was not healthy after 2.5s: HTTP 404\.$" <<<"$N" ||
+  fail "failing health note wrong: $N"
+grep -q "not healthy" <<<"$(rp_result "$RT2")" || fail "the live result must carry the health failure"
+ok "a health check that never passes is reported"
+
+# A restart command that fails is reported.
+rp_mesa project update "$RPP" --run-restart "exit 7" >/dev/null
+STDOUT=$(rp_mesa task create "$RPP" "third change"); RT3=$(jqs .id)
+rp_land "$RT3"
+N=$(rp_note "$RT3")
+grep -q "^Run profile: restart command exited 7" <<<"$N" || fail "failing command note wrong: $N"
+ok "a failing restart command is reported"
+
+# A commit still on a worktree branch is not the served code: nothing until
+# it is merged into the project's HEAD, then the restart.
+rp_mesa project update "$RPP" --run-restart ./restart.sh --run-health "$HEALTH" >/dev/null
+STDOUT=$(rp_mesa task create "$RPP" "branch change"); RT5=$(jqs .id)
+for _ in $(seq 1 50); do
+  [ "$(rp_mesa task show "$RT5" | jq -r .status)" = in_progress ] && break
+  sleep 0.1
+done
+sleep 1.1
+git -C "$RP_DIR" branch -q side
+git -C "$RP_DIR" worktree add -q "$TMP/rpWorktree" side
+git -C "$TMP/rpWorktree" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "task $RT5: on a branch"
+rp_mesa task update "$RT5" --status done --no-artifact gate >/dev/null
+sleep 1.5
+[ "$(rp_notes "$RT5")" = 0 ] || fail "a commit not in HEAD must not restart: $(rp_mesa task show "$RT5")"
+git -C "$RP_DIR" merge -q --ff-only side
+N=$(rp_note "$RT5")
+[ "$N" = "Run profile: restarted, healthy (HTTP 200 from $HEALTH)." ] || fail "merged landing note wrong: $N"
+ok "a landing waits until its commit is in the project's HEAD, then restarts"
+
+# No profile, no behaviour change.
+rp_mesa project update "$RPP" --run-restart "" >/dev/null
+[ "$(rp_mesa project show "$RPP" | jq -r .run_profile)" = null ] || fail "--run-restart \"\" must remove the profile"
+STDOUT=$(rp_mesa task create "$RPP" "fourth change"); RT4=$(jqs .id)
+rp_land "$RT4"
+sleep 1.5
+[ "$(rp_notes "$RT4")" = 0 ] || fail "a project with no run profile must restart nothing"
+ok "no run profile: nothing restarted, nothing noted"
+kill "$(cat "$RP_DIR/pid")" 2>/dev/null || true
 kill "$SERVER_PID" 2>/dev/null; wait "$SERVER_PID" 2>/dev/null || true; SERVER_PID=""
 
 echo "ALL OK ($CHECKS checks)"

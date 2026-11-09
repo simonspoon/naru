@@ -34,6 +34,7 @@ pub mod proc;
 pub mod project_memory;
 pub mod receipt;
 pub mod retro;
+pub mod run_profile;
 pub mod runner;
 pub mod stage;
 
@@ -77,7 +78,7 @@ pub use types::{
     LiveSession, LiveState, LiveStatus, LiveSummary, LiveTranscript, LiveTurn, LiveWindow,
     MarkSkinRecord, ModelRates, NaruVersion, Priority, Project, ProjectAgents, ProjectFileTree,
     ProjectGitLog, ProjectGitRepos, ProjectGitStatus, ProjectGitView, ProjectVersion, RetroFinding,
-    RetroRun, RetroStatus, Script, ScriptArg, ScriptArgKind, ScriptRun, ScriptRunEvent,
+    RetroRun, RetroStatus, RunProfile, Script, ScriptArg, ScriptArgKind, ScriptRun, ScriptRunEvent,
     ScriptRunRecord, ScriptRunStatus, ScriptStream, ServeBoolSetting, ServeHostsSetting,
     ServeNumberSetting, Status, SystemInfo, SystemStats, Task, TaskDigestEntry, TaskNote,
     TaskReceipt, TaskSummary, Theme, ThemePreview, ThemeSlots, Workflow, WorkflowBranch,

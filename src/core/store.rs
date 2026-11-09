@@ -13,12 +13,12 @@ use super::types::{
     LibraryItem, LibraryKind, LibraryScope, LibraryVersion, LiveAction, LiveBoard, LiveBoardKind,
     LiveBoardSummary, LiveContext, LiveMemoryHit, LiveNotebookEntry, LiveNotice, LiveResult,
     LiveRole, LiveSession, LiveStatus, LiveSummary, LiveTurn, LiveWindow, Priority, Project,
-    RetroFinding, RetroRun, RetroStatus, Script, ScriptArg, ScriptArgKind, ScriptRunRecord,
-    ScriptRunStatus, Status, Task, TaskDigestEntry, TaskEvent, TaskNote, TaskReceipt, Workflow,
-    WorkflowBranch, WorkflowEdge, WorkflowEdgeKind, WorkflowGate, WorkflowGateStatus,
-    WorkflowLogEntry, WorkflowNode, WorkflowNodeKind, WorkflowRun, WorkflowRunStatus, WorkflowStep,
-    WorkflowStepStatus, WorkflowTrigger, WorkflowType, WorkflowView,
-    is_valid_artifact_content_type, task_name,
+    RetroFinding, RetroRun, RetroStatus, RunProfile, Script, ScriptArg, ScriptArgKind,
+    ScriptRunRecord, ScriptRunStatus, Status, Task, TaskDigestEntry, TaskEvent, TaskNote,
+    TaskReceipt, Workflow, WorkflowBranch, WorkflowEdge, WorkflowEdgeKind, WorkflowGate,
+    WorkflowGateStatus, WorkflowLogEntry, WorkflowNode, WorkflowNodeKind, WorkflowRun,
+    WorkflowRunStatus, WorkflowStep, WorkflowStepStatus, WorkflowTrigger, WorkflowType,
+    WorkflowView, is_valid_artifact_content_type, task_name,
 };
 use super::types::{
     WorkflowBuiltinAction, WorkflowBuiltinUpdate, WorkflowRevision, WorkflowSnapEdge,
@@ -1586,6 +1586,11 @@ const MIGRATIONS: &[&str] = &[
     // `message_id`); it ships in the binary that reads the split.
     "ALTER TABLE cc_messages ADD COLUMN cache_creation_1h_tokens INTEGER;
      DELETE FROM cc_files;",
+    // Naru task 2647: a project's run profile — restart command, working
+    // dir, health URL. NULL `run_restart` = no profile.
+    "ALTER TABLE projects ADD COLUMN run_restart TEXT;
+     ALTER TABLE projects ADD COLUMN run_dir TEXT;
+     ALTER TABLE projects ADD COLUMN run_health TEXT;",
 ];
 
 /// Selects full task rows including the derived `blocked` flag.
@@ -1708,7 +1713,7 @@ fn row_to_receipt(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskReceipt> {
 }
 
 const PROJECT_COLUMNS: &str = "id, name, description, root_commit, local_path, archived, sort_order, parent_id, \
-     shared_notebook";
+     shared_notebook, run_restart, run_dir, run_health";
 
 /// Maps a `projects` row; `previous_paths` is left empty and filled in
 /// afterwards by [`hydrate_previous_paths`], since it lives in a sibling
@@ -1726,6 +1731,16 @@ fn row_to_project(row: &rusqlite::Row<'_>) -> rusqlite::Result<Project> {
         parent_id: row.get(7)?,
         shared_notebook: row.get(8)?,
         previous_paths: Vec::new(),
+        run_profile: row
+            .get::<_, Option<String>>(9)?
+            .map(|restart| -> rusqlite::Result<RunProfile> {
+                Ok(RunProfile {
+                    restart,
+                    dir: row.get(10)?,
+                    health: row.get(11)?,
+                })
+            })
+            .transpose()?,
     })
 }
 
@@ -3248,6 +3263,13 @@ pub struct ProjectPatch {
     pub parent_id: Option<Option<i64>>,
     /// Turns the shared notebook (task 1550) on or off. Touches nothing else.
     pub shared_notebook: Option<bool>,
+    /// Run profile (task 2647). `Some(None)` on `run_restart` removes the
+    /// whole profile; on `run_dir` / `run_health` it clears that part. Setting
+    /// a dir or health URL on a project with no restart command is a
+    /// `validation` error.
+    pub run_restart: Option<Option<String>>,
+    pub run_dir: Option<Option<String>>,
+    pub run_health: Option<Option<String>>,
 }
 
 /// Fields to change on a task; `None` means leave unchanged.
@@ -3976,12 +3998,19 @@ impl Store {
         if let Some(shared) = patch.shared_notebook {
             project.shared_notebook = shared;
         }
+        project.run_profile = crate::core::run_profile::patched(
+            project.run_profile.take(),
+            &patch.run_restart,
+            &patch.run_dir,
+            &patch.run_health,
+        )?;
+        let run = project.run_profile.as_ref();
         self.conn
             .execute(
                 "UPDATE projects SET name = ?1, description = ?2, root_commit = ?3, \
-                 local_path = ?4, sort_order = ?5, parent_id = ?6, shared_notebook = ?7 \
-                 WHERE id = ?8",
-                (
+                 local_path = ?4, sort_order = ?5, parent_id = ?6, shared_notebook = ?7, \
+                 run_restart = ?8, run_dir = ?9, run_health = ?10 WHERE id = ?11",
+                rusqlite::params![
                     &project.name,
                     &project.description,
                     &project.root_commit,
@@ -3989,8 +4018,11 @@ impl Store {
                     project.sort_order,
                     project.parent_id,
                     project.shared_notebook,
+                    run.map(|r| &r.restart),
+                    run.and_then(|r| r.dir.as_ref()),
+                    run.and_then(|r| r.health.as_ref()),
                     id,
-                ),
+                ],
             )
             .map_err(|e| match &project.root_commit {
                 Some(hash) => Self::map_commit_conflict(e, hash),
@@ -18922,15 +18954,15 @@ mod tests {
         );
         assert_eq!(
             MIGRATIONS.len(),
-            104,
-            "a fresh db should report user_version 104"
+            105,
+            "a fresh db should report user_version 105"
         );
         let (store, _dir) = temp_store();
         let version: i64 = store
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 104);
+        assert_eq!(version, 105);
     }
 
     /// Naru task 2264: the migration that deletes the managed Task loop
@@ -18990,7 +19022,7 @@ mod tests {
             .conn
             // Undo what later migrations added, so they re-run cleanly.
             .execute_batch(&format!(
-                "ALTER TABLE workflow_edges DROP COLUMN kind; ALTER TABLE cc_messages DROP COLUMN cache_creation_1h_tokens; PRAGMA user_version = {DROP_LOOP}"
+                "ALTER TABLE workflow_edges DROP COLUMN kind; ALTER TABLE cc_messages DROP COLUMN cache_creation_1h_tokens; ALTER TABLE projects DROP COLUMN run_restart; ALTER TABLE projects DROP COLUMN run_dir; ALTER TABLE projects DROP COLUMN run_health; PRAGMA user_version = {DROP_LOOP}"
             ))
             .unwrap();
         drop(store);
@@ -19047,7 +19079,7 @@ mod tests {
         store
             .conn
             .execute_batch(
-                "ALTER TABLE cc_messages DROP COLUMN cache_creation_1h_tokens; DROP TABLE workflow_builtin_copies; DROP TABLE mark_skins; ALTER TABLE live_sessions DROP COLUMN listen_gen; DROP TABLE agent_questions; DROP TABLE custom_themes; DROP TABLE task_notes; ALTER TABLE live_sessions DROP COLUMN ambient_request_seq; ALTER TABLE live_sessions DROP COLUMN ambient_request; ALTER TABLE live_sessions DROP COLUMN host_seen_at; ALTER TABLE live_sessions DROP COLUMN host_ambient; ALTER TABLE live_notebook DROP COLUMN category; ALTER TABLE cc_messages DROP COLUMN cost_micro_usd; ALTER TABLE cc_sessions DROP COLUMN main_agent; ALTER TABLE live_boards DROP COLUMN pinned_at; DROP TABLE workflow_builtins; DROP TABLE workflow_revisions; DROP TABLE workflow_log; DROP TABLE workflow_gates; DROP TABLE workflow_runs; DROP TABLE workflow_edges; \
+                "ALTER TABLE projects DROP COLUMN run_restart; ALTER TABLE projects DROP COLUMN run_dir; ALTER TABLE projects DROP COLUMN run_health; ALTER TABLE cc_messages DROP COLUMN cache_creation_1h_tokens; DROP TABLE workflow_builtin_copies; DROP TABLE mark_skins; ALTER TABLE live_sessions DROP COLUMN listen_gen; DROP TABLE agent_questions; DROP TABLE custom_themes; DROP TABLE task_notes; ALTER TABLE live_sessions DROP COLUMN ambient_request_seq; ALTER TABLE live_sessions DROP COLUMN ambient_request; ALTER TABLE live_sessions DROP COLUMN host_seen_at; ALTER TABLE live_sessions DROP COLUMN host_ambient; ALTER TABLE live_notebook DROP COLUMN category; ALTER TABLE cc_messages DROP COLUMN cost_micro_usd; ALTER TABLE cc_sessions DROP COLUMN main_agent; ALTER TABLE live_boards DROP COLUMN pinned_at; DROP TABLE workflow_builtins; DROP TABLE workflow_revisions; DROP TABLE workflow_log; DROP TABLE workflow_gates; DROP TABLE workflow_runs; DROP TABLE workflow_edges; \
                  DROP TABLE workflow_nodes; DROP TABLE workflows; \
                  CREATE TABLE diagrams (id INTEGER PRIMARY KEY, title TEXT); \
                  INSERT INTO diagrams (title) VALUES ('stale'); \

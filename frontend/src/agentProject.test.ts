@@ -15,6 +15,7 @@ function project(id: number, local_path: string | null): Project {
     parent_id: null,
     shared_notebook: false,
     previous_paths: [],
+    run_profile: null,
   }
 }
 

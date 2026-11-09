@@ -454,18 +454,19 @@ pub fn log_since(dir: &str, since: &str) -> Vec<GitCommit> {
 /// a worktree branch counts; the trailing non-digit keeps `task 24` from
 /// matching `task 240`, the leading non-letter from matching `subtask 24`.
 pub fn commit_citing_task(dir: &str, since: &str, task_id: i64) -> Option<String> {
+    commit_citing_task_on(dir, "--all", since, task_id)
+}
+
+/// [`commit_citing_task`] limited to `dir`'s checked-out `HEAD` (naru task
+/// 2647): a commit still on a worktree branch is not yet the code `dir`
+/// serves.
+pub fn commit_citing_task_in_head(dir: &str, since: &str, task_id: i64) -> Option<String> {
+    commit_citing_task_on(dir, "HEAD", since, task_id)
+}
+
+fn commit_citing_task_on(dir: &str, revs: &str, since: &str, task_id: i64) -> Option<String> {
     let out = Command::new("git")
-        .args([
-            "-C",
-            dir,
-            "log",
-            "--all",
-            "-n",
-            "1",
-            "-i",
-            "-E",
-            "--format=%h",
-        ])
+        .args(["-C", dir, "log", revs, "-n", "1", "-i", "-E", "--format=%h"])
         .arg(format!("--since={since} UTC"))
         .arg(format!("--grep=(^|[^a-z])task #?{task_id}([^0-9]|$)"))
         .stdin(Stdio::null())
