@@ -73,16 +73,21 @@ pub fn update_task(store: &mut Store, id: i64, patch: &TaskPatch) -> Result<Task
     let landing = if !live {
         None
     } else if before.status != Status::Done && after.status == Status::Done {
+        let (code, sha) = landing_code(store, &before, &after);
+        // Say the commit once (naru task 2657): an artifact naming the code
+        // clause's sha is dropped.
+        let artifact = match (after.artifact.as_deref(), sha.as_deref()) {
+            (Some(a), Some(s)) if same_sha(a.trim(), s) => String::new(),
+            (a, _) => format!(
+                "Commit/artifact: {}. ",
+                a.unwrap_or("none recorded at close")
+            ),
+        };
         Some(format!(
-            "Task {} done: {}. Commit/artifact: {}. Code: {}. Verification: {}",
+            "Task {} done: {}. {artifact}Code: {code}. Verification: {}",
             after.id,
-            after.name,
-            after
-                .artifact
-                .as_deref()
-                .unwrap_or("none recorded at close"),
-            landing_code(store, &before, &after),
-            landing_verification(store, &after),
+            landing_title(&after),
+            landing_verification(store, &after, sha.as_deref()),
         ))
     } else if before.status == Status::InProgress && after.status == Status::Backlog {
         Some(format!(
@@ -105,32 +110,98 @@ const LANDING_DIGEST_MAX: usize = 300;
 /// `task <id>` since the claim (or creation), else whether the project's tree
 /// still holds uncommitted paths (the task loop commits after the close),
 /// else "no code change".
-fn landing_code(store: &Store, before: &Task, after: &Task) -> String {
+/// Also returns the commit's sha, if one was found.
+fn landing_code(store: &Store, before: &Task, after: &Task) -> (String, Option<String>) {
     let Some(dir) = store
         .get_project(after.project_id)
         .ok()
         .and_then(|p| p.local_path)
     else {
-        return "no repo bound to check".to_string();
+        return ("no repo bound to check".to_string(), None);
     };
     let since = before.claimed_at.as_deref().unwrap_or(&before.created_at);
     if let Some(sha) = git::commit_citing_task(&dir, since, after.id) {
-        return format!("commit {sha}");
+        return (format!("commit {sha}"), Some(sha));
     }
-    match git::status_of(&dir) {
+    let text = match git::status_of(&dir) {
         Some(s) if s.dirty > 0 => format!(
             "no commit cites task {} yet; the working tree has {} uncommitted path(s), possibly unrelated",
             after.id, s.dirty
         ),
         Some(_) => "no code change".to_string(),
         None => "repo unreadable".to_string(),
+    };
+    (text, None)
+}
+
+/// Longest task title a landing result carries, in characters.
+const LANDING_TITLE_MAX: usize = 100;
+
+/// The task's full first line (naru task 2657), not the 50-char `name`,
+/// cut to [`LANDING_TITLE_MAX`].
+fn landing_title(task: &Task) -> String {
+    let first = task
+        .description
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or(&task.name);
+    // The landing format adds its own full stop.
+    cut_to(first.trim_end_matches('.'), LANDING_TITLE_MAX)
+}
+
+/// `text` cut to `max` characters, ending in "…" when cut.
+fn cut_to(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
     }
+    let cut: String = text.chars().take(max - 1).collect();
+    format!("{}…", cut.trim_end())
+}
+
+/// Whether two abbreviated or full shas name the same commit: one is a
+/// prefix of the other, at least 7 hex digits long.
+fn same_sha(a: &str, b: &str) -> bool {
+    let (a, b) = (a.to_ascii_lowercase(), b.to_ascii_lowercase());
+    a.len().min(b.len()) >= 7
+        && a.chars().all(|c| c.is_ascii_hexdigit())
+        && b.chars().all(|c| c.is_ascii_hexdigit())
+        && (a.starts_with(&b) || b.starts_with(&a))
+}
+
+/// `text` without a leading "Commit <sha>." or "commit <sha>:" naming `sha`,
+/// which the code clause already says (naru task 2657).
+fn strip_commit_lead<'a>(text: &'a str, sha: Option<&str>) -> &'a str {
+    let Some(sha) = sha else { return text };
+    let Some(rest) = text
+        .get(..7)
+        .filter(|p| p.eq_ignore_ascii_case("commit "))
+        .map(|_| &text[7..])
+    else {
+        return text;
+    };
+    let end = rest.find(['.', ':']).unwrap_or(rest.len());
+    if end == rest.len() || !same_sha(rest[..end].trim(), sha) {
+        return text;
+    }
+    rest[end + 1..].trim_start()
+}
+
+/// Whether a sentence says how the change was proven.
+fn says_verification(sentence: &str) -> bool {
+    let s = sentence.to_lowercase();
+    ["verif", "test", "pass", "checked"]
+        .iter()
+        .any(|k| s.contains(k))
 }
 
 /// The landing's verification digest (naru task 2646): the close's `result`,
 /// else the newest note marked as a verification (starting "verif…"), else
-/// the newest note — whitespace collapsed, cut to [`LANDING_DIGEST_MAX`].
-fn landing_verification(store: &Store, task: &Task) -> String {
+/// the newest note — whitespace collapsed, a leading commit already named by
+/// the code clause dropped, and, when too long, the sentences saying how it
+/// was verified kept over the leading summary (naru task 2657), cut to
+/// [`LANDING_DIGEST_MAX`].
+fn landing_verification(store: &Store, task: &Task, sha: Option<&str>) -> String {
     let notes = store.list_task_notes(task.id).unwrap_or_default();
     let marked = notes.iter().rev().find(|n| {
         n.body
@@ -147,11 +218,32 @@ fn landing_verification(store: &Store, task: &Task) -> String {
         return "none recorded".to_string();
     };
     let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if flat.chars().count() > LANDING_DIGEST_MAX {
-        let cut: String = flat.chars().take(LANDING_DIGEST_MAX - 1).collect();
-        format!("{}…", cut.trim_end())
+    let flat = strip_commit_lead(&flat, sha);
+    if flat.is_empty() {
+        return "none recorded".to_string();
+    }
+    if flat.chars().count() <= LANDING_DIGEST_MAX {
+        return flat.to_string();
+    }
+    // Sentences end at ".", "!" or "?" before a space, so "receipt.rs" or
+    // "v2.28.0" stay whole.
+    let mut sentences = Vec::new();
+    let mut start = 0;
+    for (i, _) in flat.match_indices(' ') {
+        if flat[..i].ends_with(['.', '!', '?']) {
+            sentences.push(&flat[start..i]);
+            start = i + 1;
+        }
+    }
+    sentences.push(&flat[start..]);
+    let proof: Vec<&str> = sentences
+        .into_iter()
+        .filter(|s| says_verification(s))
+        .collect();
+    if proof.is_empty() {
+        cut_to(flat, LANDING_DIGEST_MAX)
     } else {
-        flat
+        cut_to(&proof.join(" "), LANDING_DIGEST_MAX)
     }
 }
 
@@ -800,5 +892,96 @@ mod tests {
         let digest = text.split("Verification: ").nth(1).unwrap();
         assert!(digest.starts_with("word word"), "{text}");
         assert!(digest.ends_with('…') && digest.chars().count() <= LANDING_DIGEST_MAX);
+    }
+
+    #[test]
+    fn landing_says_the_commit_once_and_keeps_the_verification() {
+        let repo = synthetic_repo();
+        let (mut store, project_id) = store_with_project_at(repo.path());
+        std::fs::write(repo.path().join(".git/info/exclude"), "mesa.db*\n").unwrap();
+        let session = store.start_live_session(None).unwrap();
+        let title = "Landing results: stop repeating the commit and keep the verification";
+        let t = store
+            .create_task(
+                project_id,
+                &format!("{title}\n\nbody"),
+                Priority::Medium,
+                &[],
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        std::fs::write(repo.path().join("a.txt"), "changed\n").unwrap();
+        let ok = Command::new("git")
+            .args(["-C", repo.path().to_str().unwrap()])
+            .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+            .args(["commit", "-qam", &format!("task {}: change a", t.id)])
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
+        let sha =
+            git::commit_citing_task(repo.path().to_str().unwrap(), "2000-01-01", t.id).unwrap();
+        // A 900-char result: the commit lead, a long summary, then the proof.
+        let summary =
+            "Changed the landing format in receipt.rs v2.28.0 so it reads better. ".repeat(14);
+        let result =
+            format!("Commit {sha}. {summary}Verified: cargo test passes, receipts-check.sh green.");
+        assert!(result.chars().count() > 900);
+        update_task(
+            &mut store,
+            t.id,
+            &TaskPatch {
+                status: Some(Status::Done),
+                artifact: Some(Some(sha.clone())),
+                result: Some(Some(result)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let text = store.next_live_result(session.id).unwrap().unwrap().text;
+        assert_eq!(text.matches(&sha).count(), 1, "{text}");
+        assert!(!text.contains("Commit/artifact"), "{text}");
+        assert!(
+            text.starts_with(&format!("Task {} done: {title}. Code: commit {sha}.", t.id)),
+            "{text}"
+        );
+        let digest = text.split("Verification: ").nth(1).unwrap();
+        assert_eq!(
+            digest, "Verified: cargo test passes, receipts-check.sh green.",
+            "{text}"
+        );
+        assert!(digest.chars().count() <= LANDING_DIGEST_MAX);
+    }
+
+    #[test]
+    fn landing_digest_helpers() {
+        assert!(same_sha("74e0be8", "74E0BE8a1b2c"));
+        assert!(!same_sha("74e0be8", "74e0be9"));
+        assert!(!same_sha("abc", "abc"));
+        assert!(!same_sha("see PR", "74e0be8"));
+        let sha = Some("abc1234");
+        assert_eq!(
+            strip_commit_lead("Commit abc1234. Tests pass.", sha),
+            "Tests pass."
+        );
+        assert_eq!(
+            strip_commit_lead("commit abc1234: tests pass", sha),
+            "tests pass"
+        );
+        assert_eq!(
+            strip_commit_lead("Commit def5678. Tests pass.", sha),
+            "Commit def5678. Tests pass."
+        );
+        assert_eq!(
+            strip_commit_lead("Commit abc1234. x", None),
+            "Commit abc1234. x"
+        );
+        assert_eq!(strip_commit_lead("Committed. ok", sha), "Committed. ok");
+        assert_eq!(strip_commit_lead("Commit abc1234.", sha), "");
+        assert_eq!(cut_to("abcdef", 4), "abc…");
+        assert_eq!(cut_to("abc", 4), "abc");
     }
 }
