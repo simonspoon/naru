@@ -54,7 +54,7 @@ import {
   olderCursor,
   type BoardHistory,
 } from '../liveBoard'
-import { autoSendIdleMs } from '../liveCapture'
+import { autoSendIdleMs, fragmentGraceMs, silenceWaitMs } from '../liveCapture'
 import { currentContext, sameContext, subscribeContext } from '../liveContext'
 import { agentsLabel, openAgents, sectionFor, viewLine } from '../liveView'
 import { mayHold, SegmentChain } from '../liveDrain'
@@ -903,6 +903,7 @@ export function LiveHub({
     }
   }, [live])
   const autoSendMs = autoSendIdleMs(liveConfig)
+  const graceMs = fragmentGraceMs(liveConfig)
 
   // The correction table for mishearings of mesa's own vocabulary (mesa task
   // 922) — built once per conversation, keyed on the session id, rather than rebuilt on every recognised result:
@@ -2508,6 +2509,8 @@ export function LiveHub({
   // the chain at fire time, deliberately *not* as dependencies: re-arming a
   // full wait on every segment edge would let a noisy room push the timer
   // for ever — the very bug — where the settle effect below asks once.
+  // A recording that ends mid-sentence waits `graceMs` longer (naru task
+  // 2648), so a thinking pause does not send half a question.
   const silenceVerdict = useCallback(
     () =>
       shouldFlushSilence({
@@ -2515,19 +2518,26 @@ export function LiveHub({
         recording: recordingRef.current,
         interim: interimRef.current,
         idleMs: Date.now() - heardAt.current,
-        idleThresholdMs: autoSendMs,
+        idleThresholdMs: silenceWaitMs(
+          `${recordingRef.current} ${interimRef.current}`,
+          autoSendMs,
+          graceMs,
+        ),
         segmentOpen: segmentOpenRef.current,
         outstanding: chainRef.current?.outstanding ?? 0,
       }),
-    [autoSendMs],
+    [autoSendMs, graceMs],
   )
   useEffect(() => {
     if (!wantsMic || (recording.trim() === '' && interim.trim() === '')) return
-    const timer = window.setTimeout(() => {
-      if (silenceVerdict()) flushRef.current()
-    }, autoSendMs)
+    const timer = window.setTimeout(
+      () => {
+        if (silenceVerdict()) flushRef.current()
+      },
+      silenceWaitMs(`${recording} ${interim}`, autoSendMs, graceMs),
+    )
     return () => window.clearTimeout(timer)
-  }, [heardTick, wantsMic, recording, interim, autoSendMs, silenceVerdict])
+  }, [heardTick, wantsMic, recording, interim, autoSendMs, graceMs, silenceVerdict])
   // The settle (mesa task 1189): a timer the effect above withheld is not
   // re-armed by anything once the segment it waited on resolves to nothing —
   // a noise-only segment moves no clock and grows no recording — so the same

@@ -1202,6 +1202,12 @@ pub struct ConfigLive {
     pub handoff_tokens: Option<u32>,
     /// The threshold mesa ships (`core::config::DEFAULT_LIVE_HANDOFF_TOKENS`).
     pub handoff_tokens_default: u32,
+    /// How much longer than the auto-send wait the page holds a recording
+    /// that ends mid-sentence, in milliseconds, or `null` when the config says
+    /// nothing (naru task 2648). `0` turns the hold off.
+    pub fragment_grace_ms: Option<u32>,
+    /// The extra wait Naru ships (`core::config::DEFAULT_LIVE_FRAGMENT_GRACE_MS`).
+    pub fragment_grace_ms_default: u32,
 }
 
 /// The cost-guard settings as the Settings page sees them (`core::config`,

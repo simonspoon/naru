@@ -16,12 +16,16 @@ const DEFAULTED: ConfigLive = {
   auto_send_ms_default: 2000,
   handoff_tokens: null,
   handoff_tokens_default: 150000,
+  fragment_grace_ms: null,
+  fragment_grace_ms_default: 2500,
 }
 const SET: ConfigLive = {
   auto_send_ms: 4500,
   auto_send_ms_default: 2000,
   handoff_tokens: 90000,
   handoff_tokens_default: 150000,
+  fragment_grace_ms: null,
+  fragment_grace_ms_default: 2500,
 }
 
 /** A draft holding the one box, so a test names only the one it is about. */

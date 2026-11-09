@@ -33,4 +33,14 @@ handoff_tokens: number | null,
 /**
  * The threshold mesa ships (`core::config::DEFAULT_LIVE_HANDOFF_TOKENS`).
  */
-handoff_tokens_default: number, };
+handoff_tokens_default: number, 
+/**
+ * How much longer than the auto-send wait the page holds a recording
+ * that ends mid-sentence, in milliseconds, or `null` when the config says
+ * nothing (naru task 2648). `0` turns the hold off.
+ */
+fragment_grace_ms: number | null, 
+/**
+ * The extra wait Naru ships (`core::config::DEFAULT_LIVE_FRAGMENT_GRACE_MS`).
+ */
+fragment_grace_ms_default: number, };

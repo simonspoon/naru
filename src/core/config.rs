@@ -3873,7 +3873,24 @@ pub const LIVE_AUTO_SEND_MS: &str = "auto-send-ms";
 /// Every key the `live` section understands, for the unknown-key error. Task
 /// 919 moved the instruction block out to the library, leaving this section
 /// with the one key.
-const LIVE_KEYS: &[&str] = &[LIVE_AUTO_SEND_MS, LIVE_HANDOFF_TOKENS];
+const LIVE_KEYS: &[&str] = &[
+    LIVE_AUTO_SEND_MS,
+    LIVE_HANDOFF_TOKENS,
+    LIVE_FRAGMENT_GRACE_MS,
+];
+
+/// The config key holding how much longer the page waits, in milliseconds,
+/// before sending a recording that ends mid-sentence (naru task 2648).
+pub const LIVE_FRAGMENT_GRACE_MS: &str = "fragment-grace-ms";
+
+/// The extra wait with no config: about long enough for a person who paused
+/// to think to pick the sentence back up.
+pub const DEFAULT_LIVE_FRAGMENT_GRACE_MS: u32 = 2_500;
+
+/// Bounds for the extra wait: `0` turns the hold off, and past half a minute
+/// a fragment would sit unanswered for longer than any thinking pause.
+pub const MIN_LIVE_FRAGMENT_GRACE_MS: u32 = 0;
+pub const MAX_LIVE_FRAGMENT_GRACE_MS: u32 = 30_000;
 
 /// The config key holding the context size, in tokens, past which the live
 /// agent is told to hand the conversation off (mesa task 1606).
@@ -3920,6 +3937,8 @@ struct LiveSection {
     auto_send_ms: Option<u32>,
     #[serde(default, rename = "handoff-tokens")]
     handoff_tokens: Option<u32>,
+    #[serde(default, rename = "fragment-grace-ms")]
+    fragment_grace_ms: Option<u32>,
 }
 
 fn read_live(path: &Path) -> Result<LiveSection, String> {
@@ -3949,6 +3968,8 @@ fn live_in(path: &Path) -> Result<ConfigLive, String> {
         auto_send_ms_default: DEFAULT_LIVE_AUTO_SEND_MS,
         handoff_tokens: read_live(path)?.handoff_tokens,
         handoff_tokens_default: DEFAULT_LIVE_HANDOFF_TOKENS,
+        fragment_grace_ms: read_live(path)?.fragment_grace_ms,
+        fragment_grace_ms_default: DEFAULT_LIVE_FRAGMENT_GRACE_MS,
     })
 }
 
@@ -4059,6 +4080,12 @@ fn is_live_reset(value: &serde_json::Value) -> bool {
 fn validate_live(key: &str, value: &serde_json::Value) -> Result<(), String> {
     let (min, max, unit) = if key == LIVE_HANDOFF_TOKENS {
         (MIN_LIVE_HANDOFF_TOKENS, MAX_LIVE_HANDOFF_TOKENS, "tokens")
+    } else if key == LIVE_FRAGMENT_GRACE_MS {
+        (
+            MIN_LIVE_FRAGMENT_GRACE_MS,
+            MAX_LIVE_FRAGMENT_GRACE_MS,
+            "milliseconds",
+        )
     } else {
         (MIN_LIVE_AUTO_SEND_MS, MAX_LIVE_AUTO_SEND_MS, "milliseconds")
     };
@@ -8565,6 +8592,42 @@ mod tests {
 
         save_live_in(&path, &live_json(LIVE_HANDOFF_TOKENS, None)).unwrap();
         assert_eq!(live_handoff_tokens_in(&path), 150_000);
+    }
+
+    /// The mid-sentence grace (naru task 2648): 2500 unconfigured, `0`
+    /// (the hold off) and a saved value read back, out-of-range or
+    /// non-integer values write nothing, `null` restores the default.
+    #[test]
+    fn live_fragment_grace_contract() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        assert_eq!(live_in(&path).unwrap().fragment_grace_ms, None);
+        assert_eq!(live_in(&path).unwrap().fragment_grace_ms_default, 2_500);
+
+        for ok in [0, 4_000] {
+            save_live_in(
+                &path,
+                &live_json(LIVE_FRAGMENT_GRACE_MS, Some(serde_json::json!(ok))),
+            )
+            .unwrap();
+            assert_eq!(live_in(&path).unwrap().fragment_grace_ms, Some(ok));
+        }
+
+        let before = std::fs::read_to_string(&path).unwrap();
+        for bad in [
+            serde_json::json!(MAX_LIVE_FRAGMENT_GRACE_MS + 1),
+            serde_json::json!(-1),
+            serde_json::json!(2.5),
+            serde_json::json!("2500"),
+        ] {
+            let err =
+                save_live_in(&path, &live_json(LIVE_FRAGMENT_GRACE_MS, Some(bad))).unwrap_err();
+            assert!(matches!(err, SaveError::Validation(_)));
+        }
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+
+        save_live_in(&path, &live_json(LIVE_FRAGMENT_GRACE_MS, None)).unwrap();
+        assert_eq!(live_in(&path).unwrap().fragment_grace_ms, None);
     }
 
     /// The auto-send wait's whole contract (mesa task 886): nothing

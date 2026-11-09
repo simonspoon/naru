@@ -3632,7 +3632,19 @@ conversation") working with no backend change.
     reads the section once per conversation it joins, so an edit lands on the
     next conversation with no restart, and a read that fails is the built-in
     wait rather than a stall; `autoSendIdleMs` clamps what the file says,
-    since the editor is not the only way into it. A
+    since the editor is not the only way into it. A recording that
+    **ends mid-sentence** — a trailing comma or dash, or an unpunctuated
+    last word such as "a", "the", "and", "can" (`liveCapture.ts::endsMidSentence`)
+    — waits `live.fragment-grace-ms` longer (2500 ms shipped, `0` off; naru
+    task 2648, `silenceWaitMs`), so a person who stops to think mid-question
+    has the rest land in the same turn rather than the agent answering
+    "Alright, so how can". Only that positive signal holds: a short complete
+    reply ("yes", "2", "that's all I had", and any three-word-or-shorter
+    reply not ending on a plain fragment word like "the" or "and") waits
+    exactly `auto-send-ms`. naru-audio punctuates a cut-off fragment as if
+    finished ("Alright, so how can?"), so a `.` or `?` after an article,
+    conjunction or modal still holds; `!` never does. The
+    native Mac app keeps its own auto-send wait and does not hold yet. A
     conversation is not one sentence at a time: a VAD segment ends wherever
     the speaker drew breath (`liveVad.ts`'s hangover), so posting each one as
     its own turn made the agent answer a half-thought and then answer the

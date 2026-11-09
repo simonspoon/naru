@@ -1302,7 +1302,8 @@ someone edits it, and edited on `#/library` rather than in this file. This secti
 {
   "live": {
     "auto-send-ms": 2000,
-    "handoff-tokens": 150000
+    "handoff-tokens": 150000,
+    "fragment-grace-ms": 2500
   }
 }
 ```
@@ -1324,6 +1325,19 @@ keep; `docs/library.md` covers the fork/restore mechanics and
 `core::live::agent_prompt`'s resolution (fork, else the built-in, falling back
 to the built-in on any store error so a database hiccup never stops a
 conversation starting).
+
+`fragment-grace-ms` (naru task 2648) is how much **longer** than
+`auto-send-ms` the page holds a recording that ends mid-sentence — a trailing
+comma or dash, or an unpunctuated last word that rarely ends a sentence ("a",
+"the", "and", "how can", "uh"; `liveCapture.ts::endsMidSentence`) — so a
+thinking pause does not send half a question. A reply of three words or
+fewer holds only on an unambiguous fragment word ("the", "and", "um"), so a
+complete reply ("yes", "2", "yes I will", "A") is never held. A `.` or `?`
+after an article, conjunction or modal still holds, since naru-audio
+punctuates a cut-off fragment as if finished ("Alright, so how can?"). Absent or `null` ⇒ `DEFAULT_LIVE_FRAGMENT_GRACE_MS` (2500); a
+whole number of milliseconds, 0..=30000, `0` turning the hold off; outside
+that is **422 `validation`**. It has no Settings editor yet — set it in the
+file or through `PUT /api/config/live`.
 
 `auto-send-ms` is this section's key:
 

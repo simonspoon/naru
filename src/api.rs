@@ -12957,6 +12957,9 @@ struct LiveUpdate {
     /// Same three-way shape for the handoff threshold (mesa task 1606).
     #[serde(default, deserialize_with = "deserialize_some")]
     handoff_tokens: Option<Option<serde_json::Value>>,
+    /// Same three-way shape for the mid-sentence grace (naru task 2648).
+    #[serde(default, deserialize_with = "deserialize_some")]
+    fragment_grace_ms: Option<Option<serde_json::Value>>,
 }
 
 /// `PUT /api/config/live` — writes `auto-send-ms` and echoes the settings.
@@ -12978,6 +12981,9 @@ async fn update_config_live(
     }
     if let Some(value) = body.handoff_tokens {
         updates.insert(config::LIVE_HANDOFF_TOKENS.to_string(), value);
+    }
+    if let Some(value) = body.fragment_grace_ms {
+        updates.insert(config::LIVE_FRAGMENT_GRACE_MS.to_string(), value);
     }
     blocking(move || config::save_live(&updates))
         .await?
@@ -16713,6 +16719,7 @@ mod tests {
                         Json(LiveUpdate {
                             auto_send_ms: None,
                             handoff_tokens: None,
+                            fragment_grace_ms: None,
                         }),
                     )
                     .await
