@@ -5,7 +5,8 @@
 #     answer is `conflict`; unknown id `not_found`; empty text `validation`;
 #   * --quiet drops body (and answer on show/answer);
 #   * with no live session a bare `ask` exits 0 and writes no notice; with a
-#     live session it writes exactly one `question` notice turn (deduped).
+#     live session it writes exactly one `question` notice turn (deduped);
+#   * closing a task expires its open questions (naru task 2661).
 set -euo pipefail
 unset $(env | sed -n 's/^\(NARU_[A-Za-z0-9_]*\)=.*/\1/p')
 unset CLAUDE_CODE_SESSION_ID
@@ -100,4 +101,16 @@ echo "$ERR" | grep -q conflict || fail "answering a notice must be conflict"
 run 1 "$NARU" ask list --kind bogus
 echo "$ERR" | grep -q validation || fail "bad kind must be validation"
 ok "notice rows: no question notice turn, batched read, kind filter"
+T2=$("$NARU" task create "$PROJ" "closing task" | jq -r .id)
+run 0 "$NARU" ask --task "$T2" "still needed?"
+EQ=$(echo "$OUT" | jq -r .id)
+run 0 "$NARU" task update "$T2" --status done --no-artifact "gate"
+run 0 "$NARU" ask list --status open
+echo "$OUT" | jq -e --argjson q "$EQ" 'all(.[]; .id != $q)' >/dev/null || fail "closed task's question still open"
+run 0 "$NARU" ask show "$EQ"
+[ "$(echo "$OUT" | jq -r .status)" = expired ] || fail "show must report expired"
+echo "$OUT" | jq -r .answer | grep -q "task $T2 closed (done)" || fail "expiry reason"
+run 1 "$NARU" ask answer "$EQ" late
+echo "$ERR" | grep -q conflict || fail "answering an expired question must be conflict"
+ok "closing a task expires its open questions (naru task 2661)"
 echo "open_questions_after_answer=$OPEN live_notice_turns_with_session=$N question_notice_turns_from_notice_rows=$((N2-N))"

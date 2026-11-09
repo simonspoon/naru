@@ -1619,6 +1619,14 @@ const MIGRATIONS: &[&str] = &[
      UPDATE agent_questions SET read_at = datetime('now') \
      WHERE kind = 'notice' AND read_at IS NULL \
      AND created_at < datetime('now', '-1 day');",
+    // Naru task 2661: an open question whose task is already done or
+    // cancelled expires (`Store::update_task` does it from now on), with the
+    // reason in `answer`, so `ask list --status open` stops replaying it.
+    "UPDATE agent_questions SET status = 'expired', answered_at = datetime('now'), \
+     answer = 'expired: task ' || task_id || ' closed (' || \
+     (SELECT status FROM tasks WHERE tasks.id = agent_questions.task_id) || ')' \
+     WHERE kind = 'question' AND status = 'open' AND task_id IN \
+     (SELECT id FROM tasks WHERE status IN ('done', 'cancelled'));",
 ];
 
 /// Selects full task rows including the derived `blocked` flag.
@@ -4559,6 +4567,18 @@ impl Store {
                 (id, old_status.as_str(), task.status.as_str()),
             )?;
         }
+        // Naru task 2661: closing a task expires its unanswered questions;
+        // nobody is left to read the answer. The reason goes in `answer`.
+        if status_changed && matches!(task.status, Status::Done | Status::Cancelled) {
+            tx.execute(
+                "UPDATE agent_questions SET status = 'expired', answered_at = datetime('now'), \
+                 answer = ?2 WHERE task_id = ?1 AND kind = 'question' AND status = 'open'",
+                (
+                    id,
+                    format!("expired: task {id} closed ({})", task.status.as_str()),
+                ),
+            )?;
+        }
         tx.commit()?;
         // Re-read: a status change can alter dependents' (and this task's) blocked flag.
         self.get_task(id)
@@ -5203,7 +5223,7 @@ impl Store {
             .ok_or_else(|| Error::NotFound(format!("question {id} not found")))
     }
 
-    /// Rows oldest first, optionally only `open` or `answered`, only a
+    /// Rows oldest first, optionally only `open`, `answered` or `expired`, only a
     /// `kind` (`question`|`notice`), and/or only those not yet read.
     /// `open` with no `kind` means open questions: a notice is never
     /// answered, so it would stay "open" forever (naru task 2651).
@@ -5216,9 +5236,10 @@ impl Store {
         if let Some(s) = status
             && s != "open"
             && s != "answered"
+            && s != "expired"
         {
             return Err(Error::Validation(format!(
-                "'{s}' is not one of open|answered"
+                "'{s}' is not one of open|answered|expired"
             )));
         }
         if let Some(k) = kind
@@ -5270,7 +5291,8 @@ impl Store {
         }
         if q.status != "open" {
             return Err(Error::Conflict(format!(
-                "question {id} is already answered"
+                "question {id} is already {}",
+                q.status
             )));
         }
         self.conn.execute(
@@ -19258,15 +19280,15 @@ mod tests {
         );
         assert_eq!(
             MIGRATIONS.len(),
-            108,
-            "a fresh db should report user_version 108"
+            109,
+            "a fresh db should report user_version 109"
         );
         let (store, _dir) = temp_store();
         let version: i64 = store
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 108);
+        assert_eq!(version, 109);
     }
 
     /// Naru task 2651: legacy loop reports stored as questions become
@@ -19315,6 +19337,118 @@ mod tests {
         assert_eq!(unread, vec![4]);
         assert_eq!(store.get_question(1).unwrap().kind, "notice");
         assert!(store.get_question(2).unwrap().read_at.is_none());
+    }
+
+    /// Naru task 2661: closing a task (done or cancelled) expires its open
+    /// questions with the reason in `answer`; answered rows, notices and
+    /// other tasks' questions are untouched.
+    #[test]
+    fn closing_a_task_expires_its_open_questions() {
+        let (mut store, _dir) = temp_store();
+        let p = store.create_project("p", None, None, None, None).unwrap();
+        let t = add_task(&mut store, p.id, "task");
+        let other = add_task(&mut store, p.id, "other");
+        let q = store
+            .add_question("which?", Some(t.id), None, "question")
+            .unwrap();
+        let a = store
+            .add_question("asked", Some(t.id), None, "question")
+            .unwrap();
+        store.answer_question(a.id, "yes").unwrap();
+        let n = store
+            .add_question("report", Some(t.id), None, "notice")
+            .unwrap();
+        let o = store
+            .add_question("still?", Some(other.id), None, "question")
+            .unwrap();
+        let close = |status| TaskPatch {
+            status: Some(status),
+            ..Default::default()
+        };
+        store.update_task(t.id, &close(Status::Done)).unwrap();
+        let e = store.get_question(q.id).unwrap();
+        assert_eq!(e.status, "expired");
+        assert_eq!(
+            e.answer.as_deref(),
+            Some(&*format!("expired: task {} closed (done)", t.id))
+        );
+        assert!(e.answered_at.is_some());
+        assert!(matches!(
+            store.answer_question(q.id, "late"),
+            Err(Error::Conflict(_))
+        ));
+        assert_eq!(
+            store.get_question(a.id).unwrap().answer.as_deref(),
+            Some("yes")
+        );
+        assert_eq!(store.get_question(n.id).unwrap().status, "open");
+        let open: Vec<i64> = store
+            .list_questions(Some("open"), None, false)
+            .unwrap()
+            .iter()
+            .map(|q| q.id)
+            .collect();
+        assert_eq!(open, vec![o.id]);
+        assert_eq!(
+            store
+                .list_questions(Some("expired"), None, false)
+                .unwrap()
+                .len(),
+            1
+        );
+        store
+            .update_task(other.id, &close(Status::Cancelled))
+            .unwrap();
+        assert_eq!(
+            store.get_question(o.id).unwrap().answer.as_deref(),
+            Some(&*format!("expired: task {} closed (cancelled)", other.id))
+        );
+    }
+
+    /// Naru task 2661: the migration expires open questions whose task is
+    /// already closed and leaves a live task's alone. Pinned by index, NOT
+    /// `MIGRATIONS.len() - 1`; replayed by rewinding `user_version`.
+    #[test]
+    fn closed_task_questions_are_expired_by_migration() {
+        const EXPIRE: usize = 108;
+        assert!(
+            MIGRATIONS[EXPIRE].contains("'expired: task '"),
+            "migration {EXPIRE} is no longer the question expiry — a shipped \
+             migration was edited or reordered, which is never allowed"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("upgrade.db");
+        let (done, live, q1, q2) = {
+            let mut store = Store::open(&path).unwrap();
+            let p = store.create_project("p", None, None, None, None).unwrap();
+            let done = add_task(&mut store, p.id, "done");
+            let live = add_task(&mut store, p.id, "live");
+            let q1 = store
+                .add_question("old", Some(done.id), None, "question")
+                .unwrap();
+            let q2 = store
+                .add_question("live", Some(live.id), None, "question")
+                .unwrap();
+            store
+                .conn
+                .execute("UPDATE tasks SET status = 'done' WHERE id = ?1", [done.id])
+                .unwrap();
+            store
+                .conn
+                .pragma_update(None, "user_version", EXPIRE as i64)
+                .unwrap();
+            (done.id, live.id, q1.id, q2.id)
+        };
+        let store = Store::open(&path).unwrap();
+        let e = store.get_question(q1).unwrap();
+        assert_eq!(e.status, "expired");
+        assert_eq!(
+            e.answer.as_deref(),
+            Some(&*format!("expired: task {done} closed (done)"))
+        );
+        let open = store.list_questions(Some("open"), None, false).unwrap();
+        assert_eq!(open.len(), 1);
+        assert_eq!((open[0].id, open[0].task_id), (q2, Some(live)));
     }
 
     /// Naru task 2264: the migration that deletes the managed Task loop

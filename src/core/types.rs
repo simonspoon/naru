@@ -5841,7 +5841,8 @@ pub struct AgentQuestion {
     /// The asking Claude Code session, when known.
     pub session: Option<String>,
     pub body: String,
-    /// `open` or `answered`.
+    /// `open`, `answered`, or `expired` (its task closed first; the
+    /// reason is in `answer`, naru task 2661).
     pub status: String,
     pub answer: Option<String>,
     pub created_at: String,

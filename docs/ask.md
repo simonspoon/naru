@@ -16,7 +16,7 @@ queues a question instead of guessing or stalling.
   loop's last node, the stale-claim sweep). A notice raises **no** notice turn
   and cannot be answered (`conflict`). `read_at` is when the live agent first
   saw it; existing rows are unread questions.
-- `naru ask list [--status open|answered] [--kind question|notice] [--unread]
+- `naru ask list [--status open|answered|expired] [--kind question|notice] [--unread]
   [--mark-read]` / `ask show <id>` read the queue. `--status open` with no
   `--kind` lists open **questions** only — a notice is never answered, so it
   would stay open forever; add `--kind notice` to see those (naru task 2651,
@@ -26,6 +26,13 @@ queues a question instead of guessing or stalling.
   one-call batch the live agent summarises in a line.
 - `naru ask answer <id> <text…>` answers once (`conflict` the second time).
   The asker reads it with `ask show <id>`; nothing is pushed to the asker.
+- Closing a task (`done` or `cancelled`, in `Store::update_task`) expires its
+  open questions (naru task 2661): `status` becomes `expired`, `answered_at`
+  is stamped and `answer` holds the reason (`expired: task N closed (done)`),
+  so `ask list --status open` stops listing them and `ask show` says why (not under `--quiet`, which drops `answer`).
+  Answering one is `conflict`; reopening the task does not revive it, and
+  notices are left alone. Its migration expired the questions already
+  stranded on closed tasks.
 - `--quiet` drops `body` (and `answer` on show/answer).
 - Body and answer are non-blank, at most 8 KiB. CLI only, no HTTP route, no
   frontend; `AgentQuestion` is not ts-exported.
