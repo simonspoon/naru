@@ -184,7 +184,10 @@ otherwise begin driving the conversation; only the agent that spawned it
 speaks. Two hard rules ride with it: **nothing spawned from a conversation,
 and not the agent itself, ever edits code in a project** — a change the person
 wants becomes a Naru task (`backlog` for an idea, `todo` for work the
-queue-watcher's own agents pick up) — and two delegates never work in the same
+queue-watcher's own agents pick up; when the person says "queue", it is
+always `todo`, checked with `naru task show` and read back as "task N queued,
+status todo", the one id rule 2 lets the voice say unasked, naru task 2678) —
+and two delegates never work in the same
 tree or repository at once (own worktree, own files, or one after another). A
 result that lands mid-discussion on another topic is held for a natural pause;
 one that lands while the conversation is quiet is announced right away, never
