@@ -5,7 +5,6 @@
 
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -165,16 +164,14 @@ pub fn restart(project: &Project, log: Option<PathBuf>) -> String {
         Some((a, b)) => (Stdio::from(a), Stdio::from(b)),
         None => (Stdio::null(), Stdio::null()),
     };
-    let mut child = match Command::new("bash")
-        .arg("-c")
+    let mut cmd = Command::new("bash");
+    cmd.arg("-c")
         .arg(&profile.restart)
         .current_dir(&dir)
         .stdin(Stdio::null())
         .stdout(stdout)
-        .stderr(stderr)
-        .process_group(0)
-        .spawn()
-    {
+        .stderr(stderr);
+    let mut child = match super::proc::isolate(&mut cmd).spawn() {
         Ok(c) => c,
         Err(e) => return format!("restart failed to start in {dir}: {e}"),
     };
