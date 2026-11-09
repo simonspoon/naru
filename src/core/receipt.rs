@@ -67,15 +67,22 @@ pub fn update_task(store: &mut Store, id: i64, patch: &TaskPatch) -> Result<Task
     // Landing report (naru task 2081): a close, or a bounce from
     // `in_progress` back to `backlog`, reaches the live agent as a `result`
     // so it need not remember to poll. No live session = a quiet no-op.
-    let landing = if before.status != Status::Done && after.status == Status::Done {
+    // The digest (naru task 2646) costs a git call or two, so it is only
+    // built when there is a live session to hear it.
+    let live = matches!(store.current_live_session(), Ok(Some(_)));
+    let landing = if !live {
+        None
+    } else if before.status != Status::Done && after.status == Status::Done {
         Some(format!(
-            "Task {} done: {}. Commit/artifact: {}.",
+            "Task {} done: {}. Commit/artifact: {}. Code: {}. Verification: {}",
             after.id,
             after.name,
             after
                 .artifact
                 .as_deref()
-                .unwrap_or("none recorded at close")
+                .unwrap_or("none recorded at close"),
+            landing_code(store, &before, &after),
+            landing_verification(store, &after),
         ))
     } else if before.status == Status::InProgress && after.status == Status::Backlog {
         Some(format!(
@@ -89,6 +96,63 @@ pub fn update_task(store: &mut Store, id: i64, patch: &TaskPatch) -> Result<Task
         let _ = store.add_live_result(&text);
     }
     Ok(after)
+}
+
+/// Longest verification digest a landing result carries, in characters.
+const LANDING_DIGEST_MAX: usize = 300;
+
+/// The landing's code clause (naru task 2646): the newest commit citing
+/// `task <id>` since the claim (or creation), else whether the project's tree
+/// still holds uncommitted paths (the task loop commits after the close),
+/// else "no code change".
+fn landing_code(store: &Store, before: &Task, after: &Task) -> String {
+    let Some(dir) = store
+        .get_project(after.project_id)
+        .ok()
+        .and_then(|p| p.local_path)
+    else {
+        return "no repo bound to check".to_string();
+    };
+    let since = before.claimed_at.as_deref().unwrap_or(&before.created_at);
+    if let Some(sha) = git::commit_citing_task(&dir, since, after.id) {
+        return format!("commit {sha}");
+    }
+    match git::status_of(&dir) {
+        Some(s) if s.dirty > 0 => format!(
+            "no commit cites task {} yet; the working tree has {} uncommitted path(s), possibly unrelated",
+            after.id, s.dirty
+        ),
+        Some(_) => "no code change".to_string(),
+        None => "repo unreadable".to_string(),
+    }
+}
+
+/// The landing's verification digest (naru task 2646): the close's `result`,
+/// else the newest note marked as a verification (starting "verif…"), else
+/// the newest note — whitespace collapsed, cut to [`LANDING_DIGEST_MAX`].
+fn landing_verification(store: &Store, task: &Task) -> String {
+    let notes = store.list_task_notes(task.id).unwrap_or_default();
+    let marked = notes.iter().rev().find(|n| {
+        n.body
+            .trim_start()
+            .get(..5)
+            .is_some_and(|p| p.eq_ignore_ascii_case("verif"))
+    });
+    let text = task
+        .result
+        .as_deref()
+        .filter(|r| !r.trim().is_empty())
+        .or(marked.or(notes.last()).map(|n| n.body.as_str()));
+    let Some(text) = text else {
+        return "none recorded".to_string();
+    };
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() > LANDING_DIGEST_MAX {
+        let cut: String = flat.chars().take(LANDING_DIGEST_MAX - 1).collect();
+        format!("{}…", cut.trim_end())
+    } else {
+        flat
+    }
 }
 
 /// Creates a task and fires the `task-event` workflows listening for a
@@ -646,5 +710,95 @@ mod tests {
         let done = store.next_live_result(session.id).unwrap().unwrap();
         assert!(done.text.contains(&format!("Task {} done", t.id)));
         assert!(store.next_live_result(session.id).unwrap().is_none());
+    }
+    #[test]
+    fn landing_carries_code_and_verification_digest() {
+        let repo = synthetic_repo();
+        let (mut store, project_id) = store_with_project_at(repo.path());
+        let session = store.start_live_session(None).unwrap();
+        let mk = |store: &mut Store| {
+            store
+                .create_task(
+                    project_id,
+                    "ship it",
+                    Priority::Medium,
+                    &[],
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap()
+        };
+        let done = TaskPatch {
+            status: Some(Status::Done),
+            ..Default::default()
+        };
+        // No commit, clean tree (the db sits inside the repo, so exclude
+        // it): a verify note wins over a later plain one.
+        std::fs::write(repo.path().join(".git/info/exclude"), "mesa.db*\n").unwrap();
+        let t = mk(&mut store);
+        store
+            .add_task_note(t.id, "Verified: tests pass, 3/3.", None)
+            .unwrap();
+        store.add_task_note(t.id, "tidying up", None).unwrap();
+        update_task(&mut store, t.id, &done).unwrap();
+        let text = store.next_live_result(session.id).unwrap().unwrap().text;
+        assert!(
+            text.starts_with(&format!(
+                "Task {} done: ship it. Commit/artifact: none recorded at close.",
+                t.id
+            )),
+            "{text}"
+        );
+        assert!(text.contains("Code: no code change."), "{text}");
+        assert!(
+            text.ends_with("Verification: Verified: tests pass, 3/3."),
+            "{text}"
+        );
+
+        // Uncommitted work: said so, not "no code change"; no notes at all.
+        std::fs::write(repo.path().join("a.txt"), "changed\n").unwrap();
+        let t = mk(&mut store);
+        update_task(&mut store, t.id, &done).unwrap();
+        let text = store.next_live_result(session.id).unwrap().unwrap().text;
+        assert!(text.contains("uncommitted path(s)"), "{text}");
+        assert!(text.ends_with("Verification: none recorded"), "{text}");
+
+        // A commit citing the task is named; the result beats notes and is cut.
+        let t = mk(&mut store);
+        let ok = Command::new("git")
+            .args([
+                "-C",
+                repo.path().to_str().unwrap(),
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+            ])
+            .args(["commit", "-qam", &format!("task {}: change a", t.id)])
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
+        store
+            .add_task_note(t.id, "Verify: ignored, result wins", None)
+            .unwrap();
+        let long = "word ".repeat(200);
+        update_task(
+            &mut store,
+            t.id,
+            &TaskPatch {
+                status: Some(Status::Done),
+                result: Some(Some(long)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let text = store.next_live_result(session.id).unwrap().unwrap().text;
+        assert!(text.contains("Code: commit "), "{text}");
+        let digest = text.split("Verification: ").nth(1).unwrap();
+        assert!(digest.starts_with("word word"), "{text}");
+        assert!(digest.ends_with('…') && digest.chars().count() <= LANDING_DIGEST_MAX);
     }
 }

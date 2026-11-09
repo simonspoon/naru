@@ -2791,8 +2791,8 @@ check_board_render() { # check_board_render <base> <label>
   *"<script>"*"naru:'board-key'"*"</script>"*"<script>"*"naru!=='board-theme'"*"board-ready"*"</script>") ;;
   *) fail "$label: the html body must end with the key relay then the theme relay script, got: $RELAY_TAIL" ;;
   esac
-  [ "$(grep -o '<script>' <<<"$RELAY_TAIL" | wc -l | tr -d ' ')" = "2" ] ||
-    fail "$label: exactly two relay scripts (key, theme)"
+  [ "$(grep -o '<script>' <<<"$RELAY_TAIL" | wc -l | tr -d ' ')" = "3" ] ||
+    fail "$label: exactly three relay scripts (key, view, theme)"
 
   board_headers "$base" "$R_SVG"
   [ "$(header_of content-type)" = "image/svg+xml; charset=utf-8" ] ||
@@ -4296,6 +4296,31 @@ run 0 "$MESA" live turns
 api 200 GET "/api/live"
 ! grep -q "RESULT-ONE" <<<"$BODY" || fail "a result never reaches GET /api/live"
 ok "live result: stored against the live session; listen hands it out once, before a waiting turn, as kind result; never a turn, never on the page"
+
+# Landing digest (naru task 2646): a close's result carries the code state
+# and a verification digest, so the voice need not `task show` it.
+LREPO="$TMP/landing-repo"
+mkdir -p "$LREPO"
+git -C "$LREPO" init -q -b trunk
+git -C "$LREPO" -c user.email=t@t -c user.name=t commit -q --allow-empty -m root
+LPROJ=$("$MESA" project create "live landing digest" --no-git --path "$LREPO" | jq -r .id)
+LT=$("$MESA" task create "$LPROJ" "a no-op landing" | jq -r .id)
+"$MESA" task note "$LT" "Verified: nothing to change, no app exists" >/dev/null
+run 0 env -u CLAUDE_CODE_SESSION_ID "$MESA" task update "$LT" --status done --no-artifact "no app exists"
+run 0 "$MESA" live listen --lease 1 --wait 0
+[ "$(jqs .kind)" = "result" ] || fail "a close lands as a result (got $STDOUT)"
+grep -q "^Task $LT done: a no-op landing\. Commit/artifact: none recorded at close\. Code: no code change\. Verification: Verified: nothing to change, no app exists$" <<<"$(jqs .text)" ||
+  fail "a no-op landing says no code change and carries the verify note (got $STDOUT)"
+LT2=$("$MESA" task create "$LPROJ" "a real landing" | jq -r .id)
+echo x >"$LREPO/f.txt"
+git -C "$LREPO" add f.txt
+git -C "$LREPO" -c user.email=t@t -c user.name=t commit -q -m "task $LT2: add f"
+LSHA=$(git -C "$LREPO" log -1 --format=%h)
+run 0 env -u CLAUDE_CODE_SESSION_ID "$MESA" task update "$LT2" --status done --result "f.txt added; checked by hand"
+run 0 "$MESA" live listen --lease 1 --wait 0
+grep -q "Commit/artifact: $LSHA\. Code: commit $LSHA\. Verification: f.txt added; checked by hand$" <<<"$(jqs .text)" ||
+  fail "a committed landing names the commit and the close's result (got $STDOUT)"
+ok "landing result: first sentence unchanged, then the code state (commit, or no code change) and a verification digest"
 
 run 1 "$MESA" live result "   "
 [ "$(jqe .error.code)" = "validation" ] || fail "a blank result: validation"
