@@ -1947,6 +1947,43 @@ loads the page before the oldest one loaded. Only "new board" stays live-only.
 `live board list` is unchanged (this conversation's boards); `keep` is
 unchanged. Ink reads and writes never required a live session.
 
+### Audio clips on a board (naru task 2645)
+
+An html board cannot play audio from anywhere: `RENDER_CSP` allows
+`media-src data:` only, and a `data:` URI of any real clip blows the 2 MiB body
+cap. `naru live board push --audio <PATH> [--label <TEXT>] [--audio …]` is the
+way. Each `--audio` is a wav, mp3 or m4a (`files::clip_mime`, extension only,
+never a sniff; `files::CLIP_MIMES`); each `--label` names the clip at its
+position (fewer labels than clips: the rest take their file names; more is
+`validation`). `--title` and `--say` work as for any push; `--audio` conflicts
+with the other sources, `--kind` and `--template`.
+
+`Store::add_live_clips_board` checks everything before writing (1 to
+`LIVE_BOARD_CLIPS_MAX` = 12 clips, each non-empty and at most
+`LIVE_BOARD_CLIP_MAX` = 32 MiB, a type in `CLIP_MIMES`, a label 1 to 200
+characters after trimming), then pushes an **ordinary `html` board**
+(`board::clips_html`: one large numbered, labelled `<audio controls>` per clip,
+the template CSS, no script) through `add_live_board`, and stores the bytes in
+`live_board_clips` (`board_id`, `position`, `label`, `content_type`, `data`
+BLOB; `ON DELETE CASCADE` with the board, so `clear` and a session delete take
+them). Should the clip insert fail, the board row is deleted again. The board's
+text (labels and title) is indexed like any html board, so `live memory search`
+finds it.
+
+`GET /api/live/boards/{id}/clips/{position}` (plain guard, read-only, the render
+route's posture) serves one clip: its recorded type, `inline`, `nosniff`,
+`Accept-Ranges: bytes`, and single-range `206`/`416` through
+`files::parse_byte_range` (read with SQL `substr`, never the whole blob for a
+range); `not_found` for a board or position without one. Each player's `src` is
+the relative `clips/<n>`, which resolves against the render URL to the board's
+own clip route. The render route gives a board **with clips** `RENDER_CSP_CLIPS`
+— `RENDER_CSP` with `'self'` added to `media-src` and nothing else (`'self'` is
+the URL's origin even inside the opaque-origin sandbox); every other board keeps
+`RENDER_CSP`. `repush` copies the clips with the body
+(`Store::copy_live_board_clips`), so the copy's relative players play its own.
+`keep` refuses a clips board (`validation`): an artifact or attachment would
+keep only players that play nothing.
+
 ### Finding and bringing back an old board (mesa task 1548)
 
 Boards are part of the live-memory archive: `Store::add_live_board` writes a
@@ -2295,14 +2332,14 @@ the group (with none live, `not_found` naming `mesa live start`).
 
 | Command | Args | Prints |
 | --- | --- | --- |
-| `live board push [BODY]…` | exactly one source: a trailing var-arg text body, `--file <PATH>`, `--image <PATH>` or `--workflow <ID\|NAME>`; plus `--template table\|cards\|flow` (the body or `--file` is JSON; conflicts with `--image`/`--workflow`/`--kind`), `--kind markdown\|html` (text bodies only), `--title <TEXT>`, `--say <TEXT>`, `--quiet` | the created `LiveBoard` |
+| `live board push [BODY]…` | exactly one source: a trailing var-arg text body, `--file <PATH>`, `--image <PATH>`, `--audio <PATH>` (repeatable, with `--label <TEXT>` per clip) or `--workflow <ID\|NAME>`; plus `--template table\|cards\|flow` (the body or `--file` is JSON; conflicts with `--image`/`--workflow`/`--kind`), `--kind markdown\|html` (text bodies only), `--title <TEXT>`, `--say <TEXT>`, `--quiet` | the created `LiveBoard` |
 | `live board show [ID]` (alias `get`) | `--quiet`; without an ID, the board that is showing | one `LiveBoard` |
 | `live board list` | `--limit <N>` (clamped to 1..=20) | a bare array of bodiless summaries, oldest first |
 | `live board clear` | `--quiet` | the summaries it destroyed |
 | `live board keep` | exactly one of `--project <ID\|NAME>` / `--task <ID>`; plus `--id <BOARD>`, `--name <NAME>`, `--quiet` | the created `Artifact` / `Attachment`, plus an `ink` key when `--task` keeps a board with ink |
 
 - **The source is a required `ArgGroup`**: exactly one of the body, `--file`,
-  `--image` and `--workflow`. None or two is `usage`, exit 2. `--kind` names one
+  `--image`, `--audio` (repeatable; "Audio clips on a board") and `--workflow`. None or two is `usage`, exit 2. `--kind` names one
   of the two *text* kinds and conflicts with `--image`/`--workflow`, whose own
   flag already said what the board is. `--file`'s extension picks the kind when
   `--kind` does not (`.html`/`.htm` is HTML, anything else is read as
@@ -2812,7 +2849,7 @@ flag is an unknown argument, exit 2, exactly as on `turns`.
 | `live notice permission` | `--quiet`; takes no `--lease` (not the agent's verb — the page's, mesa task 1157) | the notice `LiveTurn`, created or the existing one for this working span |
 | `live turns` | `--after <ID>`, `--limit <N>` (clamped to 1..=500) | a bare array of turns, oldest first |
 | `live look` | `--output <PATH>` (default: a temp file named for the session) | the `LiveShot`: `path`, `window_id`, `width`, `height` |
-| `live board push [BODY]…` | exactly one source (body, `--file`, `--image`, `--workflow`), `--template table\|cards\|flow` (JSON body or `--file`), `--kind`, `--title`, `--say` — put every flag **before** the body | the created `LiveBoard` |
+| `live board push [BODY]…` | exactly one source (body, `--file`, `--image`, `--audio` + `--label`, `--workflow`), `--template table\|cards\|flow` (JSON body or `--file`), `--kind`, `--title`, `--say` — put every flag **before** the body | the created `LiveBoard` |
 | `live board show [ID]` (alias `get`) | without an ID, the board that is showing | one `LiveBoard` |
 | `live board list` | `--limit <N>` (clamped to 1..=20) | a bare array of bodiless summaries, oldest first |
 | `live board clear` | — | the summaries it destroyed |

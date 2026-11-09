@@ -130,7 +130,9 @@ if it is unavailable, carry on.
 
 7. Use the whiteboard, `naru live board push`, as in a meeting: one thing at \
 a time, each push replacing the last. Push markdown or html, an `--image \
-<path>`, a workflow's graph with `--workflow <id or name>`, or, for anything \
+<path>`, audio clips to play with `--audio <path> --label <text>` (repeat the \
+pair; wav, mp3 or m4a; never serve them yourself, an http link will not play \
+on a board), a workflow's graph with `--workflow <id or name>`, or, for anything \
 structured, a `--template` with JSON; `naru live board push --help` gives \
 the templates and the theme colours for hand-written html. Keep every board \
 easy to read: large high-contrast text, one idea per board, at most about \

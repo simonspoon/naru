@@ -423,6 +423,29 @@ pub fn template_html(template: &str, input: &str) -> Result<String> {
     ))
 }
 
+/// The html of an audio-clips board (naru task 2645, `live board push
+/// --audio`): one large labelled player per clip, in order. Each `<audio>`
+/// loads `clips/<n>`, which resolves against the render route
+/// (`/api/live/boards/{id}/render`) to that board's own clip route, so a
+/// repushed copy, whose clips are copied with it, plays its own. Styled with
+/// [`TEMPLATE_CSS`] like the templates; no script; labels escaped.
+pub fn clips_html(labels: &[String]) -> String {
+    let mut body = String::from("<ol class=\"clips\">");
+    for (i, label) in labels.iter().enumerate() {
+        body.push_str(&format!(
+            "<li><span class=\"num\">{n}</span><div class=\"clip\"><h2>{label}</h2>\
+             <audio controls preload=\"metadata\" src=\"clips/{i}\"></audio></div></li>",
+            n = i + 1,
+            label = escape(label),
+        ));
+    }
+    body.push_str("</ol>");
+    format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\"><style>{TEMPLATE_CSS}</style></head>\
+         <body>{body}</body></html>"
+    )
+}
+
 fn template_shape(template: &str) -> &'static str {
     match template {
         "table" => r#"{"columns": ["A","B"], "rows": [["1","2"]]}"#,
@@ -896,7 +919,13 @@ cite::before{content:'\\2014 '}\
 .tree li{margin:8px 0}\
 .node{display:inline-block;padding:6px 12px;border-radius:10px;background:var(--surface);\
 box-shadow:0 0 0 1px var(--ring)}\
-.tree>li>.node{background:var(--accent);color:var(--bg);font-weight:600}";
+.tree>li>.node{background:var(--accent);color:var(--bg);font-weight:600}\
+.clips{list-style:none;margin:0;padding:0;display:grid;gap:12px}\
+.clips li{display:flex;gap:16px;align-items:center;background:var(--surface);\
+border-radius:12px;padding:16px 20px;box-shadow:0 0 0 1px var(--ring)}\
+.clips .num{flex:none;margin:0;width:34px;height:34px;font-size:16px}\
+.clip{flex:1;min-width:0}.clip h2{margin-bottom:10px;font-size:22px}\
+.clip audio{display:block;width:100%;height:48px}";
 
 #[cfg(test)]
 mod tests {
@@ -909,6 +938,20 @@ mod tests {
     fn html_text_keeps_a_bare_less_than_as_text() {
         assert_eq!(html_text("a 1 < 2 <b>b</b> c<3"), "a 1 < 2  b  c<3");
         assert_eq!(html_text("x <"), "x <");
+    }
+
+    #[test]
+    fn clips_html_has_one_escaped_player_per_clip_relative_to_the_board() {
+        let html = clips_html(&["Take <1>".into(), "B & C".into()]);
+        assert!(html.contains("<h2>Take &lt;1&gt;</h2>"), "{html}");
+        assert!(html.contains("<h2>B &amp; C</h2>"), "{html}");
+        assert!(html.contains("src=\"clips/0\"") && html.contains("src=\"clips/1\""));
+        assert!(!html.contains("clips/2") && !html.contains("<script"));
+        let text = search_text(LiveBoardKind::Html, None, &html).unwrap();
+        assert!(
+            text.contains("Take <1>") && text.contains("B & C"),
+            "{text}"
+        );
     }
 
     #[test]

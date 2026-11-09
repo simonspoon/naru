@@ -3910,6 +3910,12 @@ fn router(state: AppState) -> Router {
         // and the panel's close button is browser-side, exactly like the live
         // panel's own.
         .route("/api/live/boards/{id}/render", get(render_live_board))
+        // A clips board's audio (naru task 2645), the bytes its players load:
+        // same plain guard, read-only, the render route's posture.
+        .route(
+            "/api/live/boards/{id}/clips/{position}",
+            get(live_board_clip),
+        )
         // Looking up a past live session's whole whiteboard history (mesa
         // task 1448) — the CC session detail page's "Whiteboards" section
         // reads this to browse every board a conversation ever pushed, since
@@ -7511,6 +7517,16 @@ const RENDER_CSP: &str = "default-src 'none'; script-src 'unsafe-inline'; style-
      img-src data:; font-src data:; media-src data:; form-action 'none'; \
      base-uri 'none'; frame-ancestors 'self'; sandbox allow-scripts";
 
+/// [`RENDER_CSP`] for an html board that carries audio clips (naru task
+/// 2645): the same policy with `'self'` added to `media-src` only, so its
+/// players can load the board's own clip route (`clips/<n>`, same origin).
+/// `'self'` is the URL origin even in the opaque-origin sandbox; nothing else
+/// the board may fetch changes, and a board without clips keeps the plain
+/// policy.
+const RENDER_CSP_CLIPS: &str = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; \
+     img-src data:; font-src data:; media-src data: 'self'; form-action 'none'; \
+     base-uri 'none'; frame-ancestors 'self'; sandbox allow-scripts";
+
 /// Appended to an `html` live board's body by [`render_live_board`] (mesa task
 /// 1599). The board renders in an opaque-origin `sandbox allow-scripts`
 /// iframe, so its keydowns never reach the app's global shortcut listeners
@@ -7653,9 +7669,9 @@ async fn render_live_board(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> ApiResult<Response> {
-    let board = {
+    let (board, has_clips) = {
         let store = state.store.lock().unwrap();
-        store.get_live_board(id)?
+        (store.get_live_board(id)?, store.live_board_has_clips(id)?)
     };
     let filename = board::filename(&board);
     let mut csp = None;
@@ -7683,7 +7699,11 @@ async fn render_live_board(
             // document, so it needs no policy; the two that ARE documents get
             // the artifact CSP, and giving all three the same header keeps
             // one answer for "what does this route serve markup under".
-            csp = Some(RENDER_CSP);
+            csp = Some(if has_clips {
+                RENDER_CSP_CLIPS
+            } else {
+                RENDER_CSP
+            });
             let content_type = format!(
                 "{}; charset=utf-8",
                 kind.content_type()
@@ -7706,6 +7726,55 @@ async fn render_live_board(
         headers.insert(header::CONTENT_SECURITY_POLICY, header_value(csp)?);
     }
     Ok((StatusCode::OK, headers, bytes).into_response())
+}
+
+/// One audio clip of a clips board (naru task 2645): the bytes
+/// `live board push --audio` stored, under the content type recorded then
+/// (never a sniff), `inline`, `nosniff`, with `Accept-Ranges: bytes` and the
+/// single-range 206/416 answers [`raw_media`] gives, since a player seeks by
+/// range. Plain guard like [`render_live_board`]; `not_found` for a board or
+/// position without one.
+async fn live_board_clip(
+    State(state): State<AppState>,
+    Path((id, position)): Path<(i64, i64)>,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
+    let range_header = headers.get(header::RANGE).and_then(|v| v.to_str().ok());
+    let store = state.store.lock().unwrap();
+    let (content_type, total) = store.live_board_clip_meta(id, position)?;
+    let (status, content_range, bytes) = match files::parse_byte_range(range_header, total) {
+        files::ByteRange::Full => (
+            StatusCode::OK,
+            None,
+            store.live_board_clip_bytes(id, position, 0, total.saturating_sub(1))?,
+        ),
+        files::ByteRange::Unsatisfiable => (
+            StatusCode::RANGE_NOT_SATISFIABLE,
+            Some(format!("bytes */{total}")),
+            Vec::new(),
+        ),
+        files::ByteRange::Partial(a, b) => (
+            StatusCode::PARTIAL_CONTENT,
+            Some(format!("bytes {a}-{b}/{total}")),
+            store.live_board_clip_bytes(id, position, a, b)?,
+        ),
+    };
+    drop(store);
+    let mut out = HeaderMap::new();
+    out.insert(header::CONTENT_TYPE, header_value(&content_type)?);
+    out.insert(
+        header::CONTENT_DISPOSITION,
+        header_value(&disposition(
+            "inline",
+            &format!("board-{id}-clip-{position}"),
+        ))?,
+    );
+    out.insert(header::X_CONTENT_TYPE_OPTIONS, header_value("nosniff")?);
+    out.insert(header::ACCEPT_RANGES, header_value("bytes")?);
+    if let Some(cr) = content_range {
+        out.insert(header::CONTENT_RANGE, header_value(&cr)?);
+    }
+    Ok((status, out, bytes).into_response())
 }
 
 /// A live session's whole whiteboard history, oldest first (mesa task 1448,
@@ -21523,6 +21592,88 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             .unwrap();
         let noagent = raw_post(state, "127.0.0.1:0", "application/json", p).await;
         assert!(noagent.contains("\"code\":\"unavailable\""), "{noagent}");
+    }
+
+    /// A clips board (naru task 2645): its render widens `media-src` by
+    /// `'self'` and nothing else, a plain html board keeps [`RENDER_CSP`],
+    /// and the clip route serves the stored bytes with its recorded type,
+    /// whole or by range, 404 past the last clip.
+    #[tokio::test]
+    async fn a_clips_board_renders_with_self_media_and_serves_its_clips_by_range() {
+        let (_dir, state) = test_state();
+        let (clips, plain) = {
+            let mut store = state.store.lock().unwrap();
+            let session = store.start_live_session(None).unwrap();
+            let clips = store
+                .add_live_clips_board(
+                    session.id,
+                    Some("Takes"),
+                    &[
+                        ("A".into(), "audio/wav".into(), b"RIFF0123456789".to_vec()),
+                        ("B".into(), "audio/mpeg".into(), b"ID3xyz".to_vec()),
+                    ],
+                )
+                .unwrap();
+            let plain = store
+                .add_live_board(session.id, LiveBoardKind::Html, None, "<p>x</p>", None)
+                .unwrap();
+            (clips.id, plain.id)
+        };
+        let csp = |id| {
+            let state = state.clone();
+            async move {
+                let resp = render_live_board(State(state), Path(id)).await.unwrap();
+                resp.headers()[header::CONTENT_SECURITY_POLICY]
+                    .to_str()
+                    .unwrap()
+                    .to_string()
+            }
+        };
+        assert_eq!(csp(clips).await, RENDER_CSP_CLIPS);
+        assert_eq!(csp(plain).await, RENDER_CSP);
+        assert_eq!(
+            RENDER_CSP_CLIPS,
+            RENDER_CSP.replace("media-src data:", "media-src data: 'self'")
+        );
+
+        let get = |pos: i64, range: Option<&str>| {
+            let state = state.clone();
+            let mut headers = HeaderMap::new();
+            if let Some(r) = range {
+                headers.insert(header::RANGE, r.parse().unwrap());
+            }
+            async move { live_board_clip(State(state), Path((clips, pos)), headers).await }
+        };
+        let resp = get(0, None).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers()[header::CONTENT_TYPE], "audio/wav");
+        assert_eq!(resp.headers()[header::ACCEPT_RANGES], "bytes");
+        assert_eq!(resp.headers()[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], b"RIFF0123456789");
+
+        let resp = get(0, Some("bytes=4-7")).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(resp.headers()[header::CONTENT_RANGE], "bytes 4-7/14");
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], b"0123");
+
+        let resp = get(1, Some("bytes=99-")).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(resp.headers()[header::CONTENT_RANGE], "bytes */6");
+        let resp = get(1, None).await.unwrap();
+        assert_eq!(resp.headers()[header::CONTENT_TYPE], "audio/mpeg");
+
+        assert_eq!(
+            get(2, None).await.unwrap_err().status,
+            StatusCode::NOT_FOUND
+        );
+        let none = live_board_clip(State(state.clone()), Path((plain, 0)), HeaderMap::new()).await;
+        assert_eq!(none.unwrap_err().status, StatusCode::NOT_FOUND);
     }
 
     /// The test above connects from `127.0.0.1`, which is a **loopback**

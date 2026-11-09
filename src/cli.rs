@@ -4007,7 +4007,10 @@ enum LiveBoardCmd {
     /// Exactly one source, and the source decides the kind: a text BODY typed
     /// after `push` (markdown, or `--kind html`), `--file` (kind from the
     /// extension), `--image` (any file the inline-image allowlist accepts —
-    /// png, jpg, gif, webp, bmp, ico, svg), or `--workflow <ID|NAME>`, which
+    /// png, jpg, gif, webp, bmp, ico, svg), `--audio` (one or more wav, mp3 or
+    /// m4a clips, shown as a list of large labelled players that play in the
+    /// board; `--label` names each in order, else its file name; at most 12
+    /// clips of 32 MiB each), or `--workflow <ID|NAME>`, which
     /// renders that workflow's graph to an SVG SNAPSHOT: the picture is frozen
     /// as it was at the push, so a graph edited afterwards does not change
     /// what the person was shown. Each push replaces what is showing.
@@ -4040,6 +4043,7 @@ EXAMPLES
   mesa live board push --title Plan '## Plan' 'Three steps, in order.'
   mesa live board push --kind html --file /tmp/mockup.html --say \"Here is the mockup.\"
   mesa live board push --image /tmp/screenshot.png --title \"The overlap\"
+  mesa live board push --title \"Band names\" --audio /tmp/a.wav --label \"Take A\" --audio /tmp/b.mp3 --label \"Take B\"
   mesa live board push --workflow ambient --say \"This is the flow we discussed.\"
   mesa live board push --template table '{\"columns\":[\"Option\",\"Cost\"],\"rows\":[[\"A\",1],[\"B\",2]]}'
   mesa live board push --template cards '{\"cards\":[{\"title\":\"Fast\",\"body\":\"Ships today\",\"tag\":\"safe\"}]}'
@@ -4050,7 +4054,7 @@ EXAMPLES
   mesa live board push --template tree '{\"root\":{\"title\":\"Plan\",\"children\":[{\"title\":\"Step 1\"}]}}'
   mesa live board push --template stats '{\"stats\":[{\"label\":\"Tests\",\"value\":412,\"note\":\"all green\"}]}'
   mesa live board push --template callout '{\"text\":\"Ship it\",\"by\":\"Ada\",\"tone\":\"good\"}'")]
-    #[command(group(ArgGroup::new("source").required(true).args(["body", "file", "image", "workflow"])))]
+    #[command(group(ArgGroup::new("source").required(true).args(["body", "file", "image", "audio", "workflow"])))]
     Push {
         /// The board body as text (everything after `push`); quoting optional
         #[arg(num_args = 1.., trailing_var_arg = true)]
@@ -4064,6 +4068,14 @@ EXAMPLES
         /// Show an image file; its bytes are stored in the board itself
         #[arg(long, value_name = "PATH")]
         image: Option<String>,
+        /// An audio clip (wav, mp3 or m4a) to play on the board; repeat for
+        /// more. Its bytes are stored with the board
+        #[arg(long, value_name = "PATH")]
+        audio: Vec<String>,
+        /// The label of the clip at the same position as this `--audio`;
+        /// defaults to the file name
+        #[arg(long, value_name = "TEXT", requires = "audio")]
+        label: Vec<String>,
         /// Snapshot a workflow's graph as SVG, as it looks right now
         #[arg(long, value_name = "ID|NAME")]
         workflow: Option<String>,
@@ -4072,7 +4084,7 @@ EXAMPLES
             long,
             value_name = "KIND",
             value_parser = parse_text_board_kind,
-            conflicts_with_all = ["image", "workflow", "template"],
+            conflicts_with_all = ["image", "audio", "workflow", "template"],
         )]
         kind: Option<LiveBoardKind>,
         /// Render JSON as a themed html board: `table`, `cards`, `flow`, `checklist`, `compare`, `timeline`, `stats`, `callout` or `tree`
@@ -4090,7 +4102,7 @@ EXAMPLES
                 "callout",
                 "tree"
             ],
-            conflicts_with_all = ["image", "workflow", "kind"],
+            conflicts_with_all = ["image", "audio", "workflow", "kind"],
         )]
         template: Option<String>,
         /// Caption for the panel's head row (≤ 200 characters)
@@ -8663,6 +8675,8 @@ fn run_live_board(store: &mut Store, cmd: LiveBoardCmd) -> Result<()> {
             body,
             file,
             image,
+            audio,
+            label,
             workflow,
             kind,
             template,
@@ -8670,6 +8684,55 @@ fn run_live_board(store: &mut Store, cmd: LiveBoardCmd) -> Result<()> {
             say,
             quiet,
         } => {
+            if !audio.is_empty() {
+                // Audio clips (naru task 2645): each type from its extension
+                // through the clip allowlist, never a sniff; `Store` checks
+                // the rest before anything is written.
+                if label.len() > audio.len() {
+                    return Err(Error::Validation(format!(
+                        "{} --label values for {} --audio clips: each label names the \
+                         clip at its position",
+                        label.len(),
+                        audio.len()
+                    )));
+                }
+                let mut clips = Vec::with_capacity(audio.len());
+                for (i, path) in audio.iter().enumerate() {
+                    let content_type = files::clip_mime(path).ok_or_else(|| {
+                        Error::Validation(format!(
+                            "{path} is not a clip a board can play: the extension must be \
+                             wav, mp3 or m4a"
+                        ))
+                    })?;
+                    // Refused before the read, so an oversized file is never
+                    // loaded only for `Store` to reject it.
+                    let size = std::fs::metadata(path)
+                        .map_err(|e| Error::Validation(format!("could not read {path}: {e}")))?
+                        .len();
+                    if size > crate::core::LIVE_BOARD_CLIP_MAX as u64 {
+                        return Err(Error::Validation(format!(
+                            "{path} is {size} bytes; a clip may be at most \
+                             {}",
+                            crate::core::LIVE_BOARD_CLIP_MAX
+                        )));
+                    }
+                    let bytes = std::fs::read(path)
+                        .map_err(|e| Error::Validation(format!("could not read {path}: {e}")))?;
+                    let name = label.get(i).cloned().unwrap_or_else(|| {
+                        std::path::Path::new(path)
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| path.clone())
+                    });
+                    clips.push((name, content_type.to_string(), bytes));
+                }
+                let board = store.add_live_clips_board(session.id, title.as_deref(), &clips)?;
+                if let Some(say) = say {
+                    store.add_live_turn(session.id, LiveRole::Naru, &say, None, None)?;
+                }
+                print_live_board(&board, quiet);
+                return Ok(());
+            }
             // Exactly one source — clap's required ArgGroup has already
             // refused none and both, so this only has to say which it was.
             let (kind, content, content_type) = if let Some(name) = template {
@@ -8758,6 +8821,17 @@ fn run_live_board(store: &mut Store, cmd: LiveBoardCmd) -> Result<()> {
             quiet,
         } => {
             let board = resolve_live_board(store, &session, id)?;
+            // A clips board's players load from the board's own clip route,
+            // so a copy of its html alone would hold players that play
+            // nothing (naru task 2645).
+            if store.live_board_has_clips(board.id)? {
+                return Err(Error::Validation(format!(
+                    "live board {} plays audio clips stored with the board, and an artifact \
+                     or attachment would keep only its players; keep the audio files \
+                     themselves instead",
+                    board.id
+                )));
+            }
             let name = name.unwrap_or_else(|| board::filename(&board));
             // The person's ink on this board, if they drew on it (mesa task
             // 1353): the newest annotated PNG a turn carried. Kept beside the
@@ -8871,6 +8945,9 @@ fn run_live_board(store: &mut Store, cmd: LiveBoardCmd) -> Result<()> {
                 &old.body,
                 old.content_type.as_deref(),
             )?;
+            // A clips board's players name their clips relative to the board
+            // they sit on, so the copy takes the clips too (naru task 2645).
+            store.copy_live_board_clips(old.id, board.id)?;
             print_live_board(&board, quiet);
         }
     }

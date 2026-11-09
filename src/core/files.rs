@@ -215,6 +215,20 @@ pub fn media_mime(path: &str) -> Option<&'static str> {
     })
 }
 
+/// The audio a live board's clips may be (naru task 2645): wav, mp3 and m4a
+/// only — the part of [`media_mime`] the live page plays everywhere. Same
+/// posture: final lowercased extension, no sniff.
+pub fn clip_mime(path: &str) -> Option<&'static str> {
+    match extension_of(Path::new(path))?.as_str() {
+        "wav" | "mp3" | "m4a" => media_mime(path),
+        _ => None,
+    }
+}
+
+/// Every type [`clip_mime`] answers — what `Store::add_live_clips_board`
+/// checks a clip against.
+pub const CLIP_MIMES: &[&str] = &["audio/wav", "audio/mpeg", "audio/mp4"];
+
 /// Most bytes one `206` answers with, however much the range asked for: a
 /// player asking `bytes=0-` of a multi-GB video gets the first chunk and a
 /// truthful `Content-Range`, then asks again. Keeps a response's memory

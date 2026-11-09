@@ -1591,6 +1591,17 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE projects ADD COLUMN run_restart TEXT;
      ALTER TABLE projects ADD COLUMN run_dir TEXT;
      ALTER TABLE projects ADD COLUMN run_health TEXT;",
+    // Naru task 2645: an html board's audio clips, the bytes kept beside the
+    // board (like an image board's) and served same-origin by
+    // `GET /api/live/boards/{id}/clips/{position}`. Goes with its board.
+    "CREATE TABLE live_board_clips (
+        board_id     INTEGER NOT NULL REFERENCES live_boards(id) ON DELETE CASCADE,
+        position     INTEGER NOT NULL,
+        label        TEXT NOT NULL,
+        content_type TEXT NOT NULL,
+        data         BLOB NOT NULL,
+        PRIMARY KEY (board_id, position)
+    );",
 ];
 
 /// Selects full task rows including the derived `blocked` flag.
@@ -2038,6 +2049,15 @@ const LIVE_BOARD_SUMMARY_COLUMNS: &str = "id, session_id, kind, title, created_a
 /// reason: this is an agent-written document (or one image file) held in the
 /// database, not the attachments' arbitrary-binary case.
 pub const LIVE_BOARD_BODY_MAX: usize = 2 * 1024 * 1024;
+
+/// Largest single audio clip on a clips board (naru task 2645), in bytes:
+/// room for a few minutes of CD-quality wav, which the 2 MiB body cap could
+/// never hold as base64.
+pub const LIVE_BOARD_CLIP_MAX: usize = 32 * 1024 * 1024;
+
+/// Most clips one board carries (naru task 2645) — a board is something the
+/// person looks at, so a short list.
+pub const LIVE_BOARD_CLIPS_MAX: usize = 12;
 
 /// How many of a session's boards the live poll's own reads hand back, newest
 /// kept — [`Store::list_live_boards`] and `GET /api/live`'s bandwidth bound,
@@ -10760,6 +10780,145 @@ impl Store {
         )
     }
 
+    /// Pushes an audio-clips board (naru task 2645): an ordinary `html` board
+    /// ([`board::clips_html`], one labelled player per clip) whose clip bytes
+    /// sit in `live_board_clips` beside it, so the players load from the
+    /// same-origin clip route instead of a `data:` body the 2 MiB cap could
+    /// not hold. Each clip is `(label, content_type, bytes)`: the label is
+    /// trimmed, required and bounded like a title, the type one of
+    /// [`files::CLIP_MIMES`] (the caller maps the extension, never a sniff),
+    /// the bytes non-empty and at most [`LIVE_BOARD_CLIP_MAX`]; 1 to
+    /// [`LIVE_BOARD_CLIPS_MAX`] clips. Everything is checked before a row is
+    /// written; should storing the clips fail anyway, the board is deleted
+    /// again so no player is left pointing at nothing.
+    pub fn add_live_clips_board(
+        &mut self,
+        session_id: i64,
+        title: Option<&str>,
+        clips: &[(String, String, Vec<u8>)],
+    ) -> Result<LiveBoard> {
+        if clips.is_empty() || clips.len() > LIVE_BOARD_CLIPS_MAX {
+            return Err(Error::Validation(format!(
+                "a clips board carries 1 to {LIVE_BOARD_CLIPS_MAX} clips, not {}",
+                clips.len()
+            )));
+        }
+        let mut labels = Vec::with_capacity(clips.len());
+        for (i, (label, content_type, data)) in clips.iter().enumerate() {
+            let n = i + 1;
+            let label = label.trim();
+            if label.is_empty() || label.chars().count() > LIVE_BOARD_TITLE_MAX {
+                return Err(Error::Validation(format!(
+                    "clip {n}'s label must be 1 to {LIVE_BOARD_TITLE_MAX} characters"
+                )));
+            }
+            if !files::CLIP_MIMES.contains(&content_type.as_str()) {
+                return Err(Error::Validation(format!(
+                    "clip {n}'s type {content_type:?} is not one a board plays; it must be one \
+                     of {:?}",
+                    files::CLIP_MIMES
+                )));
+            }
+            if data.is_empty() || data.len() > LIVE_BOARD_CLIP_MAX {
+                return Err(Error::Validation(format!(
+                    "clip {n} must be 1 to {LIVE_BOARD_CLIP_MAX} bytes, not {}",
+                    data.len()
+                )));
+            }
+            labels.push(label.to_string());
+        }
+        let board = self.add_live_board(
+            session_id,
+            LiveBoardKind::Html,
+            title,
+            &board::clips_html(&labels),
+            None,
+        )?;
+        let stored = (|| -> Result<()> {
+            let tx = self.conn.transaction()?;
+            for (i, ((_, content_type, data), label)) in clips.iter().zip(&labels).enumerate() {
+                tx.execute(
+                    "INSERT INTO live_board_clips (board_id, position, label, content_type, data) \
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    (board.id, i as i64, label, content_type, data),
+                )?;
+            }
+            tx.commit()?;
+            Ok(())
+        })();
+        if let Err(e) = stored {
+            let _ = self
+                .conn
+                .execute("DELETE FROM live_boards WHERE id = ?1", [board.id]);
+            return Err(e);
+        }
+        Ok(board)
+    }
+
+    /// Copies one board's clips onto another (naru task 2645) — what `live
+    /// board repush` does after copying the body, whose players name their
+    /// clips relative to the board they sit on. A board with none copies
+    /// nothing.
+    pub fn copy_live_board_clips(&mut self, from: i64, to: i64) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO live_board_clips (board_id, position, label, content_type, data) \
+             SELECT ?2, position, label, content_type, data FROM live_board_clips \
+             WHERE board_id = ?1",
+            (from, to),
+        )?;
+        Ok(())
+    }
+
+    /// Whether a board carries clips — what decides that its render may load
+    /// same-origin media (naru task 2645).
+    pub fn live_board_has_clips(&self, board_id: i64) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM live_board_clips WHERE board_id = ?1)",
+            [board_id],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// One clip's content type and length in bytes, `not_found` for a board
+    /// or position that has none (naru task 2645).
+    pub fn live_board_clip_meta(&self, board_id: i64, position: i64) -> Result<(String, u64)> {
+        self.conn
+            .query_row(
+                "SELECT content_type, length(data) FROM live_board_clips \
+                 WHERE board_id = ?1 AND position = ?2",
+                (board_id, position),
+                |r| Ok((r.get(0)?, r.get::<_, i64>(1)? as u64)),
+            )
+            .optional()?
+            .ok_or_else(|| Error::NotFound(format!("live board {board_id} has no clip {position}")))
+    }
+
+    /// Bytes `start..=end` of one clip (inclusive; the caller clamps the
+    /// range to the clip), read with `substr` so a range request never loads
+    /// the whole blob.
+    pub fn live_board_clip_bytes(
+        &self,
+        board_id: i64,
+        position: i64,
+        start: u64,
+        end: u64,
+    ) -> Result<Vec<u8>> {
+        self.conn
+            .query_row(
+                "SELECT substr(data, ?3, ?4) FROM live_board_clips \
+                 WHERE board_id = ?1 AND position = ?2",
+                (
+                    board_id,
+                    position,
+                    start as i64 + 1,
+                    (end - start + 1) as i64,
+                ),
+                |r| r.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| Error::NotFound(format!("live board {board_id} has no clip {position}")))
+    }
+
     pub fn get_live_board(&self, id: i64) -> Result<LiveBoard> {
         self.conn
             .query_row(
@@ -18954,15 +19113,15 @@ mod tests {
         );
         assert_eq!(
             MIGRATIONS.len(),
-            105,
-            "a fresh db should report user_version 105"
+            106,
+            "a fresh db should report user_version 106"
         );
         let (store, _dir) = temp_store();
         let version: i64 = store
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 105);
+        assert_eq!(version, 106);
     }
 
     /// Naru task 2264: the migration that deletes the managed Task loop
@@ -19022,7 +19181,7 @@ mod tests {
             .conn
             // Undo what later migrations added, so they re-run cleanly.
             .execute_batch(&format!(
-                "ALTER TABLE workflow_edges DROP COLUMN kind; ALTER TABLE cc_messages DROP COLUMN cache_creation_1h_tokens; ALTER TABLE projects DROP COLUMN run_restart; ALTER TABLE projects DROP COLUMN run_dir; ALTER TABLE projects DROP COLUMN run_health; PRAGMA user_version = {DROP_LOOP}"
+                "ALTER TABLE workflow_edges DROP COLUMN kind; ALTER TABLE cc_messages DROP COLUMN cache_creation_1h_tokens; ALTER TABLE projects DROP COLUMN run_restart; ALTER TABLE projects DROP COLUMN run_dir; ALTER TABLE projects DROP COLUMN run_health; DROP TABLE live_board_clips; PRAGMA user_version = {DROP_LOOP}"
             ))
             .unwrap();
         drop(store);
@@ -19079,7 +19238,7 @@ mod tests {
         store
             .conn
             .execute_batch(
-                "ALTER TABLE projects DROP COLUMN run_restart; ALTER TABLE projects DROP COLUMN run_dir; ALTER TABLE projects DROP COLUMN run_health; ALTER TABLE cc_messages DROP COLUMN cache_creation_1h_tokens; DROP TABLE workflow_builtin_copies; DROP TABLE mark_skins; ALTER TABLE live_sessions DROP COLUMN listen_gen; DROP TABLE agent_questions; DROP TABLE custom_themes; DROP TABLE task_notes; ALTER TABLE live_sessions DROP COLUMN ambient_request_seq; ALTER TABLE live_sessions DROP COLUMN ambient_request; ALTER TABLE live_sessions DROP COLUMN host_seen_at; ALTER TABLE live_sessions DROP COLUMN host_ambient; ALTER TABLE live_notebook DROP COLUMN category; ALTER TABLE cc_messages DROP COLUMN cost_micro_usd; ALTER TABLE cc_sessions DROP COLUMN main_agent; ALTER TABLE live_boards DROP COLUMN pinned_at; DROP TABLE workflow_builtins; DROP TABLE workflow_revisions; DROP TABLE workflow_log; DROP TABLE workflow_gates; DROP TABLE workflow_runs; DROP TABLE workflow_edges; \
+                "DROP TABLE live_board_clips; ALTER TABLE projects DROP COLUMN run_restart; ALTER TABLE projects DROP COLUMN run_dir; ALTER TABLE projects DROP COLUMN run_health; ALTER TABLE cc_messages DROP COLUMN cache_creation_1h_tokens; DROP TABLE workflow_builtin_copies; DROP TABLE mark_skins; ALTER TABLE live_sessions DROP COLUMN listen_gen; DROP TABLE agent_questions; DROP TABLE custom_themes; DROP TABLE task_notes; ALTER TABLE live_sessions DROP COLUMN ambient_request_seq; ALTER TABLE live_sessions DROP COLUMN ambient_request; ALTER TABLE live_sessions DROP COLUMN host_seen_at; ALTER TABLE live_sessions DROP COLUMN host_ambient; ALTER TABLE live_notebook DROP COLUMN category; ALTER TABLE cc_messages DROP COLUMN cost_micro_usd; ALTER TABLE cc_sessions DROP COLUMN main_agent; ALTER TABLE live_boards DROP COLUMN pinned_at; DROP TABLE workflow_builtins; DROP TABLE workflow_revisions; DROP TABLE workflow_log; DROP TABLE workflow_gates; DROP TABLE workflow_runs; DROP TABLE workflow_edges; \
                  DROP TABLE workflow_nodes; DROP TABLE workflows; \
                  CREATE TABLE diagrams (id INTEGER PRIMARY KEY, title TEXT); \
                  INSERT INTO diagrams (title) VALUES ('stale'); \
@@ -20699,6 +20858,86 @@ mod tests {
             store.set_live_board_pinned(9999, true),
             Err(Error::NotFound(_))
         ));
+    }
+
+    /// Clips boards (naru task 2645): every rule checked before a row is
+    /// written, the clips stored in order beside an ordinary html board,
+    /// copied by `copy_live_board_clips`, and gone with their board.
+    #[test]
+    fn a_clips_board_stores_validated_clips_that_copy_and_cascade() {
+        let (mut store, _dir) = temp_store();
+        let session = store.start_live_session(None).unwrap();
+        let clip =
+            |label: &str, ty: &str, data: &[u8]| (label.to_string(), ty.to_string(), data.to_vec());
+        let before = store.list_live_boards_all(session.id).unwrap().len();
+        for bad in [
+            vec![],
+            vec![clip("  ", "audio/wav", b"x")],
+            vec![clip("A", "audio/ogg", b"x")],
+            vec![clip("A", "text/html", b"x")],
+            vec![clip("A", "audio/wav", b"")],
+            vec![clip("A", "audio/wav", b"x"); LIVE_BOARD_CLIPS_MAX + 1],
+        ] {
+            let err = store
+                .add_live_clips_board(session.id, None, &bad)
+                .unwrap_err();
+            assert!(matches!(err, Error::Validation(_)), "{err:?}");
+        }
+        let big = vec![0u8; LIVE_BOARD_CLIP_MAX + 1];
+        assert!(matches!(
+            store.add_live_clips_board(session.id, None, &[clip("A", "audio/wav", &big)]),
+            Err(Error::Validation(_))
+        ));
+        assert_eq!(
+            store.list_live_boards_all(session.id).unwrap().len(),
+            before
+        );
+
+        let board = store
+            .add_live_clips_board(
+                session.id,
+                Some("Takes"),
+                &[
+                    clip(" One ", "audio/wav", b"wavbytes"),
+                    clip("Two", "audio/mp4", b"m4a"),
+                ],
+            )
+            .unwrap();
+        assert_eq!(board.kind, LiveBoardKind::Html);
+        assert!(board.body.contains("<h2>One</h2>") && board.body.contains("clips/1"));
+        assert!(store.live_board_has_clips(board.id).unwrap());
+        assert_eq!(
+            store.live_board_clip_meta(board.id, 1).unwrap(),
+            ("audio/mp4".to_string(), 3)
+        );
+        assert_eq!(
+            store.live_board_clip_bytes(board.id, 0, 3, 5).unwrap(),
+            b"byt"
+        );
+        assert!(matches!(
+            store.live_board_clip_meta(board.id, 2),
+            Err(Error::NotFound(_))
+        ));
+
+        let copy = store
+            .add_live_board(
+                session.id,
+                board.kind,
+                board.title.as_deref(),
+                &board.body,
+                None,
+            )
+            .unwrap();
+        assert!(!store.live_board_has_clips(copy.id).unwrap());
+        store.copy_live_board_clips(board.id, copy.id).unwrap();
+        assert_eq!(
+            store.live_board_clip_bytes(copy.id, 1, 0, 2).unwrap(),
+            b"m4a"
+        );
+
+        store.clear_live_boards(session.id).unwrap();
+        assert!(!store.live_board_has_clips(board.id).unwrap());
+        assert!(!store.live_board_has_clips(copy.id).unwrap());
     }
 
     /// `clear` echoes what it destroyed — the delete-echo safety floor — and a
