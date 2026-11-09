@@ -1303,7 +1303,8 @@ someone edits it, and edited on `#/library` rather than in this file. This secti
   "live": {
     "auto-send-ms": 2000,
     "handoff-tokens": 150000,
-    "fragment-grace-ms": 2500
+    "fragment-grace-ms": 2500,
+    "voice-guard": false
   }
 }
 ```
@@ -1338,6 +1339,11 @@ punctuates a cut-off fragment as if finished ("Alright, so how can?"). Absent or
 whole number of milliseconds, 0..=30000, `0` turning the hold off; outside
 that is **422 `validation`**. It has no Settings editor yet — set it in the
 file or through `PUT /api/config/live`.
+
+`voice-guard` (naru task 2666) is this Naru instance's **live voice guard**
+switch, a bool, absent ⇒ off; anything else is **422 `validation`**. Settings
+> Voice writes it through `PUT /api/voice/guard` (`docs/voice-enrollment.md`).
+Beside this file Naru keeps `instance-id`, the instance's id, made once.
 
 `auto-send-ms` is this section's key:
 

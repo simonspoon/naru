@@ -17,9 +17,32 @@ export interface VoiceClip {
 export interface VoicePerson {
   id: number
   name: string
-  /** At most one person is "me". */
+  /** At most one person per Naru instance is "me". */
   owner: boolean
+  /**
+   * The Naru instance the person belongs to (naru task 2666); `null` for one
+   * from before instances, absent from a naru-audio older than them.
+   */
+  instance?: string | null
   clips: VoiceClip[]
+}
+
+/** This Naru's live voice guard switch and its instance id. */
+export interface VoiceGuard {
+  live: boolean
+  instance: string
+}
+
+/**
+ * This Naru's people, and the older ones naru-audio kept before each Naru had
+ * its own (`instance: null`). Serve has already left out other instances'
+ * people; a naru-audio too old to report `instance` has only "mine".
+ */
+export function splitPeople(people: VoicePerson[]): { mine: VoicePerson[]; older: VoicePerson[] } {
+  const mine: VoicePerson[] = []
+  const older: VoicePerson[] = []
+  for (const p of people) (p.instance === null ? older : mine).push(p)
+  return { mine, older }
 }
 
 export interface VoicePeople {
@@ -76,10 +99,25 @@ export function clipAudioUrl(personId: number, clipId: number): string {
   return `/api/voice/people/${personId}/clips/${clipId}/audio`
 }
 
+/**
+ * Whether naru-audio keeps voices per Naru instance: true once any person
+ * reports an `instance` key (even `null`), false when people exist but none
+ * does (a daemon older than naru task 2665), null with no people to tell.
+ */
+export function daemonHasInstances(people: VoicePerson[]): boolean | null {
+  if (people.length === 0) return null
+  return people.some((p) => 'instance' in p)
+}
+
+/** The tooltip on the live page's "voice guard" chip (naru task 2666). */
+export const GUARD_CHIP_TITLE =
+  'Voice guard on: live speech that is not you (2 s or longer) is dropped. Settings › Voice turns it off.'
+
 /** The note under the live guard switch. */
 export const GUARD_NOTE =
-  'When on, a live conversation drops speech that is not the person marked “me” — only ' +
-  'segments of 2 s or longer, and only once “me” has a clip. Ambient listening tags who spoke ' +
+  'When on, a live conversation on this Naru drops speech that is not the person marked “me” — ' +
+  'only segments of 2 s or longer, and only once “me” has a clip. The switch and “me” are this ' +
+  'Naru’s own: another Naru sharing naru-audio keeps its own. Ambient listening tags who spoke ' +
   'from the voiceprints either way, whatever this switch says.'
 
 /** Whether a host status ends a recording, so the list should be read again. */

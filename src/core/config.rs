@@ -3877,7 +3877,14 @@ const LIVE_KEYS: &[&str] = &[
     LIVE_AUTO_SEND_MS,
     LIVE_HANDOFF_TOKENS,
     LIVE_FRAGMENT_GRACE_MS,
+    LIVE_VOICE_GUARD,
 ];
+
+/// The config key holding this instance's live voice guard switch (naru task
+/// 2666, `docs/voice-enrollment.md`): a bool, off when absent. Naru sends it
+/// as `guard` on every live `start` frame, so the switch is this instance's,
+/// not the shared naru-audio library's.
+pub const LIVE_VOICE_GUARD: &str = "voice-guard";
 
 /// The config key holding how much longer the page waits, in milliseconds,
 /// before sending a recording that ends mid-sentence (naru task 2648).
@@ -3939,6 +3946,8 @@ struct LiveSection {
     handoff_tokens: Option<u32>,
     #[serde(default, rename = "fragment-grace-ms")]
     fragment_grace_ms: Option<u32>,
+    #[serde(default, rename = "voice-guard")]
+    voice_guard: Option<bool>,
 }
 
 fn read_live(path: &Path) -> Result<LiveSection, String> {
@@ -3986,6 +3995,105 @@ fn live_handoff_tokens_in(path: &Path) -> u32 {
         .and_then(|l| l.handoff_tokens)
         .map(|n| n.clamp(MIN_LIVE_HANDOFF_TOKENS, MAX_LIVE_HANDOFF_TOKENS))
         .unwrap_or(DEFAULT_LIVE_HANDOFF_TOKENS)
+}
+
+/// Whether this instance's live voice guard is on ([`LIVE_VOICE_GUARD`]):
+/// off when the file says nothing. Read on every live connection, so a
+/// change reaches the next session; a file that can't be read is `Err`.
+pub fn voice_guard() -> Result<bool, String> {
+    voice_guard_in(&config_file())
+}
+
+fn voice_guard_in(path: &Path) -> Result<bool, String> {
+    Ok(read_live(path)?.voice_guard.unwrap_or(false))
+}
+
+/// This Naru instance's stable id (naru task 2666): a v4 UUID generated the
+/// first time it is asked for and kept in `instance-id` beside the config
+/// file (`~/.naru/instance-id`; `NARU_CONFIG_FILE` gives a dev instance — and
+/// a test — its own), so it survives restarts and upgrades. When the config
+/// is a legacy single `~/.mesa` file, it is `~/.mesa.instance-id`. Naru sends
+/// it to naru-audio as `instance` so several Naru instances sharing one
+/// daemon each judge the live voice guard against their own owner. `Err`
+/// only when the file can be neither read nor made.
+pub fn instance_id() -> Result<String, String> {
+    let config = config_file();
+    let path = if config.file_name().is_some_and(|n| n == "config.json")
+        || crate::core::env::var("CONFIG_FILE").is_some()
+    {
+        config
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."))
+            .join("instance-id")
+    } else {
+        let mut file = config.into_os_string();
+        file.push(".instance-id");
+        PathBuf::from(file)
+    };
+    instance_id_in(&path)
+}
+
+fn instance_id_in(path: &Path) -> Result<String, String> {
+    use std::io::{Read, Write};
+    // `Ok(None)`: absent, or empty (a crash before the id reached the disk).
+    let read = |path: &Path| -> Result<Option<String>, String> {
+        match std::fs::read_to_string(path) {
+            Ok(text) => {
+                let id = text.trim();
+                if id.is_empty() {
+                    Ok(None)
+                } else if id.len() > 128 {
+                    Err(format!(
+                        "{} must hold one id of 1-128 characters",
+                        path.display()
+                    ))
+                } else {
+                    Ok(Some(id.to_string()))
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(format!("cannot read {}: {e}", path.display())),
+        }
+    };
+    if let Some(id) = read(path)? {
+        return Ok(id);
+    }
+    let mut bytes = [0u8; 16];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut bytes))
+        .map_err(|e| format!("cannot read /dev/urandom: {e}"))?;
+    let id = crate::core::runner::uuid_from_bytes(bytes);
+    if let Some(dir) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    }
+    // Written whole and synced to a temp file, then hard-linked into place: a
+    // reader never sees a half-written id, and two processes racing to make
+    // it agree on whichever linked first (`link` refuses an existing name).
+    // An empty file left by a crash is replaced instead (`rename`).
+    let mut tmp = path.as_os_str().to_os_string();
+    tmp.push(format!(".{id}.tmp"));
+    let tmp = PathBuf::from(tmp);
+    std::fs::File::create(&tmp)
+        .and_then(|mut f| {
+            f.write_all(format!("{id}\n").as_bytes())?;
+            f.sync_all()
+        })
+        .map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
+    let placed = if path.exists() {
+        std::fs::rename(&tmp, path)
+    } else {
+        std::fs::hard_link(&tmp, path)
+    };
+    let _ = std::fs::remove_file(&tmp);
+    match placed {
+        Ok(()) => Ok(id),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            read(path)?.ok_or_else(|| format!("{} vanished while being made", path.display()))
+        }
+        Err(e) => Err(format!("cannot create {}: {e}", path.display())),
+    }
 }
 
 /// Writes the `live` entries named in `updates` into the config file.
@@ -4078,6 +4186,12 @@ fn is_live_reset(value: &serde_json::Value) -> bool {
 /// number sent as a string — rather than coerced into something the person
 /// did not ask for.
 fn validate_live(key: &str, value: &serde_json::Value) -> Result<(), String> {
+    if key == LIVE_VOICE_GUARD {
+        return match value {
+            serde_json::Value::Bool(_) => Ok(()),
+            _ => Err(format!("{key} must be true or false, got {value}")),
+        };
+    }
     let (min, max, unit) = if key == LIVE_HANDOFF_TOKENS {
         (MIN_LIVE_HANDOFF_TOKENS, MAX_LIVE_HANDOFF_TOKENS, "tokens")
     } else if key == LIVE_FRAGMENT_GRACE_MS {
@@ -8554,6 +8668,29 @@ mod tests {
         value: Option<serde_json::Value>,
     ) -> HashMap<String, Option<serde_json::Value>> {
         HashMap::from([(key.to_string(), value)])
+    }
+
+    /// The voice guard switch (naru task 2666): off unconfigured, a bool
+    /// saved and read back, `null` restores off, a non-bool writes nothing.
+    #[test]
+    fn voice_guard_round_trips_and_refuses_a_non_bool() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        assert!(!voice_guard_in(&path).unwrap());
+        save_live_in(
+            &path,
+            &live_json(LIVE_VOICE_GUARD, Some(serde_json::json!(true))),
+        )
+        .unwrap();
+        assert!(voice_guard_in(&path).unwrap());
+        let before = std::fs::read(&path).unwrap();
+        for bad in [serde_json::json!("true"), serde_json::json!(1)] {
+            let err = save_live_in(&path, &live_json(LIVE_VOICE_GUARD, Some(bad))).unwrap_err();
+            assert!(matches!(err, SaveError::Validation(_)), "{err:?}");
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        save_live_in(&path, &live_json(LIVE_VOICE_GUARD, None)).unwrap();
+        assert!(!voice_guard_in(&path).unwrap());
     }
 
     /// The handoff threshold (mesa task 1606): 150000 unconfigured, a saved

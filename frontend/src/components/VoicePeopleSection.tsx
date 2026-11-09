@@ -2,8 +2,10 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   addVoiceClip,
   addVoicePerson,
+  copyVoicePerson,
   deleteVoiceClip,
   deleteVoicePerson,
+  getVoiceGuard,
   getVoicePeople,
   patchVoicePerson,
   setVoiceGuard,
@@ -47,6 +49,8 @@ import {
   type NativeAsk,
   GUARD_NOTE,
   sortPeople,
+  splitPeople,
+  daemonHasInstances,
   type VoicePerson,
 } from '../voicePeople'
 import { ConfirmDelete } from './ConfirmDelete'
@@ -492,13 +496,17 @@ function PersonRow({
 /**
  * Settings > Voice: the people voice library and the live voice guard switch
  * (naru task 2262, `docs/voice-enrollment.md`). The library is naru-audio's;
- * Naru relays it. Inside the Naru Mac app a clip is recorded by the app
+ * Naru relays it. The switch is this Naru instance's own setting (naru task
+ * 2666), and so are its people; older people from before instances can be
+ * copied onto this one. Inside the Naru Mac app a clip is recorded by the app
  * (`{type:'enroll', op:'start', person}` on the bridge, progress back through
  * `enrollStatus`); in a plain browser it is recorded here. Logic lives in
  * `voicePeople.ts` and `voiceEnroll.ts`.
  */
 export function VoicePeopleSection() {
   const { data, error, refetch } = useFetch(() => getVoicePeople(), 'voice-people')
+  const guardFetch = useFetch(() => getVoiceGuard(), 'voice-guard')
+  const [copying, setCopying] = useState<number | null>(null)
   const [name, setName] = useState('')
   const [problem, setProblem] = useState<string | null>(null)
   const [guard, setGuard] = useState<boolean | null>(null)
@@ -524,8 +532,10 @@ export function VoicePeopleSection() {
     [refetch],
   )
 
-  const people = data ? sortPeople(data.people) : []
-  const guardOn = guard ?? data?.live_guard ?? false
+  const { mine, older } = splitPeople(data ? data.people : [])
+  const people = sortPeople(mine)
+  const olderPeople = sortPeople(older)
+  const guardOn = guard ?? guardFetch.data?.live ?? false
   const newName = cleanName(name)
 
   const changed = useCallback(() => {
@@ -552,11 +562,26 @@ export function VoicePeopleSection() {
     setVoiceGuard(live).then(
       () => {
         setGuardBusy(false)
-        void refetch().finally(() => setGuard(null))
+        void guardFetch.refetch().finally(() => setGuard(null))
       },
       (e: unknown) => {
         setGuardBusy(false)
         setGuard(null)
+        setProblem(e instanceof Error ? e.message : String(e))
+      },
+    )
+  }
+
+  function copy(id: number) {
+    setCopying(id)
+    setProblem(null)
+    copyVoicePerson(id).then(
+      () => {
+        setCopying(null)
+        void changed()
+      },
+      (e: unknown) => {
+        setCopying(null)
         setProblem(e instanceof Error ? e.message : String(e))
       },
     )
@@ -608,6 +633,33 @@ export function VoicePeopleSection() {
             add
           </button>
         </div>
+        {olderPeople.length > 0 && (
+          <>
+            <h3>From before each Naru had its own voices</h3>
+            <p className="muted settings-command-blurb">
+              naru-audio kept these for every Naru. This Naru’s guard does not count them as you;
+              copy one to use its clips here. The original stays.
+            </p>
+            <ul className="voice-people">
+              {olderPeople.map((p) => (
+                <li key={p.id} className="voice-person">
+                  <div className="voice-person-head">
+                    <strong>{p.name}</strong>
+                    {p.owner && <span className="muted">was “me”</span>}
+                    <span className="muted">{clipCount(p)}</span>
+                    <button
+                      type="button"
+                      disabled={copying !== null}
+                      onClick={() => copy(p.id)}
+                    >
+                      {copying === p.id ? 'copying…' : 'copy to this Naru'}
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
       </section>
 
       <h2>Live voice guard</h2>
@@ -616,12 +668,24 @@ export function VoicePeopleSection() {
           <input
             type="checkbox"
             checked={guardOn}
-            disabled={!data || guardBusy}
+            disabled={!guardFetch.data || guardBusy}
             onChange={(e) => toggleGuard(e.target.checked)}
           />{' '}
           Drop live speech that is not me
         </label>
         <p className="muted settings-command-blurb">{GUARD_NOTE}</p>
+        {data && daemonHasInstances(data.people) === false && (
+          <p className="error">
+            This naru-audio is older than per-Naru voices, so this switch has no effect there: its
+            own switch (now {data.live_guard ? 'on' : 'off'}) applies. Update naru-audio.
+          </p>
+        )}
+        {guardFetch.error && <p className="error">{guardFetch.error}</p>}
+        {guardFetch.data && (
+          <p className="muted settings-command-blurb">
+            This Naru: <code>{guardFetch.data.instance}</code>
+          </p>
+        )}
       </section>
     </>
   )

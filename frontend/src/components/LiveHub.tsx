@@ -31,6 +31,7 @@ import {
   transcribeAudio,
   interruptLive,
   transcribeStatus,
+  getVoiceGuard,
 } from '../api'
 import { imageFilesFromClipboard } from '../clipboardFiles'
 import {
@@ -224,6 +225,7 @@ import type { LiveWindow } from '../types/LiveWindow'
 import type { TranscribeStatus } from '../types/TranscribeStatus'
 import { isNearBottom, newSince, ownTurnSince } from '../liveScroll'
 import { useFetch } from '../useFetch'
+import { GUARD_CHIP_TITLE } from '../voicePeople'
 import {
   ambientControl,
   ambientHostPresent,
@@ -847,6 +849,12 @@ export function LiveHub({
   )
   const session = data?.session ?? null
   const agentEnded = data?.agent_ended ?? null
+  // This Naru's live voice guard switch (naru task 2666), for the head's
+  // indicator; Settings > Voice flips it, so it is polled, slowly, and only
+  // while a conversation is on (the only time the chip shows).
+  const voiceGuard = useFetch(() => getVoiceGuard(), 'voice-guard', {
+    pollMs: session !== null ? 15_000 : undefined,
+  })
   // The poll coming back after failing is the server restarting — maybe at a
   // new build, so have `App` re-read `/api/version` (naru task 2656).
   const pollFailed = useRef(false)
@@ -5048,6 +5056,7 @@ export function LiveHub({
     },
     onToggleSpeech: toggleSpeechMuted,
     meta: session !== null ? headMeta(driverModel, data?.context_tokens) : '',
+    voiceGuard: session !== null && !!voiceGuard.data?.live,
     end: endButton
       ? {
           label: endButton.label,
@@ -5188,6 +5197,11 @@ export function LiveHub({
             micReady={recognizes}
           />
         </div>
+        {session !== null && voiceGuard.data?.live && (
+          <span className="live-head-guard" title={GUARD_CHIP_TITLE}>
+            voice guard
+          </span>
+        )}
         {session !== null && headMeta(driverModel, data?.context_tokens) !== '' && (
           <span className="live-head-ctx">
             {headMeta(driverModel, data?.context_tokens)}

@@ -9922,6 +9922,20 @@ body.live-panel-ratio-resizing .live-panel-divider {
   color: var(--muted);
 }
 
+/* This Naru's live voice guard is on (naru task 2666): small, but in the
+   strongest text colour on a bordered chip so it reads at a glance. */
+.live-head-guard {
+  flex: none;
+  padding: 1px 6px;
+  border: 1px solid var(--text-h);
+  border-radius: var(--r-sm);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.5px;
+  color: var(--text-h);
+  white-space: nowrap;
+}
+
 /* The status dot: green while a conversation is live (the span is only
    rendered then). */
 .live-head-ctx::before {

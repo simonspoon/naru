@@ -38,7 +38,7 @@ import type { ConfigSpeech } from './types/ConfigSpeech'
 import type { AddedVoice } from './types/AddedVoice'
 import type { ConfigListen } from './types/ConfigListen'
 import type { ConfigAmbient } from './types/ConfigAmbient'
-import type { VoiceClip, VoicePeople, VoicePerson } from './voicePeople'
+import type { VoiceClip, VoiceGuard, VoicePeople, VoicePerson } from './voicePeople'
 import type { AudioTestResult } from './types/AudioTestResult'
 import type { ConfigAudio } from './types/ConfigAudio'
 import type { ConfigAppearance } from './types/ConfigAppearance'
@@ -1778,8 +1778,26 @@ export function deleteVoiceClip(id: number, clip: number): Promise<{ deleted: bo
   })
 }
 
-export function setVoiceGuard(live: boolean): Promise<{ live: boolean }> {
+/**
+ * This Naru instance's live voice guard switch and its id (naru task 2666):
+ * Naru's own setting, sent to naru-audio on every live session.
+ */
+export function getVoiceGuard(): Promise<VoiceGuard> {
+  return request('/api/voice/guard')
+}
+
+export function setVoiceGuard(live: boolean): Promise<VoiceGuard> {
   return request('/api/voice/guard', jsonInit('PUT', { live }))
+}
+
+/**
+ * Copies a person from before instances onto this Naru: same name and "me"
+ * flag, every clip that kept its audio. The original stays.
+ */
+export function copyVoicePerson(
+  id: number,
+): Promise<{ person: VoicePerson; copied: number; skipped: number }> {
+  return request(`/api/voice/people/${id}/copy`, jsonInit('POST', {}))
 }
 
 /**

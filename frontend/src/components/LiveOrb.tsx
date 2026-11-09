@@ -18,6 +18,7 @@ import {
   usableHeight,
 } from '../liveOrb'
 import { isPhone, usePhoneTier } from '../phoneTier'
+import { GUARD_CHIP_TITLE } from '../voicePeople'
 import { NaruMark } from './NaruMark'
 
 /** How far the pie blooms past the body, px, and its ring radii in the
@@ -184,6 +185,9 @@ export type OrbProps = {
   /** The driver's model/context readout (`headMeta`), shown in the header
    *  (naru task 2310). Empty/absent = nothing shown. */
   meta?: string
+  /** This Naru's live voice guard is on (naru task 2666): a small chip in the
+   *  header. Absent/false = nothing shown. */
+  voiceGuard?: boolean
   /** The press that ends (or detaches from) the conversation, in the header
    *  since the docked chat panel lost its head (naru task 2310). Null/absent =
    *  not offered. */
@@ -340,6 +344,11 @@ export function OrbHeaderControls(p: OrbProps) {
       <span className="header-orb-mark">
         <NaruMark state={p.state} level={p.level} speechRms={p.speechRms} micReady={!p.micMuted} />
       </span>
+      {p.voiceGuard && (
+        <span className="live-head-guard" title={GUARD_CHIP_TITLE}>
+          voice guard
+        </span>
+      )}
       {p.meta && <span className="live-head-ctx">{p.meta}</span>}
       <div className="header-orb-ctrls">
         {p.micAvailable && (

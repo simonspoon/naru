@@ -12,6 +12,8 @@ import {
   type VoicePeople,
   nativeRowLine,
   sortPeople,
+  splitPeople,
+  daemonHasInstances,
   type VoiceClip,
   type VoicePerson,
 } from './voicePeople'
@@ -147,5 +149,30 @@ describe('a real naru-audio payload', () => {
   it('treats a zero or missing created_at as migrated', () => {
     expect(clipLine({ id: 1, created_at: 0, seconds: 3, has_audio: true })).toBe('migrated · 3.0 s')
     expect(clipLine({ id: 1, seconds: 3, has_audio: true })).toBe('migrated · 3.0 s')
+  })
+})
+
+describe('splitPeople', () => {
+  it('keeps this Naru\'s people apart from the ones from before instances', () => {
+    const mine = person({ id: 1, instance: 'mac-a' })
+    const older = person({ id: 2, instance: null, owner: true })
+    const { mine: m, older: o } = splitPeople([older, mine])
+    expect(m.map((p) => p.id)).toEqual([1])
+    expect(o.map((p) => p.id)).toEqual([2])
+  })
+
+  it('treats every person of a naru-audio with no instances as this Naru\'s', () => {
+    const { mine, older } = splitPeople([person({ id: 1 }), person({ id: 2, owner: true })])
+    expect(mine).toHaveLength(2)
+    expect(older).toHaveLength(0)
+  })
+})
+
+describe('daemonHasInstances', () => {
+  it('tells an old naru-audio from a new one by the instance key', () => {
+    expect(daemonHasInstances([])).toBeNull()
+    expect(daemonHasInstances([person()])).toBe(false)
+    expect(daemonHasInstances([person({ instance: null })])).toBe(true)
+    expect(daemonHasInstances([person(), person({ id: 2, instance: 'mac-a' })])).toBe(true)
   })
 })

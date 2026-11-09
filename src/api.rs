@@ -4331,6 +4331,7 @@ fn router(state: AppState) -> Router {
             "/api/voice/people/{id}",
             patch(voice_person_patch).delete(voice_person_delete),
         )
+        .route("/api/voice/people/{id}/copy", post(voice_person_copy))
         .route(
             "/api/voice/people/{id}/clips",
             post(voice_clip_add).layer(DefaultBodyLimit::max(TRANSCRIBE_BODY_LIMIT)),
@@ -8130,18 +8131,19 @@ fn with_hotwords(frame: &str, hotwords: Option<&str>) -> String {
 
 /// A live frame of type `kind` with the Settings values in `fields` filled
 /// in where the client named none — the voice and model of a `speak` frame
-/// (naru task 2221), the listen model of a `start` frame (naru task 2364). A
-/// client that sends its own, or a value that is not configured, is left
-/// alone; any other frame passes through byte-identical.
-fn with_defaults(frame: &str, kind: &str, fields: &[(&str, Option<&str>)]) -> String {
+/// (naru task 2221), the listen model of a `start` frame (naru task 2364), and
+/// the `start` frame's `instance` and `guard` (naru task 2666). A client that
+/// sends its own, or a value that is not configured, is left alone; any other
+/// frame passes through byte-identical.
+fn with_defaults(frame: &str, kind: &str, fields: &[(&str, Option<serde_json::Value>)]) -> String {
     match serde_json::from_str::<serde_json::Value>(frame) {
         Ok(serde_json::Value::Object(mut obj)) if obj.get("type") == Some(&json!(kind)) => {
             let mut changed = false;
-            for &(key, value) in fields {
+            for (key, value) in fields.iter() {
                 if let Some(value) = value
-                    && obj.get(key).is_none_or(|v| v.is_null())
+                    && obj.get(*key).is_none_or(|v| v.is_null())
                 {
-                    obj.insert(key.to_string(), json!(value));
+                    obj.insert(key.to_string(), value.clone());
                     changed = true;
                 }
             }
@@ -8208,16 +8210,26 @@ async fn proxy_listen(
                         })
                         .await
                         .unwrap_or_default();
-                        let fields = [("voice", voice.as_deref()), ("model", model.as_deref())];
+                        let fields = [("voice", voice.map(|v| json!(v))), ("model", model.map(|m| json!(m)))];
                         tungstenite::Message::Text(with_defaults(t.as_str(), "speak", &fields).into())
                     }
                     Some(Ok(Message::Text(t))) if path == audio::LIVE_PATH && t.as_str().contains("\"start\"") => {
                         // The Settings listen model (naru task 2364), which
-                        // the native client never names; fail open.
-                        let model = tokio::task::spawn_blocking(|| config::listen_model().ok().flatten())
-                            .await
-                            .unwrap_or_default();
-                        tungstenite::Message::Text(with_defaults(t.as_str(), "start", &[("model", model.as_deref())]).into())
+                        // the native client never names, and this instance's
+                        // id and voice guard switch (naru task 2666), so the
+                        // daemon judges against this instance's owner; each
+                        // is left out when it can't be read (no id is the
+                        // daemon's legacy owner, no guard its own switch).
+                        let fields = tokio::task::spawn_blocking(|| {
+                            [
+                                ("model", config::listen_model().ok().flatten().map(|m| json!(m))),
+                                ("instance", config::instance_id().ok().map(|i| json!(i))),
+                                ("guard", config::voice_guard().ok().map(|g| json!(g))),
+                            ]
+                        })
+                        .await
+                        .unwrap_or_default();
+                        tungstenite::Message::Text(with_defaults(t.as_str(), "start", &fields).into())
                     }
                     Some(Ok(Message::Text(t))) => tungstenite::Message::Text(with_hotwords(t.as_str(), hotwords.as_deref()).into()),
                     Some(Ok(Message::Binary(b))) => tungstenite::Message::Binary(b),
@@ -12549,6 +12561,11 @@ async fn voice_proxy(
         }
         return Ok(response);
     }
+    Err(voice_refusal(&answer))
+}
+
+/// [`voice_proxy`]'s error for a daemon answer that is not a 2xx.
+fn voice_refusal(answer: &audio::SpeakerAnswer) -> ApiError {
     let said = serde_json::from_slice::<serde_json::Value>(&answer.body)
         .ok()
         .and_then(|v| v["error"]["message"].as_str().map(str::to_string))
@@ -12559,11 +12576,11 @@ async fn voice_proxy(
         409 => (StatusCode::SERVICE_UNAVAILABLE, "unavailable"),
         _ => (StatusCode::BAD_GATEWAY, "unavailable"),
     };
-    Err(ApiError {
+    ApiError {
         status,
         code,
         message: format!("naru-audio: {said}"),
-    })
+    }
 }
 
 fn json_form(value: serde_json::Value) -> Option<(String, Vec<u8>)> {
@@ -12573,14 +12590,43 @@ fn json_form(value: serde_json::Value) -> Option<(String, Vec<u8>)> {
     ))
 }
 
-/// `GET /api/voice/people` — the voice library: `{model, live_guard, people}`.
+/// `GET /api/voice/people` — the voice library: `{model, live_guard, people}`,
+/// keeping only this instance's people and the ones with no instance (naru
+/// task 2666): another Naru instance's people are its own.
 async fn voice_people(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> ApiResult<Response> {
     let path = "/v1/audio/speaker/people".to_string();
-    voice_proxy(&state, &addr, &headers, false, "GET", path, None).await
+    let answer = voice_proxy(&state, &addr, &headers, false, "GET", path, None).await?;
+    let bytes = axum::body::to_bytes(answer.into_body(), usize::MAX)
+        .await
+        .map_err(|e| ApiError {
+            status: StatusCode::BAD_GATEWAY,
+            code: "unavailable",
+            message: format!("naru-audio: {e}"),
+        })?;
+    let instance = blocking(config::instance_id).await?.ok();
+    let library = serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|e| ApiError {
+        status: StatusCode::BAD_GATEWAY,
+        code: "unavailable",
+        message: format!("naru-audio: a voice library that is not JSON: {e}"),
+    })?;
+    Ok(Json(instance_people(library, instance.as_deref())).into_response())
+}
+
+/// The daemon's voice library minus the people of other Naru instances: a
+/// person is kept when their `instance` is `instance` or is absent/`null`
+/// (the legacy library, and every person of a daemon older than task 2665).
+fn instance_people(mut library: serde_json::Value, instance: Option<&str>) -> serde_json::Value {
+    if let Some(people) = library["people"].as_array_mut() {
+        people.retain(|p| match p.get("instance") {
+            None | Some(serde_json::Value::Null) => true,
+            Some(other) => Some(other.as_str()) == Some(instance),
+        });
+    }
+    library
 }
 
 /// `GET /api/live/ambient/log` (naru task 2375) — naru-audio's
@@ -12634,7 +12680,9 @@ async fn live_ambient_wake_check(
     .await
 }
 
-/// `POST /api/voice/people` — `{name, owner?}` makes a person.
+/// `POST /api/voice/people` — `{name, owner?}` makes a person of this
+/// instance (naru task 2666: the daemon gets this instance's id as
+/// `instance`; none when the id can't be read).
 async fn voice_person_add(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
@@ -12647,6 +12695,9 @@ async fn voice_person_add(
     let mut sent = json!({ "name": body.name });
     if let Some(owner) = body.owner {
         sent["owner"] = json!(owner);
+    }
+    if let Ok(instance) = blocking(config::instance_id).await? {
+        sent["instance"] = json!(instance);
     }
     let path = "/v1/audio/speaker/people".to_string();
     voice_proxy(
@@ -12690,6 +12741,141 @@ async fn voice_person_patch(
         json_form(sent),
     )
     .await
+}
+
+/// `POST /api/voice/people/{id}/copy` (naru task 2666) — copies a person of
+/// the library from before instances (`instance: null`) onto this instance:
+/// a new person of the same name with this instance's id (its `owner` flag
+/// only when this instance has no owner yet), and every clip that kept its
+/// audio uploaded again; a clip that fails deletes the new person again. The
+/// original stays.
+/// Answers `{person, copied, skipped}` (`skipped`: clips with no audio).
+/// A person that already has an instance, or a daemon too old to report
+/// one, is 422 `validation`. Gated like the other mutating voice routes.
+async fn voice_person_copy(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<u64>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    require_same_site_fetch(&headers)?;
+    let copied = tokio::task::spawn_blocking(move || copy_voice_person(id))
+        .await
+        .map_err(|e| ApiError {
+            status: StatusCode::BAD_GATEWAY,
+            code: "unavailable",
+            message: format!("copying the voice failed: {e}"),
+        })??;
+    Ok(Json(copied).into_response())
+}
+
+/// The blocking body of [`voice_person_copy`].
+fn copy_voice_person(id: u64) -> ApiResult<serde_json::Value> {
+    let fail = |status, code, message: String| ApiError {
+        status,
+        code,
+        message,
+    };
+    let unavailable = |message| fail(StatusCode::SERVICE_UNAVAILABLE, "unavailable", message);
+    let (url, instance) = (|| Ok::<_, String>((config::audio_url()?, config::instance_id()?)))()
+        .map_err(|m| fail(StatusCode::BAD_GATEWAY, "unavailable", m))?;
+    let call = |method, path: String, body| -> ApiResult<Vec<u8>> {
+        let answer = audio::speaker_request(&url, method, &path, body).map_err(unavailable)?;
+        if (200..300).contains(&answer.status) {
+            Ok(answer.body)
+        } else {
+            Err(voice_refusal(&answer))
+        }
+    };
+    let parse = |bytes: &[u8]| {
+        serde_json::from_slice::<serde_json::Value>(bytes).map_err(|e| {
+            fail(
+                StatusCode::BAD_GATEWAY,
+                "unavailable",
+                format!("naru-audio: an answer that is not JSON: {e}"),
+            )
+        })
+    };
+    let library = parse(&call("GET", "/v1/audio/speaker/people".to_string(), None)?)?;
+    let person = library["people"]
+        .as_array()
+        .and_then(|people| people.iter().find(|p| p["id"].as_u64() == Some(id)))
+        .ok_or_else(|| {
+            fail(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                format!("no person {id}"),
+            )
+        })?;
+    match person.get("instance") {
+        Some(serde_json::Value::Null) => {}
+        None => {
+            return Err(fail(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "validation",
+                "naru-audio is too old to keep voices per Naru instance; update it first"
+                    .to_string(),
+            ));
+        }
+        Some(_) => {
+            return Err(fail(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "validation",
+                format!("person {id} already belongs to a Naru instance"),
+            ));
+        }
+    }
+    // "me" carries over only when this instance has no "me" yet, so a copy
+    // never moves who the guard treats as the person.
+    let has_owner = library["people"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|p| p["instance"].as_str() == Some(instance.as_str()) && p["owner"] == true);
+    let made = json!({
+        "name": person["name"],
+        "owner": !has_owner && person["owner"].as_bool().unwrap_or(false),
+        "instance": instance,
+    });
+    let made = parse(&call(
+        "POST",
+        "/v1/audio/speaker/people".to_string(),
+        json_form(made),
+    )?)?;
+    let new_id = made["id"].as_u64().ok_or_else(|| {
+        fail(
+            StatusCode::BAD_GATEWAY,
+            "unavailable",
+            "naru-audio: a new person with no id".to_string(),
+        )
+    })?;
+    let (mut copied, mut skipped) = (0, 0);
+    for clip in person["clips"].as_array().into_iter().flatten() {
+        let Some(clip_id) = clip["id"].as_u64().filter(|_| clip["has_audio"] == true) else {
+            skipped += 1;
+            continue;
+        };
+        let moved = call(
+            "GET",
+            format!("/v1/audio/speaker/people/{id}/clips/{clip_id}/audio"),
+            None,
+        )
+        .and_then(|wav| {
+            call(
+                "POST",
+                format!("/v1/audio/speaker/people/{new_id}/clips"),
+                Some(audio::speaker_clip_form(&wav)),
+            )
+        });
+        if let Err(e) = moved {
+            // No half copy: the new person goes, so a retry starts clean.
+            let _ = call("DELETE", format!("/v1/audio/speaker/people/{new_id}"), None);
+            return Err(e);
+        }
+        copied += 1;
+    }
+    Ok(json!({ "person": made, "copied": copied, "skipped": skipped }))
 }
 
 /// `DELETE /api/voice/people/{id}` — removes the person and their clips.
@@ -12765,17 +12951,34 @@ async fn voice_clip_audio(
     voice_proxy(&state, &addr, &headers, true, "GET", path, None).await
 }
 
-/// `GET /api/voice/guard` — `{live: bool}`, the live voice guard switch.
+/// `GET /api/voice/guard` — `{live, instance}`: this instance's live voice
+/// guard switch (`live.voice-guard` in the config, naru task 2666; off when
+/// unset) and its id. Naru owns the switch, not naru-audio: it is sent as
+/// `guard` on every live `start` frame ([`proxy_listen`]), so two instances
+/// sharing one daemon each keep their own. Gated like the voice library.
 async fn voice_guard(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> ApiResult<Response> {
-    let path = "/v1/audio/speaker/guard".to_string();
-    voice_proxy(&state, &addr, &headers, false, "GET", path, None).await
+    require_agent_access(&state, &addr, &headers)?;
+    voice_guard_answer().await
 }
 
-/// `PUT /api/voice/guard` — `{live: bool}`.
+async fn voice_guard_answer() -> ApiResult<Response> {
+    let (live, instance) =
+        blocking(|| Ok::<_, String>((config::voice_guard()?, config::instance_id()?)))
+            .await?
+            .map_err(|message| ApiError {
+                status: StatusCode::BAD_GATEWAY,
+                code: "unavailable",
+                message,
+            })?;
+    Ok(Json(json!({ "live": live, "instance": instance })).into_response())
+}
+
+/// `PUT /api/voice/guard` — `{live: bool}` writes this instance's switch and
+/// answers as the `GET` does. naru-audio's library-wide switch is left alone.
 async fn voice_guard_set(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
@@ -12785,9 +12988,22 @@ async fn voice_guard_set(
     require_agent_access(&state, &addr, &headers)?;
     require_same_site_fetch(&headers)?;
     let Json(body) = body?;
-    let path = "/v1/audio/speaker/guard".to_string();
-    let sent = json_form(json!({ "live": body.live }));
-    voice_proxy(&state, &addr, &headers, false, "PUT", path, sent).await
+    let updates = HashMap::from([(config::LIVE_VOICE_GUARD.to_string(), Some(json!(body.live)))]);
+    blocking(move || config::save_live(&updates))
+        .await?
+        .map_err(|e| match e {
+            config::SaveError::Validation(message) => ApiError {
+                status: StatusCode::UNPROCESSABLE_ENTITY,
+                code: "validation",
+                message,
+            },
+            config::SaveError::Unavailable(message) => ApiError {
+                status: StatusCode::BAD_GATEWAY,
+                code: "unavailable",
+                message,
+            },
+        })?;
+    voice_guard_answer().await
 }
 
 /// `GET /api/config/speech/voices/{name}` — the cloned voice `name` as one
@@ -23773,7 +23989,14 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         assert_eq!(code, Some(1000));
         assert_eq!(*stub.paths.lock().unwrap(), vec!["/v1/audio/live"]);
         assert_eq!(*stub.origins.lock().unwrap(), vec![None]);
-        assert_eq!(*stub.starts.lock().unwrap(), vec![start], "no hotwords");
+        let mut sent = start.clone();
+        sent["instance"] = json!(config::instance_id().unwrap());
+        sent["guard"] = json!(false);
+        assert_eq!(
+            *stub.starts.lock().unwrap(),
+            vec![sent],
+            "no hotwords; only this instance's id and guard switch added"
+        );
     }
 
     /// A `speak` frame that names no voice or model gets the Settings ones
@@ -23843,6 +24066,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
     #[test]
     fn with_speech_touches_only_speak_frames_missing_a_field() {
         let with_speech = |frame: &str, voice: Option<&str>, model: Option<&str>| {
+            let (voice, model) = (voice.map(|v| json!(v)), model.map(|m| json!(m)));
             with_defaults(frame, "speak", &[("voice", voice), ("model", model)])
         };
         let (v, m) = (Some("Her3"), Some("m"));
@@ -23874,7 +24098,9 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
 
     #[test]
     fn with_defaults_fills_the_listen_model_into_a_start_frame() {
-        let fill = |frame: &str, model| with_defaults(frame, "start", &[("model", model)]);
+        let fill = |frame: &str, model: Option<&str>| {
+            with_defaults(frame, "start", &[("model", model.map(|m| json!(m)))])
+        };
         let out: serde_json::Value =
             serde_json::from_str(&fill(r#"{"type":"start","rate":16000}"#, Some("p"))).unwrap();
         assert_eq!(
@@ -23937,6 +24163,103 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             starts[2]["model"], "whisper-large-v3-turbo-mlx",
             "re-read per connection"
         );
+    }
+
+    /// A `start` frame gets this instance's id and voice guard switch (naru
+    /// task 2666), the switch read per connection; a client's own stays.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn audio_live_sends_the_instance_and_its_guard_on_the_start_frame() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message as Tm;
+        let _env = attachments::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let stub = stream_stub(false).await;
+        let cfg = tempfile::tempdir().unwrap();
+        std::fs::write(cfg.path().join("instance-id"), "mac-a\n").unwrap();
+        let write = |guard: Option<bool>| {
+            let mut config = json!({"audio": {"url": stub.url}});
+            if let Some(guard) = guard {
+                config["live"] = json!({ "voice-guard": guard });
+            }
+            std::fs::write(cfg.path().join("config.json"), config.to_string()).unwrap();
+        };
+        write(None);
+        let _config = listen_config(cfg.path(), None);
+        for (start, guard, n) in [
+            (json!({"type": "start"}), None, 1),
+            (json!({"type": "start"}), Some(true), 2),
+            (
+                json!({"type": "start", "guard": false, "instance": "own"}),
+                Some(true),
+                3,
+            ),
+        ] {
+            write(guard);
+            let (_dir, opened) = open_ws("/v1/audio/live", None, false, None).await;
+            let mut ws = opened.expect("the upgrade");
+            ws.send(Tm::Text(start.to_string().into())).await.unwrap();
+            let ready = ws.next().await.unwrap().unwrap();
+            assert!(ready.to_text().unwrap().contains("\"ready\""), "{ready:?}");
+            ws.send(Tm::Text(json!({"type": "stop"}).to_string().into()))
+                .await
+                .unwrap();
+            let _ = listen_until_close(&mut ws).await;
+            assert_eq!(stub.starts.lock().unwrap().len(), n);
+        }
+        let starts = stub.starts.lock().unwrap().clone();
+        assert_eq!(
+            (&starts[0]["instance"], &starts[0]["guard"]),
+            (&json!("mac-a"), &json!(false)),
+            "unset is off: {starts:?}"
+        );
+        assert_eq!(starts[1]["guard"], true, "re-read per connection");
+        assert_eq!(
+            (&starts[2]["instance"], &starts[2]["guard"]),
+            (&json!("own"), &json!(false)),
+            "a client's own fields stay"
+        );
+    }
+
+    /// The instance id is made once and read back unchanged by a restart (a
+    /// fresh read); an empty file (a crash mid-write) is made again.
+    #[test]
+    fn instance_id_is_made_once_and_stable() {
+        let _env = attachments::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let cfg = tempfile::tempdir().unwrap();
+        // SAFETY: ENV_LOCK is held.
+        unsafe {
+            std::env::remove_var("NARU_CONFIG_FILE");
+            std::env::set_var("MESA_CONFIG_FILE", cfg.path().join("config.json"));
+        }
+        let first = config::instance_id().unwrap();
+        assert_eq!(first.len(), 36, "{first}");
+        assert_eq!(first.as_bytes()[14], b'4', "a v4 uuid: {first}");
+        assert_eq!(config::instance_id().unwrap(), first);
+        let on_disk = std::fs::read_to_string(cfg.path().join("instance-id")).unwrap();
+        assert_eq!(on_disk, format!("{first}\n"));
+        let other = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("MESA_CONFIG_FILE", other.path().join("config.json")) };
+        assert_ne!(
+            config::instance_id().unwrap(),
+            first,
+            "another home, another id"
+        );
+        std::fs::write(other.path().join("instance-id"), "  \n").unwrap();
+        let remade = config::instance_id().unwrap();
+        assert_eq!(remade.len(), 36, "an empty file is made again: {remade}");
+        assert_eq!(config::instance_id().unwrap(), remade);
+        std::fs::write(other.path().join("instance-id"), "x".repeat(129)).unwrap();
+        assert!(config::instance_id().is_err(), "an oversize id is refused");
+        assert_eq!(
+            std::fs::read_dir(other.path()).unwrap().count(),
+            1,
+            "no temp left"
+        );
+        unsafe { std::env::remove_var("MESA_CONFIG_FILE") };
     }
 
     /// A foreign page is refused before the upgrade; the daemon never hears.
@@ -24010,11 +24333,23 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             .unwrap_or_else(|e| e.into_inner());
         let (_dir, state) = test_state();
         let cfg = tempfile::tempdir().unwrap();
+        std::fs::write(cfg.path().join("instance-id"), "inst-a\n").unwrap();
         let daemon = audio::stub::Stub::serve(0, |method, path| {
             match (method, path) {
             ("GET", "/v1/audio/speaker/people") => audio::stub::Reply::Json(
                 200,
-                r#"{"model":"m","live_guard":false,"people":[]}"#.to_string(),
+                r#"{"model":"m","live_guard":false,"people":[{"id":1,"name":"me","owner":true,"instance":null,"clips":[{"id":7,"has_audio":true},{"id":8,"has_audio":false}]},{"id":2,"instance":"inst-b"},{"id":3,"instance":"inst-a"},{"id":4}]}"#.to_string(),
+            ),
+            ("GET", "/v1/audio/speaker/people/1/clips/7/audio") => {
+                audio::stub::Reply::Json(200, "RIFF-seven".to_string())
+            }
+            ("POST", "/v1/audio/speaker/people/5/clips") => audio::stub::Reply::Json(
+                200,
+                r#"{"id":10,"created_at":"x","seconds":2.0,"has_audio":true}"#.to_string(),
+            ),
+            ("POST", "/v1/audio/speaker/people") => audio::stub::Reply::Json(
+                200,
+                r#"{"id":5,"name":"Me","owner":true,"instance":"inst-a","clips":[]}"#.to_string(),
             ),
             ("POST", "/v1/audio/speaker/people/3/clips") => audio::stub::Reply::Json(
                 400,
@@ -24029,9 +24364,6 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             }
             ("GET", "/v1/audio/speaker/people/4/clips/8/audio") => {
                 audio::stub::Reply::Json(404, r#"{"error":{"message":"no audio"}}"#.to_string())
-            }
-            ("PUT", "/v1/audio/speaker/guard") => {
-                audio::stub::Reply::Json(200, r#"{"live":true}"#.to_string())
             }
             ("GET", "/ambient/log") => audio::stub::Reply::Json(
                 200,
@@ -24086,7 +24418,82 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         let resp = voice_people(s, c, loopback_agent_headers()).await.unwrap();
         assert_eq!(
             json_body(resp).await,
-            json!({"model": "m", "live_guard": false, "people": []})
+            json!({"model": "m", "live_guard": false, "people": [
+                {"id": 1, "name": "me", "owner": true, "instance": null, "clips": [
+                    {"id": 7, "has_audio": true}, {"id": 8, "has_audio": false},
+                ]},
+                {"id": 3, "instance": "inst-a"}, {"id": 4},
+            ]}),
+            "another instance's people are left out"
+        );
+
+        // A new person is this instance's.
+        let (s, c) = ok();
+        let body = VoicePersonNew {
+            name: "Me".to_string(),
+            owner: Some(true),
+        };
+        let resp = voice_person_add(s, c, loopback_agent_headers(), Ok(Json(body)))
+            .await
+            .unwrap();
+        assert_eq!(json_body(resp).await["id"], 5);
+        let sent = daemon.requests.lock().unwrap().clone();
+        let made = sent
+            .iter()
+            .find(|r| r.starts_with("POST /v1/audio/speaker/people "))
+            .unwrap();
+        let made: serde_json::Value =
+            serde_json::from_str(made.split_once(' ').unwrap().1.split_once(' ').unwrap().1)
+                .unwrap();
+        assert_eq!(
+            made,
+            json!({"name": "Me", "owner": true, "instance": "inst-a"})
+        );
+
+        // Copying a person from before instances onto this one (naru task
+        // 2666): a new person with this id, every clip with audio uploaded.
+        let copy = |id: u64, headers| {
+            let (s, c) = ok();
+            voice_person_copy(s, c, headers, Path(id))
+        };
+        assert!(copy(1, hdrs(Some("evil.example:0"), None)).await.is_err());
+        let posts = daemon.count("POST /v1/audio/speaker/people ");
+        let resp = copy(1, loopback_agent_headers()).await.unwrap();
+        let said = json_body(resp).await;
+        assert_eq!(
+            (said["copied"].as_u64(), said["skipped"].as_u64()),
+            (Some(1), Some(1))
+        );
+        assert_eq!(said["person"]["id"], 5);
+        let sent = daemon.requests.lock().unwrap().clone();
+        let made = sent
+            .iter()
+            .filter(|r| r.starts_with("POST /v1/audio/speaker/people "))
+            .nth(posts)
+            .unwrap();
+        assert!(
+            made.ends_with(r#"{"instance":"inst-a","name":"me","owner":true}"#),
+            "{made}"
+        );
+        let upload = sent
+            .iter()
+            .find(|r| r.starts_with("POST /v1/audio/speaker/people/5/clips"))
+            .unwrap();
+        assert!(upload.contains("name=\"file\"") && upload.contains("RIFF-seven"));
+        for (id, status) in [
+            (2, StatusCode::UNPROCESSABLE_ENTITY),
+            (4, StatusCode::UNPROCESSABLE_ENTITY),
+            (99, StatusCode::NOT_FOUND),
+        ] {
+            let err = copy(id, loopback_agent_headers()).await.unwrap_err();
+            assert_eq!(err.status, status, "person {id}: {}", err.message);
+        }
+        assert!(
+            copy(4, loopback_agent_headers())
+                .await
+                .unwrap_err()
+                .message
+                .contains("too old")
         );
 
         // The ambient log (naru task 2375) is the same relay.
@@ -24168,14 +24575,29 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         )
         .await
         .unwrap();
-        assert_eq!(json_body(resp).await, json!({"live": true}));
-        assert!(
-            daemon
-                .requests
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|r| r == r#"PUT /v1/audio/speaker/guard {"live":true}"#)
+        assert_eq!(
+            json_body(resp).await,
+            json!({"live": true, "instance": "inst-a"})
+        );
+        assert_eq!(
+            daemon.count("PUT"),
+            0,
+            "naru-audio's own switch is left alone"
+        );
+        let file: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(cfg.path().join("config.json")).unwrap())
+                .unwrap();
+        assert_eq!(file["live"]["voice-guard"], true);
+        assert_eq!(
+            file["audio"]["url"],
+            daemon.url(),
+            "the rest of the file kept"
+        );
+        let (s, c) = ok();
+        let resp = voice_guard(s, c, loopback_agent_headers()).await.unwrap();
+        assert_eq!(
+            json_body(resp).await,
+            json!({"live": true, "instance": "inst-a"})
         );
 
         let url = daemon.url();
