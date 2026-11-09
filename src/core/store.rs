@@ -8689,6 +8689,26 @@ impl Store {
         Ok((self.get_live_session(id)?, turn))
     }
 
+    /// An ambient wake heard by the host's listener (naru task 2673), the
+    /// Mac app's old `goLive()`: when the open session's host reports
+    /// ambient on, ask it back to live and hand the wake's line to the agent
+    /// as the person's turn. Anything else — no session, no host, a host
+    /// already live or already asked back to live, a blank line — is ignored
+    /// (`None`), writing nothing. The turn is written first, so a refused
+    /// line (too long) leaves the host in ambient.
+    pub fn live_ambient_wake(&mut self, text: &str) -> Result<Option<LiveTurn>> {
+        let text = text.trim();
+        let Some(session) = self.current_live_session()? else {
+            return Ok(None);
+        };
+        if session.ambient != Some(true) || session.ambient_request.is_some() || text.is_empty() {
+            return Ok(None);
+        }
+        let turn = self.add_live_user_turn(session.id, text, None)?;
+        self.request_live_ambient(session.id, false, None)?;
+        Ok(Some(turn))
+    }
+
     /// Claims this browser as the session's **speaker** (mesa task 1267) — the
     /// one client that says mesa's turns out loud.
     ///

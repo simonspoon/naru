@@ -2500,6 +2500,20 @@ error. A plain browser never reports `ambient` itself, and with no audio
 server reporting the switch stays hidden. The ambient "can help" glow follows
 the same host test.
 
+**A wake goes live in naru serve** (naru task 2673): the Mac app used to act
+on the listener's wake itself (`goLive()`); without it, naru serve does. A
+`wake` POSTed to `/api/workflows/events` while the open session's host reports
+ambient on (`Store::live_ambient_wake`) writes `ambient_request: false` (the
+host leaves ambient on its next check-in, the page follows the reported
+`ambient`) and adds the wake's line, wake word included, as the person's turn,
+so the agent answers. No session, no host, a host already live (or already
+asked back to live, so a repeat wake before its check-in is one turn) or a
+blank line changes nothing, and a refused line (too long) is logged, never an
+error; the event's optional `instance` naming another Naru instance
+is ignored (absent counts as this one). The workflows the event triggers run
+either way. naru-audio builds a fresh ambient machine on every ambient-on, so
+the "already awake" state never outlives the switch back.
+
 **The Ambient view** (naru task 2375): `#/ambient` shows what the audio
 server's ambient listener heard — naru-audio's in-memory `GET /ambient/log`
 (2 minutes, 500 events) relayed by `GET /api/live/ambient/log` and polled every

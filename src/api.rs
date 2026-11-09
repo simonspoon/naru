@@ -5334,6 +5334,10 @@ struct WorkflowEventBody {
     speaker: String,
     #[serde(default)]
     text: String,
+    /// The Naru instance whose listener heard it (naru task 2673); a `wake`
+    /// naming another instance does not switch this one's live session.
+    #[serde(default)]
+    instance: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -5788,6 +5792,31 @@ async fn emit_workflow_event(
             .flatten()
             .map(|s| s.id);
         *state.live_offer.lock().unwrap() = Some((text, speaker, Instant::now(), open));
+    }
+    if body.event == "wake"
+        && body
+            .instance
+            .as_deref()
+            .is_none_or(|i| match config::instance_id() {
+                Ok(own) => own == i,
+                Err(e) => {
+                    eprintln!("naru: ambient wake ignored, no instance id: {e}");
+                    false
+                }
+            })
+    {
+        // The host's wake goes live (naru task 2673); a turn answers any
+        // offer, the store lock dropped first so two locks are never held.
+        // A failure is logged: the engine is real-time and the workflows
+        // still run.
+        let woke = state.store.lock().unwrap().live_ambient_wake(&body.text);
+        match woke {
+            Ok(Some(_)) => {
+                state.live_offer.lock().unwrap().take();
+            }
+            Ok(None) => {}
+            Err(e) => eprintln!("naru: ambient wake not handed to live: {e}"),
+        }
     }
     let ran = ids.clone();
     tokio::task::spawn_blocking(move || {
@@ -22081,6 +22110,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                 event: "can-help".into(),
                 speaker: "Simon".into(),
                 text: "how do I rebase?".into(),
+                instance: None,
             })),
         )
         .await
@@ -22119,6 +22149,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                         event: "can-help".into(),
                         speaker: "Simon".into(),
                         text,
+                        instance: None,
                     })),
                 )
                 .await
@@ -22955,6 +22986,99 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         let done = session();
         assert_eq!(done.ambient, Some(true));
         assert_eq!(done.ambient_request, None);
+    }
+
+    /// A host's ambient wake goes live (naru task 2673): with the host
+    /// reporting ambient on, it asks the host back to live and hands the wake
+    /// line to the agent as a user turn. A wake for another instance, one with
+    /// no session, and one once the host is live already change nothing.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn ambient_wake_goes_live_with_the_wake_line_as_a_turn() {
+        let _env = attachments::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let cfg = tempfile::tempdir().unwrap();
+        // SAFETY: ENV_LOCK is held.
+        unsafe {
+            std::env::remove_var("NARU_CONFIG_FILE");
+            std::env::set_var("MESA_CONFIG_FILE", cfg.path().join("config.json"));
+        }
+        let (_dir, state) = test_state();
+        let wake = |instance: Option<&str>| {
+            emit_workflow_event(
+                State(state.clone()),
+                ConnectInfo(loopback()),
+                loopback_agent_headers(),
+                Ok(Json(WorkflowEventBody {
+                    event: "wake".into(),
+                    speaker: "unknown".into(),
+                    text: "Samantha, what time is it?".into(),
+                    instance: instance.map(String::from),
+                })),
+            )
+        };
+        // No session: accepted, nothing to switch.
+        assert_eq!(wake(None).await.unwrap().status(), StatusCode::ACCEPTED);
+        let id = state
+            .store
+            .lock()
+            .unwrap()
+            .start_live_session(None)
+            .unwrap()
+            .id;
+        let turns = || {
+            state
+                .store
+                .lock()
+                .unwrap()
+                .list_live_turns(id, None, 100)
+                .unwrap()
+                .into_iter()
+                .filter(|t| t.role == LiveRole::User)
+                .map(|t| t.text)
+                .collect::<Vec<_>>()
+        };
+        let session = || state.store.lock().unwrap().get_live_session(id).unwrap();
+        let host = |on: bool| {
+            state
+                .store
+                .lock()
+                .unwrap()
+                .report_live_host_ambient(id, Some(on))
+                .unwrap()
+        };
+        host(true);
+        // Another instance's wake is ignored.
+        wake(Some("someone-else")).await.unwrap();
+        assert_eq!(session().ambient_request, None);
+        assert!(turns().is_empty());
+        // This instance's (named, or unnamed from an older naru-audio) goes live.
+        let own = config::instance_id().unwrap();
+        assert_eq!(
+            wake(Some(&own)).await.unwrap().status(),
+            StatusCode::ACCEPTED
+        );
+        let asked = session();
+        assert_eq!(asked.ambient_request, Some(false));
+        assert_eq!(turns(), ["Samantha, what time is it?"]);
+        // A second wake before the host's next check-in adds nothing.
+        wake(None).await.unwrap();
+        assert_eq!(session().ambient_request_seq, asked.ambient_request_seq);
+        assert_eq!(turns().len(), 1);
+        // The host obeys; a wake now (already live) adds nothing.
+        host(false);
+        assert_eq!(session().ambient_request, None);
+        wake(None).await.unwrap();
+        assert_eq!(session().ambient_request, None);
+        assert_eq!(turns().len(), 1);
+        // Back in ambient, the next wake goes live again.
+        host(true);
+        wake(None).await.unwrap();
+        assert_eq!(session().ambient_request, Some(false));
+        assert_eq!(turns().len(), 2);
+        // SAFETY: ENV_LOCK is held.
+        unsafe { std::env::remove_var("MESA_CONFIG_FILE") };
     }
 
     /// the context key is three-way (mesa task 1016): a page with nothing to
