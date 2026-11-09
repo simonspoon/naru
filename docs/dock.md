@@ -14,6 +14,7 @@ or Rust surface.
 | `terminal` | the global `TerminalPage` |
 | `workflows` | `WorkflowsPanel`: the workflows of the project the route is on, opened in place (a saved layout naming the old `diagrams` id is renamed on load) |
 | `watcher` | `AgentWatcherView` (the Agent watcher timeline; polls only while the panel is visible; starts closed in every preset) |
+| `audio` | `AudioAdminPanel` (naru task 2676): naru-audio's own admin page (`<daemon>/admin`) in an iframe; Naru rebuilds none of it. Starts closed in every preset; reopen it from the `⋯` menu. See "Audio panel" below |
 
 The live orb is **not** a panel (naru task 1798; it was one, `orb`, from mesa
 task 1574): see "The nav's orb" below. Each panel appears at most once. The phone tier (`usePhoneTier()`) is **not**
@@ -94,6 +95,24 @@ any panel; the host is `dock-host-panel`. The body is `CustomPanel`
 (`components/CustomPanel.tsx`): a permission prompt, then a sandboxed iframe —
 see [`custom-panels.md`](custom-panels.md). Moving the tab between groups
 reparents the iframe, which reloads it.
+
+## Audio panel (naru task 2676)
+
+The `audio` panel embeds naru-audio's admin UI (voice clones, samples,
+models — they live there, never in Naru). Nothing loads until the panel is
+first shown; then `POST /api/config/audio/test` with `null` probes the address
+in force (`NARU_AUDIO_URL`, else `audio.url`, else `http://127.0.0.1:7870`)
+from the server, and the panel (pure logic: `audioAdmin.ts`) either frames
+`<url>/admin` or shows why not with a **Retry**: the daemon is down or errors
+(the probe's sentence; this is also what a build without naru-audio, such as
+Windows, shows), or the address is loopback while the page is not (a `--lan`
+browser on another machine cannot reach the server's `127.0.0.1`). A missing
+model or an old daemon still frames, since its admin page loads. After the
+first load the frame stays, so a tab switch does not reload it; moving the
+panel to another group reloads it like any iframe. The probe runs once: a daemon that stops after the frame loaded shows the browser's own error page in the frame, and a changed `audio.url` is picked up only after a Naru reload. An `https` Naru framing an `http` daemon is blocked by the browser as mixed content. The admin page keeps its
+own theme setting (naru-audio's `naru-audio-theme`), which uses the same theme
+ids as Naru's. On a non-local `--lan` desktop the probe route is
+agent-grade and fails; the panel shows that error.
 
 ## Gestures
 

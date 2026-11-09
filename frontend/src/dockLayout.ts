@@ -30,7 +30,7 @@ import {
   type SplitNode,
 } from './lib/paneTree'
 
-export type BasePanelId = 'main' | 'chat' | 'board' | 'agents' | 'terminal' | 'workflows' | 'watcher'
+export type BasePanelId = 'main' | 'chat' | 'board' | 'agents' | 'terminal' | 'workflows' | 'watcher' | 'audio'
 
 /** One agent's detail opened from the Agents panel's card list (naru task
  *  2313): `agent:<pane id>`, the pane id being the one `AgentSidebar` mints
@@ -48,7 +48,7 @@ export type CustomPanelId = `panel:${string}`
 
 export type PanelId = BasePanelId | AgentPanelId | CustomPanelId
 
-export const PANEL_IDS: readonly BasePanelId[] = ['main', 'chat', 'board', 'agents', 'terminal', 'workflows', 'watcher']
+export const PANEL_IDS: readonly BasePanelId[] = ['main', 'chat', 'board', 'agents', 'terminal', 'workflows', 'watcher', 'audio']
 
 const LABELS: Record<BasePanelId, string> = {
   main: 'Main',
@@ -58,6 +58,7 @@ const LABELS: Record<BasePanelId, string> = {
   terminal: 'Terminal',
   workflows: 'Workflows',
   watcher: 'Agent watcher',
+  audio: 'Audio',
 }
 
 /** An agent tab's label is the one it was opened with (`DockState.labels`). */

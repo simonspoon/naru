@@ -4,6 +4,7 @@ import './App.css'
 import { getCcUsage, getNaruVersion, getTask, listInbox } from './api'
 import { AgentSidebar } from './components/AgentSidebar'
 import { CustomPanel } from './components/CustomPanel'
+import { AudioAdminPanel } from './components/AudioAdminPanel'
 import { CommandPalette } from './components/CommandPalette'
 import { WorkflowsPanel } from './components/WorkflowsPanel'
 import { DockBar, DockLayout } from './components/DockLayout'
@@ -254,6 +255,7 @@ function App() {
   const agentsVisible = isVisible(dock.state, 'agents', navCollapsed)
   const terminalVisible = isVisible(dock.state, 'terminal', navCollapsed)
   const watcherVisible = isVisible(dock.state, 'watcher', navCollapsed)
+  const audioVisible = isVisible(dock.state, 'audio', navCollapsed)
   const chatVisible = isVisible(dock.state, 'chat', navCollapsed)
   const boardVisible = isVisible(dock.state, 'board', navCollapsed)
   const agentTabs = useMemo(
@@ -1022,6 +1024,7 @@ function App() {
           createPortal(<WorkflowsPanel projectId={activeProjectId} />, hostFor('workflows'))}
         {docked &&
           createPortal(<AgentWatcherView active={watcherVisible} />, hostFor('watcher'))}
+        {docked && createPortal(<AudioAdminPanel active={audioVisible} />, hostFor('audio'))}
         {/* Single always-mounted owner of every open leaf's PtyTerminal
             (mesa task 399, .scratch/arch.md §6.2), across BOTH AgentSidebar
             and TerminalPage — a permanent sibling, never inside `page` or

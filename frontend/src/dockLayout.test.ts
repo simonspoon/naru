@@ -68,6 +68,7 @@ describe('presets', () => {
       consistent(s)
       expect(groupOf(s, 'workflows')).toBeNull()
       expect(groupOf(s, 'watcher')).toBeNull()
+      expect(groupOf(s, 'audio')).toBeNull()
       expect(groupOf(s, 'main')).not.toBeNull()
     }
   })
