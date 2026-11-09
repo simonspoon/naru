@@ -7,7 +7,8 @@
 #     and resumes), back up the db to <naru home>/backups/naru-pre-deploy-<ts>.db
 #   3 atomically swap the binary at $PREFIX/bin/naru, keeping naru.prev
 #   4 restart the server (NARU_DEPLOY_RESTART_CMD, e.g. a launchctl kickstart),
-#     then check health: /api/version reports the new version and a live
+#     then check health: /api/version reports the new version (and its commit, when
+#     both the binary and the server report one, naru task 2655) and a live
 #     conversation open before the swap is still live (same or new agent_id) and a
 #     `live say` round trip works
 #   5 healthy: resume the queue. Unhealthy: restore naru.prev and the db backup,
@@ -211,14 +212,16 @@ live_ok() {
 }
 # healthy <bin> <check live session 0|1>
 healthy() {
-  local bin="$1" live="$2" want end
+  local bin="$1" live="$2" want commit end
   want="$("$bin" --version 2>/dev/null | awk '{print $2}')"
+  # `naru <version> (<commit> <built_at>)`; empty for a binary older than task 2655.
+  commit="$("$bin" --version 2>/dev/null | sed -n 's/^naru [^ ]* (\([^ ]*\) [^ ]*)$/\1/p')"
   end=$(( $(date +%s) + HEALTH_TIMEOUT ))
   while :; do
     if [ -n "${NARU_DEPLOY_HEALTH_CMD:-}" ]; then
       NARU_DEPLOY_EXPECT="$want" bash -c "$NARU_DEPLOY_HEALTH_CMD" >>"$LOG" 2>&1 && ok=1 || ok=0
     else
-      curl -fsS --max-time 5 "http://127.0.0.1:$PORT/api/version" 2>>"$LOG" | jq -e --arg v "$want" '.version==$v' >/dev/null 2>&1 && ok=1 || ok=0
+      curl -fsS --max-time 5 "http://127.0.0.1:$PORT/api/version" 2>>"$LOG" | jq -e --arg v "$want" --arg c "$commit" '.version==$v and ($c=="" or (.commit // "")=="" or .commit==$c)' >/dev/null 2>&1 && ok=1 || ok=0
     fi
     if [ "$ok" -eq 1 ] && [ "$live" -eq 1 ]; then
       live_ok "$bin" || ok=0

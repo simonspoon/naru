@@ -2,7 +2,18 @@
 
 /**
  * `GET /api/version`: the running binary's own version
- * (`CARGO_PKG_VERSION`), shown under the wordmark in the app header.
+ * (`CARGO_PKG_VERSION`), shown under the wordmark in the app header, and
+ * the build stamp `build.rs` baked in (naru task 2655), so a script can
+ * prove the running server is the binary it just installed.
  * Unrelated to `ProjectVersion` above, which reads a *project's* manifest.
  */
-export type NaruVersion = { version: string, };
+export type NaruVersion = { version: string, 
+/**
+ * Short git commit, `-dirty` appended when tracked files differed from
+ * it at build time; `unknown` when built without git.
+ */
+commit: string, 
+/**
+ * UTC build time, RFC 3339 (`2026-11-09T05:40:00Z`).
+ */
+built_at: string, };

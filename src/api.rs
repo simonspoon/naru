@@ -9773,11 +9773,14 @@ async fn get_git_status(State(state): State<AppState>) -> ApiResult<Response> {
 }
 
 /// `GET /api/version` — the running binary's own version, for the header.
-/// Infallible and always 200: it is `CARGO_PKG_VERSION`, baked in at compile
-/// time. Not to be confused with `get_project_version` below.
+/// Infallible and always 200: `CARGO_PKG_VERSION` and `build.rs`'s commit and
+/// build time, all baked in at compile time. Not to be confused with
+/// `get_project_version` below.
 async fn get_naru_version() -> Json<NaruVersion> {
     Json(NaruVersion {
         version: env!("CARGO_PKG_VERSION").to_string(),
+        commit: env!("NARU_GIT_COMMIT").to_string(),
+        built_at: env!("NARU_BUILT_AT").to_string(),
     })
 }
 
@@ -23094,6 +23097,30 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                 header_str(&lan_resp, h),
             );
         }
+    }
+
+    // --- GET /api/version (naru task 2655) ---------------------------------
+
+    /// The version carries build.rs's stamp: a commit (a short sha, optionally
+    /// `-dirty`, or `unknown`) and an RFC 3339 UTC build time, both the same
+    /// strings `naru --version` prints.
+    #[tokio::test]
+    async fn version_route_reports_the_build_stamp() {
+        let Json(v) = get_naru_version().await;
+        assert_eq!(v.version, env!("CARGO_PKG_VERSION"));
+        let sha = v.commit.strip_suffix("-dirty").unwrap_or(&v.commit);
+        assert!(
+            sha == "unknown" || (sha.len() >= 7 && sha.chars().all(|c| c.is_ascii_hexdigit())),
+            "{}",
+            v.commit
+        );
+        let b = v.built_at.as_bytes();
+        assert!(
+            b.len() == 20 && b[4] == b'-' && b[10] == b'T' && b[19] == b'Z',
+            "{}",
+            v.built_at
+        );
+        assert!(v.built_at.as_str() > "2026-01-01");
     }
 
     // --- GET /api/system (mesa task 1093) --------------------------------

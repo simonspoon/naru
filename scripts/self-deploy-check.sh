@@ -40,7 +40,7 @@ case "\$1 \$2" in
   "run list") [ -e "$TMP/runs.json" ] && cat "$TMP/runs.json" || echo '[]' ;;
   "run stop") echo "\$*" >>"$TMP/runstop.log" ;;
   "live handoff") echo "\$*" >>"$TMP/handoff.log"; [ ! -e "$TMP/handoff_fail" ] ;;
-  "--version "*) echo "naru 9.9.9" ;;
+  "--version "*) cat "$TMP/newver" 2>/dev/null || echo "naru 9.9.9" ;;
   *) echo new ;;
 esac
 STUB
@@ -230,12 +230,13 @@ ok "missing restore target -> rollback_failed, no file created"
 
 # ---- health port: NARU_DEPLOY_PORT, else the config's serve.port, else 7770 ----------
 # Default /api/version check (no NARU_DEPLOY_HEALTH_CMD) against a stub server that
-# answers {"version":"9.9.9"}; ports are unlikely ones, checked free first.
+# answers {"version":"9.9.9"} (or $TMP/stub-body); ports are unlikely ones, checked free first.
 cat >"$TMP/stub.py" <<'PY'
-import http.server, sys
+import http.server, os, sys
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
-        b = b'{"version":"9.9.9"}'
+        f = sys.argv[2] + "/stub-body"
+        b = open(f, "rb").read() if os.path.exists(f) else b'{"version":"9.9.9"}'
         self.send_response(200); self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
     def log_message(self, *a): pass
@@ -243,7 +244,7 @@ http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
 PY
 P1=18877; P2=18878
 for p in $P1 $P2; do ! lsof -nP -iTCP:$p -sTCP:LISTEN >/dev/null 2>&1 || fail "port $p busy"; done
-python3 -I "$TMP/stub.py" $P1 & S1=$!
+python3 -I "$TMP/stub.py" $P1 "$TMP" & S1=$!
 trap 'kill $S1 2>/dev/null; rm -rf "$TMP"' EXIT
 sleep 1
 echo "{\"serve\":{\"port\":$P1}}" >"$TMP/port-config.json"
@@ -263,5 +264,20 @@ ok "no serve.port falls back to 7770"
 port_deploy "$TMP/port-config.json" NARU_DEPLOY_PORT=$P2
 [ "$rc" = 1 ] && [ "$(echo "$out" | jq -r .status)" != swapped ] || fail "NARU_DEPLOY_PORT should override the config ($rc): $out"
 ok "NARU_DEPLOY_PORT overrides the config"
+# Commit (naru task 2655): compared when both the binary and the server report one.
+echo "naru 9.9.9 (abc1234 2026-11-09T05:00:00Z)" >"$TMP/newver"
+echo '{"version":"9.9.9","commit":"abc1234","built_at":"2026-11-09T05:00:00Z"}' >"$TMP/stub-body"
+port_deploy "$TMP/port-config.json"
+[ "$rc" = 0 ] && [ "$(echo "$out" | jq -r .status)" = swapped ] || fail "matching commit not healthy ($rc): $out"
+ok "health check passes on a matching commit"
+echo '{"version":"9.9.9","commit":"def5678","built_at":"2026-11-08T05:00:00Z"}' >"$TMP/stub-body"
+port_deploy "$TMP/port-config.json"
+[ "$rc" = 1 ] && [ "$(echo "$out" | jq -r .status)" != swapped ] || fail "same version, other commit judged healthy ($rc): $out"
+ok "same version on another commit is unhealthy"
+echo '{"version":"9.9.9"}' >"$TMP/stub-body"
+port_deploy "$TMP/port-config.json"
+[ "$rc" = 0 ] && [ "$(echo "$out" | jq -r .status)" = swapped ] || fail "server without a commit should be judged on version ($rc): $out"
+ok "a server reporting no commit is judged on version alone"
+rm -f "$TMP/newver" "$TMP/stub-body"
 kill $S1 2>/dev/null || true
 echo "self-deploy-check: all passed"

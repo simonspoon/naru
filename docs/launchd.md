@@ -14,6 +14,12 @@ to restart, so a real redeploy rolls back. The `com.naru.serve` user agent fixes
   names the `launchctl bootstrap` command to run by hand (naru task 2164).
   `NARU_LAUNCHD_LABEL` replaces `com.naru.serve` (label and plist name) so the real-launchd
   path can be tested under a dev label without touching the real agent.
+- `scripts/install.sh --launchd` then proves the restart took (naru task 2655): it polls
+  `/api/version` on the serve port (`NARU_INSTALL_PORT`, else the config's `serve.port`,
+  else 7770) for up to `NARU_INSTALL_WAIT` seconds (default 30) until it reports the
+  installed binary's `version`, `commit` and `built_at` (the stamp `naru --version` prints
+  as `naru <version> (<commit> <built_at>)`), then prints `serving <version> <commit>`. A
+  server still on another build exits 1 naming both (`installed … serving …`).
 - It runs `$PREFIX/bin/naru serve` (default `~/.local/bin`), no flags, so the `serve` config
   section applies (its `port`, else 7770). `scripts/self-deploy.sh` health-checks that same
   port (`NARU_DEPLOY_PORT` overrides). `RunAtLoad` + `KeepAlive`.

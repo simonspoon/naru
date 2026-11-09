@@ -8,7 +8,8 @@ resumed) → db backup → atomic binary swap (`naru.prev` kept) → restart via
 `NARU_DEPLOY_RESTART_CMD` (unset on macOS with the `com.naru.serve` launchd agent installed
 = `launchctl kickstart -k gui/$(id -u)/com.naru.serve`, see `docs/launchd.md`; unset with no
 agent = cannot restart = unhealthy) → health
-(`/api/version` on `NARU_DEPLOY_PORT` reports the new version, or `NARU_DEPLOY_HEALTH_CMD`
+(`/api/version` on `NARU_DEPLOY_PORT` reports the new version, and its `commit` when both
+the new binary's `--version` and the server report one (naru task 2655), or `NARU_DEPLOY_HEALTH_CMD`
 with `NARU_DEPLOY_EXPECT`; and, if a live conversation was open before, it is
 still `live` (same or new `agent_id` — the agent process survives a restart) and a
 `live say` round trip reads back from `live turns`; `NARU_DEPLOY_LIVE_CHECK=0` skips) within

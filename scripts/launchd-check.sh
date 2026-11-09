@@ -178,5 +178,43 @@ NARU_LAUNCHD_LABEL=com.naru.dev-x scripts/launchd.sh uninstall >/dev/null
 [ ! -e "$NARU_LAUNCHD_DIR/com.naru.dev-x.plist" ] || fail "dev-label uninstall left the plist"
 ok "NARU_LAUNCHD_LABEL reaches the plist, its file name and every launchctl call"
 
+# install.sh --launchd's post-install check (naru task 2655): await_serving polls
+# /api/version until it reports the installed binary's commit + build time, bounded.
+sed -n '/^await_serving() {/,/^}/p' scripts/install.sh >"$TMP/await.fn"
+[ -s "$TMP/await.fn" ] || fail "install.sh has no await_serving()"
+cat >"$TMP/stub.py" <<'PY'
+import http.server, sys
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        b = open(sys.argv[2], "rb").read()
+        self.send_response(200); self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
+    def log_message(self, *a): pass
+http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
+PY
+SP=18879
+! lsof -nP -iTCP:$SP -sTCP:LISTEN >/dev/null 2>&1 || fail "port $SP busy"
+echo '{"version":"9.9.9","commit":"def5678","built_at":"2026-11-08T05:00:00Z"}' >"$TMP/body"
+python3 -I "$TMP/stub.py" $SP "$TMP/body" & SPID=$!
+trap 'kill $SPID 2>/dev/null; rm -rf "$TMP"' EXIT
+printf '#!/bin/sh\necho "naru 9.9.9 (abc1234 2026-11-09T05:00:00Z)"\n' >"$TMP/newnaru"; chmod +x "$TMP/newnaru"
+await() { ( . "$TMP/await.fn"; NARU_INSTALL_WAIT=${1:-2} await_serving "$TMP/newnaru" $SP ) 2>"$TMP/err"; }
+sleep 1
+start=$SECONDS
+if out=$(await 2); then fail "an old build on the port passed: $out"; fi
+grep -q "installed 9.9.9 abc1234 .*serving 9.9.9 def5678" "$TMP/err" || fail "mismatch does not name both builds: $(cat "$TMP/err")"
+[ $((SECONDS - start)) -le 6 ] || fail "mismatch wait unbounded: $((SECONDS - start))s"
+ok "an old build still serving fails, bounded, naming both commits"
+( sleep 2; echo '{"version":"9.9.9","commit":"abc1234","built_at":"2026-11-09T05:00:00Z"}' >"$TMP/body" ) &
+out=$(await 10) || fail "a restart that lands mid-wait failed: $(cat "$TMP/err")"
+[ "$out" = "serving 9.9.9 abc1234" ] || fail "match printed: $out"
+ok "the new build answering mid-wait prints serving <version> <commit>"
+echo '{"version":"9.9.9","commit":"abc1234","built_at":"2026-11-09T06:00:00Z"}' >"$TMP/body"
+if await 1 >/dev/null; then fail "same commit, other build time passed"; fi
+ok "a rebuild of the same commit is told apart by its build time"
+kill $SPID 2>/dev/null; wait $SPID 2>/dev/null || true
+if (. "$TMP/await.fn"; NARU_INSTALL_WAIT=1 await_serving "$TMP/nope" 1) 2>/dev/null; then fail "unreadable binary passed"; fi
+ok "an unreadable build stamp fails"
+
 if scripts/launchd.sh bogus 2>/dev/null; then fail "bad verb accepted"; fi
 echo "all launchd checks passed"
