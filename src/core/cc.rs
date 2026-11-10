@@ -3939,6 +3939,11 @@ pub struct RouterRow {
     pub source: Option<String>,
     pub router_latency_ms: Option<i64>,
     pub costly: bool,
+    /// The decision line's `experiment` / `rubric_model` (controlled
+    /// exploration, naru task 2688), passed through as logged: `null` on a
+    /// line that has none.
+    pub experiment: Option<bool>,
+    pub rubric_model: Option<String>,
     /// 1 for the task's first logged decision, 2 for its first re-dispatch...
     pub attempt: usize,
     /// The log's outcome line for this decision (`done`|`bounced`|`failed`).
@@ -4082,6 +4087,8 @@ pub fn router(
             source: text(Some(d.line), "source"),
             router_latency_ms: d.line["latency_ms"].as_i64(),
             costly: d.line["costly"] == true,
+            experiment: d.line["experiment"].as_bool(),
+            rubric_model: text(Some(d.line), "rubric_model"),
             attempt: d.attempt,
             outcome: text(outcome, "outcome"),
             outcome_status: text(outcome, "status"),
@@ -8434,7 +8441,7 @@ mod tests {
         let at = |d: i64| fmt_store_ts(t0 + d);
         let lines = vec![
             json!({"kind":"decision","time":at(0),"task_id":a,"project_id":p.id,"model":"sonnet","reason":"Task: one file","source":"haiku","latency_ms":2100}),
-            json!({"kind":"decision","time":at(1),"task_id":b,"project_id":p.id,"model":"fable","reason":"Task: large","source":"haiku","latency_ms":3000,"costly":true}),
+            json!({"kind":"decision","time":at(1),"task_id":b,"project_id":p.id,"model":"fable","reason":"Task: large","source":"haiku","latency_ms":3000,"costly":true,"experiment":false,"rubric_model":"fable"}),
             json!({"kind":"outcome","time":at(2),"task_id":b,"outcome":"failed","status":"todo","detail":"spawn failed"}),
             json!({"kind":"outcome","time":at(500),"task_id":a,"outcome":"bounced","status":"todo","detail":"session sa1 ended"}),
             json!({"kind":"decision","time":at(1000),"task_id":a,"project_id":p.id,"model":"sonnet","reason":"Task: one file","source":"reused","latency_ms":0}),
@@ -8465,6 +8472,11 @@ mod tests {
 
         // No session: decision and outcome only, session fields null.
         assert_eq!((b1.task_id, b1.costly), (b, true));
+        assert_eq!(
+            (b1.experiment, b1.rubric_model.as_deref()),
+            (Some(false), Some("fable"))
+        );
+        assert_eq!((a1.experiment, a1.rubric_model.clone()), (None, None));
         assert_eq!(b1.outcome.as_deref(), Some("failed"));
         assert!(b1.session_id.is_none() && b1.est_cost_usd.is_none() && b1.requeues.is_none());
 

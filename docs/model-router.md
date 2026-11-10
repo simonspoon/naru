@@ -233,6 +233,52 @@ until}`; `joined / decisions` is the join coverage. `since`/`until` bound the
   a separate task.
 - **Control group.** `fallback` and `disabled` decisions are rows too, flagged
   by `source`.
+- **Exploration arm.** `experiment` and `rubric_model` are the decision line's
+  own fields (controlled exploration, naru task 2688), passed through as
+  logged, `null` on a line without them (naru task 2689).
+
+## Router review (naru task 2689)
+
+A workflow, **"Router review"** (voice phrase "review the router", bound to
+the naru project), reads `naru cc router` and files a review a person acts on.
+**"Router review (weekly)"** runs it every Monday 08:00 UTC (a `schedule` entry
+and a `subworkflow` node: one workflow cannot have two entry nodes). Both are
+built by `scripts/router-review-workflow.sh [--project P] [--task N]
+[--replace]` in the db the environment points at. It **never edits** the
+rubric, this doc or the router prompt; it only proposes.
+
+The graph: trigger -> `cli` "Score router telemetry" (one jq pass over `naru
+cc router --since`) -> `branch` "Any flags?" (`Flags raised: [1-9]`).
+No flag: `output` inbox "File report". Flags: `file` reads this doc,
+`prompt` (opus, tool-less `claude -p` through the `workflow-prompt` template)
+drafts the before/after wording, `output` inbox "File report + proposals",
+then a `gate` (one day): approved files a **backlog** task in the project
+holding the report and proposals; rejected (or timed out) logs it to the
+`router-review` workflow log. Inbox items are `task-summary` (they wait for a
+person; the inbox watcher only triages change requests), filed against task
+2689.
+
+The report has four sections: (1) per model, experiments excluded: sessions,
+finished, first-try landing (of finished first attempts), bounced, failed,
+retried up (a finished non-done session whose task's next attempt ran a
+higher model), median cost and wall-clock; (2) exploration: per
+`rubric_model`, the experiment arm vs the control (rows on that model from a
+`haiku`/`reused` pick); (3) flags with their numbers; (4) proposals.
+
+Flags, each only at **n >= min_n** (else listed under "Not enough data"):
+a model's bounce rate over `max_bounce` (with the commonest words of the
+bounced reasons); an exploration arm landing within 10 points of its control;
+a model never picked in >= 3*min_n Haiku picks; a delegate brief (`Role
+<name>:` reason) for a sonnet role routed elsewhere; fallback share over
+`max_fallback`; Haiku-call latency p95 over `latency_budget_ms`; the newer
+half's median cost over 1.25x the older half's (min_n per half). Input words
+tune it: `min_n=6 days=28 since=YYYY-MM-DD max_bounce=0.30 max_fallback=0.10
+latency_budget_ms=10000` (the defaults).
+
+A `cli` node's `PATH` puts `~/.local/bin` first (`proc::bash`), so in a dev
+env the workflow scores with the **installed** `naru`, not a fresh build;
+an installed binary older than this task prints no `experiment` field, so
+experiment sessions count as ordinary picks and section 2 says there are none.
 
 ## Known limits
 
