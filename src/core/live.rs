@@ -3545,7 +3545,7 @@ question is a task, not a note",
         assert_eq!(
             quiet,
             prompt_with(
-                "Naru",
+                &crate::core::config::assistant_name(),
                 cur.id,
                 1,
                 crate::core::config::live_handoff_tokens(),

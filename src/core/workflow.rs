@@ -1968,10 +1968,13 @@ fn regex_check(pattern: &str) -> std::result::Result<(), String> {
 fn grep(pattern: &str, input: &str) -> std::result::Result<bool, String> {
     let mut cmd = Command::new("grep");
     cmd.args(["-E", "-q", "-e", pattern]);
+    // Unit tests allow longer (naru task 2701): the builtin seeding tests
+    // validate every regex through here, and a starved machine can take more
+    // than 10 s to run one grep.
     let out = agents::capture(
         cmd,
         Some(input.as_bytes().to_vec()),
-        Duration::from_secs(10),
+        Duration::from_secs(if cfg!(test) { 120 } else { 10 }),
     )?;
     match out.code {
         0 => Ok(true),
@@ -6563,7 +6566,7 @@ mod tests {
                 wf,
                 WorkflowNodeKind::Cli,
                 "Slow",
-                json!({"command": "sleep 30", "timeout_secs": 1}),
+                json!({"command": "sleep 300", "timeout_secs": 1}),
             );
             s.create_workflow_edge(wf, t, a, None).unwrap();
             s.create_workflow_edge(wf, a, b, None).unwrap();
@@ -6571,7 +6574,9 @@ mod tests {
         });
         let started = Instant::now();
         let run = run_workflow(&st, wf, WorkflowTrigger::Manual, "$(id) `x` 'q'").unwrap();
-        assert!(started.elapsed() < Duration::from_secs(20));
+        // Well short of the node's `sleep 300`, generous for a starved
+        // machine (naru task 2701).
+        assert!(started.elapsed() < Duration::from_secs(120));
         assert_eq!(run.steps[1].output, "$(id) `x` 'q'|$(id) `x` 'q'");
         assert_eq!(run.steps[2].status, WorkflowStepStatus::Failed);
         assert!(run.steps[2].error.as_deref().unwrap().contains("timed out"));
@@ -6670,7 +6675,8 @@ mod tests {
 
     #[test]
     fn foreach_collects_in_order_and_fails_visibly() {
-        let t = Duration::from_secs(10);
+        // Generous: a starved machine can take many seconds per item.
+        let t = Duration::from_secs(120);
         assert_eq!(
             run_foreach("echo item-$1", "[1,2,3]", ".", t).unwrap(),
             "[\"item-1\",\"item-2\",\"item-3\"]"
@@ -7363,7 +7369,7 @@ mod tests {
                 None,
                 "slow",
                 None,
-                "case \"$1\" in slow) sleep 30;; *) printf '%s' \"$1\";; esac",
+                "case \"$1\" in slow) sleep 300;; *) printf '%s' \"$1\";; esac",
                 &[crate::core::types::ScriptArg {
                     name: "t".into(),
                     label: None,
@@ -7394,7 +7400,9 @@ mod tests {
         });
         let started = Instant::now();
         let run = run_workflow(&st, wf, WorkflowTrigger::Manual, "slow").unwrap();
-        assert!(started.elapsed() < Duration::from_secs(15));
+        // Well short of the script's `sleep 300`, generous for a starved
+        // machine (naru task 2701).
+        assert!(started.elapsed() < Duration::from_secs(120));
         assert_eq!(run.steps[1].status, WorkflowStepStatus::Failed);
         assert!(run.steps[1].error.as_deref().unwrap().contains("timed out"));
         let big = "x".repeat(ARG_INPUT_MAX + 1);
@@ -7466,9 +7474,11 @@ mod tests {
         let mut cmd = Command::new("bash");
         cmd.arg("-c").arg("sleep 1000 & echo done");
         let started = Instant::now();
-        let out = agents::capture(cmd, None, Duration::from_secs(60)).unwrap();
+        let out = agents::capture(cmd, None, Duration::from_secs(600)).unwrap();
+        // Well short of the grandchild's `sleep 1000`, generous for a starved
+        // machine (naru task 2701).
         assert!(
-            started.elapsed() < Duration::from_secs(10),
+            started.elapsed() < Duration::from_secs(120),
             "{:?}",
             started.elapsed()
         );

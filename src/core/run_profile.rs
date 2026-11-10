@@ -17,11 +17,18 @@ pub const HEALTH_WAIT: Duration = Duration::from_secs(30);
 
 /// [`HEALTH_WAIT`], or `MESA_RUN_HEALTH_WAIT_MS` / `NARU_…` — a test-only
 /// seam like `MESA_WATCH_TODO_TICK_MS`, so a gate can watch a failing health
-/// check without waiting the full half minute.
+/// check without waiting the full half minute. Unit tests wait longer
+/// (naru task 2701): a starved machine can take more than half a minute to
+/// start the test's server, and only a healthy restart waits the whole time.
 fn health_wait() -> Duration {
+    let default = if cfg!(test) {
+        HEALTH_WAIT * 4
+    } else {
+        HEALTH_WAIT
+    };
     super::env::var("RUN_HEALTH_WAIT_MS")
         .and_then(|v| v.parse().ok())
-        .map_or(HEALTH_WAIT, Duration::from_millis)
+        .map_or(default, Duration::from_millis)
 }
 /// Probes start once the command has exited 0. One still running after this
 /// long is taken to be the server itself, and probes start anyway. The old

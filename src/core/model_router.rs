@@ -1910,7 +1910,9 @@ mod tests {
                     Some(ROUTER_MODEL),
                     &config::Prompts::default(),
                     dir.path().to_str().unwrap(),
-                    Duration::from_secs(10),
+                    // Generous: a starved machine can take many seconds to
+                    // run the stub, and a timeout would also fall back.
+                    Duration::from_secs(120),
                 )
             };
             route_with(

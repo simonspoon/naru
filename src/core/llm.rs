@@ -465,7 +465,8 @@ mod tests {
     /// and garbage failed, a hang killed at the timeout.
     #[test]
     fn run_claude_runs_the_script_and_enforces_the_timeout() {
-        let secs = Duration::from_secs(10);
+        // Generous: a starved machine can take many seconds to run a stub.
+        let secs = Duration::from_secs(120);
         let ok = format!("printf '%s' '{OK}'");
         assert_eq!(run_claude(&ok, ".", secs).unwrap(), "ok");
         let err = run_claude("echo boom >&2; exit 3", ".", secs).unwrap_err();

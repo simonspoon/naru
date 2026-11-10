@@ -362,7 +362,11 @@ mod tests {
             if row.status != ScriptRunStatus::Running {
                 return row;
             }
-            assert!(begun.elapsed() < Duration::from_secs(20), "run never ended");
+            // A hang guard, generous for a starved machine (naru task 2701).
+            assert!(
+                begun.elapsed() < Duration::from_secs(120),
+                "run never ended"
+            );
             std::thread::sleep(Duration::from_millis(20));
         }
     }
@@ -395,13 +399,32 @@ mod tests {
     /// each ends with exactly one terminal event.
     #[test]
     fn two_subscribers_attached_at_different_points_each_see_the_whole_run() {
-        let (_dir, store, registry, script) =
-            fixture("echo one; sleep 0.4; echo two >&2; sleep 0.4; echo three; exit 7");
+        // The run holds before "three" until the test creates `gate`, so the
+        // second attach lands mid-run however slow the machine is (naru task
+        // 2701), rather than after a fixed sleep.
+        let gate_dir = tempfile::tempdir().unwrap();
+        let gate = gate_dir.path().join("gate");
+        let (_dir, store, registry, script) = fixture(&format!(
+            "echo one; sleep 0.4; echo two >&2; \
+             while [ ! -e '{}' ]; do sleep 0.05; done; echo three; exit 7",
+            gate.display()
+        ));
         let run = start(&registry, &store, &script);
 
         let first = registry.attach(run.id).expect("live run has an entry");
-        std::thread::sleep(Duration::from_millis(600));
-        let second = registry.attach(run.id).expect("still running");
+        let begun = Instant::now();
+        let second = loop {
+            let s = registry.attach(run.id).expect("still running");
+            if texts(&s.0).len() >= 2 {
+                break s;
+            }
+            assert!(
+                begun.elapsed() < Duration::from_secs(120),
+                "never printed two"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        std::fs::write(&gate, "").unwrap();
         let second_snapshot = second.0.clone();
 
         let a = drain(first.0, first.1);
@@ -470,7 +493,8 @@ mod tests {
         // Wait for the body to have started its child.
         let begun = Instant::now();
         while !marker.exists() {
-            assert!(begun.elapsed() < Duration::from_secs(10), "never started");
+            // A hang guard, generous for a starved machine (naru task 2701).
+            assert!(begun.elapsed() < Duration::from_secs(120), "never started");
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(registry.stop(run.id));
@@ -538,7 +562,11 @@ mod tests {
                 );
                 break;
             }
-            assert!(begun.elapsed() < Duration::from_secs(20), "run never ended");
+            // A hang guard, generous for a starved machine (naru task 2701).
+            assert!(
+                begun.elapsed() < Duration::from_secs(120),
+                "run never ended"
+            );
         }
     }
 

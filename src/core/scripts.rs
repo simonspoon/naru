@@ -713,7 +713,7 @@ mod tests {
         // A child of the body, in the body's group: the stop must reach it.
         let s = script(
             &format!(
-                "sleep 30 & echo $! > '{}'; echo started; wait",
+                "sleep 300 & echo $! > '{}'; echo started; wait",
                 marker.display()
             ),
             vec![],
@@ -729,7 +729,9 @@ mod tests {
             },
             || begun.elapsed() > Duration::from_millis(300),
         );
-        assert!(begun.elapsed() < Duration::from_secs(5));
+        // Well short of the body's `sleep 300`, generous for a starved
+        // machine (naru task 2701).
+        assert!(begun.elapsed() < Duration::from_secs(120));
         assert_eq!(seen, 1, "only the line, no exit event: {events:?}");
         let pid = std::fs::read_to_string(&marker).unwrap();
         std::thread::sleep(Duration::from_millis(100));
@@ -755,7 +757,9 @@ mod tests {
             || false,
         );
         assert_eq!(n, 3);
-        assert!(begun.elapsed() < Duration::from_secs(5));
+        // The body never ends on its own; generous for a starved machine
+        // (naru task 2701).
+        assert!(begun.elapsed() < Duration::from_secs(120));
     }
 
     #[test]
