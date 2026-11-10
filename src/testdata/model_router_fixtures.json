@@ -123,5 +123,45 @@
     "text": "Just format the spawn code, then also restructure the whole queue-watcher spawn machinery into a new module: this is a big and risky change to how every session starts, but start with the formatting.",
     "expected": "fable",
     "ambiguous": true
+  },
+  {
+    "text": "Summarize these logs: the last 500 lines of ~/.naru/logs/model-router.log. Report how many decisions went to each model and list any fallback reasons. Read-only, nothing to change.",
+    "expected": "haiku",
+    "ambiguous": false
+  },
+  {
+    "text": "Rename the local variable `cnt` to `count` across src/core/alarm.rs. A pure mechanical rename in that one file, no logic change. Check: cargo build is clean.",
+    "expected": "haiku",
+    "ambiguous": false
+  },
+  {
+    "text": "List the tasks tagged `audio` in the naru project and put their ids and names in the task result. Read-only.",
+    "expected": "haiku",
+    "ambiguous": false
+  },
+  {
+    "text": "Classify inbox item 412 as a bug report, a feature request or a question, and tag it accordingly with `naru inbox`. No code changes.",
+    "expected": "haiku",
+    "ambiguous": false
+  },
+  {
+    "text": "Design the architecture for a plugin system in Naru: how third-party panels are discovered, sandboxed, versioned and given access to the store. Produce a design document with the trade-offs of each option; no code yet.",
+    "expected": "fable",
+    "ambiguous": false
+  },
+  {
+    "text": "Large migration across the repo: move every Store method, the migrations runner and all tests from rusqlite to an async database layer. Touches every module in the crate; stage it and keep the suite green at each stage.",
+    "expected": "fable",
+    "ambiguous": false
+  },
+  {
+    "text": "Deep research and a written analysis: survey how the main local speech-to-text engines handle streaming, diarization and wake words, measure what the papers and docs claim, and write an analysis with a recommendation for Naru.",
+    "expected": "fable",
+    "ambiguous": false
+  },
+  {
+    "text": "Orchestrate many subagents over a long unattended run: audit all 50 docs/*.md files against the code, one subagent per doc, fix every drift found, and report per doc. Expect it to run overnight.",
+    "expected": "fable",
+    "ambiguous": false
   }
 ]

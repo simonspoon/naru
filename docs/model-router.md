@@ -34,21 +34,43 @@ justify a smaller model). This table is in the router prompt verbatim:
 
 | Signals in the task text | Model |
 |---|---|
-| Read-only or mechanical: summarize/read logs/search/list/tag/classify/extract, rename, format, docs-only or comment-only edit, no code logic change, easy to verify at a glance | haiku |
+| Read-only or mechanical: summarize/read logs/search/list/tag/classify/extract, rename, format, docs-only or comment-only edit, no code logic change, easy to verify at a glance. Examples: "summarize these logs", "rename X to Y across a file", "fix a typo in a doc or comment", "list the tasks tagged Z", "tag/classify this inbox item" | haiku |
 | Well-scoped change with a clear spec and a named check: single-file or few-file bug fix, small feature iteration, add a test, config/doc tweak with code, follows an existing pattern | sonnet |
 | DEFAULT and anything uncertain: multi-file feature, debugging with unknown cause, cross-module change, UI change needing live QA, anything touching concurrency, persistence/migrations of data, security, the spawn/queue machinery itself | opus |
-| Hardest work: large refactor or migration, architecture/design work, deep research or analysis, orchestrating many subagents, long unattended run, task text says it is large or high risk | fable |
+| Hardest work: large refactor or migration, architecture/design work, deep research or analysis, orchestrating many subagents, long unattended run, task text says it is large or high risk. Examples: "design the architecture for ...", "large refactor/migration across the repo", "deep research and a written analysis", "orchestrate many subagents over a long unattended run" | fable |
 
-Rules, also in the prompt: when signals conflict or are missing, choose the
+Rules, also in the prompt: a clear spec alone does **not** justify `sonnet` for
+cross-process work (migrations, performance work, spawn/queue/IPC, anything
+across process boundaries): those stay `opus`; when signals conflict or are
+missing, choose the
 **higher** model (never down-route on doubt); never `haiku` for a task that
 edits code logic; a task text too short or vague to show its scope (no named
 file, no named check, a sentence or two) counts as **missing** signals and goes
 to `opus`, and `haiku` needs the text itself to make explicit that the work is
 read-only or mechanical and changes no code logic; the `reason` is one sentence
-quoting the signal used. A task text that itself says the work is large, big,
+quoting the signal used, starting `Task:` (or `Role <name>:` for a delegate
+brief, below). A task text that itself says the work is large, big,
 risky or high risk, or restructures a whole subsystem, is a `fable` signal that
 outranks the `opus` default for the spawn/queue machinery; when one part of the
 text is small and another is a `fable` signal, the `fable` signal decides.
+
+### Delegate briefs route by role (naru task 2690)
+
+Before the rubric, the prompt checks whether the text opens by declaring the
+session's agent role (`You are the agent "verifier"`, `You are the reviewer
+stage of ...`). Such a text is a delegate brief and is routed by the role's own
+job, never by the task embedded in it (the replay trial showed Haiku sending
+verifiers and reviewers to `opus` because the embedded task touched the spawn
+machinery): a role that verifies, reviews, checks, researches, does recon,
+designs UX or implements an already-planned brief is `sonnet`; one that plans,
+architects or supervises is `opus`; an unknown role is `opus`. Asking for the
+`Role <name>:` prefix on the reason is what makes Haiku do this check every
+time (without it one implementer brief went to `opus` about one run in five).
+
+The router in this slice **never sees a delegate brief**: its one call site
+passes a queued task's description. The rule is in the shared prompt so the
+subagent slice (naru task 2684) inherits it; that slice should prefer the
+role's frontmatter model over this wording when it can read it.
 
 Effort is untouched (medium everywhere). Out of scope for this slice: subagent
 model override, author size hints, retrying one level up, effort routing,
@@ -132,9 +154,10 @@ at `opus` until the log shows it pays off.
 
 ## Fixtures and the live test
 
-`src/testdata/model_router_fixtures.json`: 25 task texts `{text, expected,
-ambiguous}`, five per model row plus five ambiguous (conflicting or missing
-signals; expected is the higher model). `cargo test model_router` checks the
+`src/testdata/model_router_fixtures.json`: 33 task texts `{text, expected,
+ambiguous}`, nine each for `haiku` and `fable` (the last four of each mirror
+the row's examples, naru task 2690), five each for `sonnet` and `opus`, plus
+five ambiguous (conflicting or missing signals; expected is the higher model). `cargo test model_router` checks the
 file's shape and every pure path (parse and validate, switch off, fallback,
 reuse, outcome pairing, the refusal) with an injected call and a temp log.
 
@@ -145,11 +168,27 @@ no reuse) and prints a confusion table, each miss, and latency min/median/p95:
 cargo test model_router_live_fixtures -- --ignored --nocapture
 ```
 
-It asserts at least 23/25 as expected, every ambiguous fixture on the higher
+It asserts all but at most two as expected, every ambiguous fixture on the higher
 model, and p95 under 10 s. It uses the person's Claude subscription through
 `claude -p`.
 
+### Replay of real session starts (naru task 2690)
+
+```bash
+NARU_ROUTER_REPLAY=/path/samples.json cargo test model_router_live_replay -- --ignored
+```
+
+reads a JSON array of `{"prompt": ...}` and writes the picks, in order, to
+`<file>.out.json` as `{model, reason, latency_ms}`. It asserts nothing about
+the picks: the models past sessions ran on are not ground truth, so the rubric
+is never tuned to reproduce them.
+
 ## Known limits
+
+- A queued task's text that itself opens with a role declaration is read as a
+  delegate brief and routed by that role: it can reach `sonnet` (or `opus`)
+  that way, never `haiku` or `fable`. The text is untrusted, so this is a way
+  to down-route a hard task to `sonnet`, nothing more.
 
 - A reused decision never escalates: a task that bounced after a `sonnet` pick
   runs on `sonnet` again (retry one level up is a later slice).
