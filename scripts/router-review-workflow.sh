@@ -78,8 +78,10 @@ def topwords: map(.reason // "" | ascii_downcase | [scan("[a-z][a-z-]{3,}")] | u
   | map(select(IN("task","with","that","this","from","the","into","rule","signal","named","text","which","work","change","says","than","there","applies","default","only","them","they","have","does","when","same","each","also","single","file","opus","sonnet","haiku","fable") | not))
   | group_by(.) | map({w: .[0], n: length}) | sort_by(-.n, .w) | .[:6] | map("\(.w) (\(.n))") | join(", ");
 .rows as $all
-# rubric picks only: an escalation (and a relay of one) is a retry, not a pick (naru task 2692)
-| ($all | map(select(.experiment != true and .escalated != true))) as $rows
+# rubric picks only: an escalation (and a relay of one) is a retry, not a pick (naru task 2692);
+# a size-hinted session (and a relay of one) was sized by its author, not the rubric (naru task 2685)
+| ($all | map(select(.experiment != true and .escalated != true and .hinted != true))) as $rows
+| ($all | map(select(.escalated != true and .hinted == true))) as $hinted
 | ($all | map(select(.experiment != true and .escalated == true))) as $esc
 | ($all | map(select(.experiment == true))) as $exp
 # the next attempt of the same task, to see whether a retry went up a level
@@ -148,7 +150,7 @@ def topwords: map(.reason // "" | ascii_downcase | [scan("[a-z][a-z-]{3,}")] | u
   "",
   "Telemetry: `naru cc router --since \($since)` (\(.decisions) decisions, \(.joined) joined to a session). Minimum sample for a flag: \($min). Nothing in this report changes the rubric.",
   "",
-  "## 1. Per model (rubric picks; experiments and escalations excluded)",
+  "## 1. Per model (rubric picks; experiments, escalations and size hints excluded)",
   "",
   "| model | sessions | finished | first-try landing | bounced | failed | retried up | median cost | median time |",
   "|---|---|---|---|---|---|---|---|---|",
@@ -157,6 +159,8 @@ def topwords: map(.reason // "" | ascii_downcase | [scan("[a-z][a-z-]{3,}")] | u
   "Sources: \($rows | group_by(.source) | map("\(.[0].source // "unknown") \(length)") | join(", ") | if . == "" then "none" else . end). Router latency p95 (haiku calls): \($lat // "-") ms. Median cost, older half vs newer half: \($c1 | money) -> \($c2 | money).",
   "",
   "Escalations (retries one level up, out of the table above): \(.escalations) decisions, \($esc | map(select(.after_experiment == true and .source == "escalation")) | length) after an experiment; \($esc | length) escalated sessions with their relays. Parked with retries spent: \(.parked).",
+  "",
+  "Size hints (sessions sized by their author, mapped by the fixed table; out of the table above): \($hinted | length) sessions, \($hinted | finished | length) finished, first-try landing \(pct($hinted | landed | map(select(.landed_first_try == true)) | length; $hinted | landed | length)).",
   "",
   "## 2. Exploration (one level down vs control)",
   "",

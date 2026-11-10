@@ -73,8 +73,9 @@ site passes a queued task's description. The subagent entry point (naru task
 agent types, and through this same prompt for a general-purpose spawn whose
 brief declares a role.
 
-Effort is untouched (medium everywhere). Out of scope: author size hints,
-effort routing, mid-session switching.
+Effort is untouched (medium everywhere). Out of scope: effort routing,
+mid-session switching. Author size hints are naru task 2685 ("Size hints"
+below).
 Retrying one level up is naru task 2686 (below).
 
 ## naru-live is never routed
@@ -99,14 +100,71 @@ After the refusal, in order:
    `{model}` -> `opus`, source `disabled`, reason says so. A saved template
    without `{model}` keeps working unchanged and is never routed (no wasted
    call).
-3. The log already holds a routed (`haiku`, `reused` or `escalation`)
+3. The log already holds a routed (`haiku`, `hint`, `reused` or `escalation`)
    decision for this task id -> no call; the next model comes from that
    history (retry one level up, below). A re-dispatch or a cost-guard relay
    never re-routes.
-4. Otherwise the Haiku call. The answer must be an object whose `model` is one
+4. The task carries a valid size hint (`size:` / `risk:` tags, "Size hints"
+   below) -> the fixed table's model, source `hint`, **no call**.
+5. Otherwise the Haiku call. The answer must be an object whose `model` is one
    of the four and whose `reason` is non-empty; a missing `risky` reads as
    `true`.
-5. On that fresh Haiku pick only, the exploration coin (below).
+6. On that fresh Haiku pick only, the exploration coin (below).
+
+## Size hints (naru task 2685)
+
+The author of a task or a brief may size it; the author never names a model.
+A valid hint replaces the Haiku call with a fixed table (`Hint` in
+`model_router.rs`), so it is faster and free; with no hint (or an invalid
+one) Haiku classifies as before.
+
+| Hint | Model |
+|---|---|
+| `size:small` | `sonnet` |
+| `size:medium` | `opus` |
+| `size:large` | `fable` |
+| `risk:high` with any size | one level up, capped at `fable` |
+| `risk:low`, or no risk | the size's model |
+
+`small` is never `haiku`: the rubric allows `haiku` only when the text itself
+shows the work is read-only or mechanical, and that cannot be judged without
+the call a hint skips. Such a task is better left unhinted.
+
+- **On a task: reserved tags**, `--tags size:large,risk:high` on `naru task
+  create` / `update` (also the API and the web UI's tag field). No schema
+  change: tags already show in `naru task show`, the API and the UI. Keys and
+  values are trimmed and case-insensitive; other tags are ignored.
+- **On a subagent brief: a first-line marker**, the whole first non-empty line
+  of the prompt (else the description): `[size: large]` or `[size: large,
+  risk: high]`, in any order. A queued task's description is not read for a
+  marker (its tags are the task's one hint).
+- **Invalid is no hint** (Haiku classifies): no `size`, a size or risk outside
+  the table, a repeated `size`/`risk`, a marker with any other key, or a
+  marker that is not the whole first line. `risk:high` alone is no hint.
+- **The log line**: source `hint`, `hint: {size, risk}` (`risk` `low` when not
+  given), reason `Hint size:large, risk:high: the size-hint table`,
+  `rubric_model: null`, `experiment: false`, no `risky`, `latency_ms: 0`.
+- **Exploration (2688): never.** The coin is drawn only on a fresh Haiku pick;
+  the author, not the rubric, sized the task, and a demotion would undo the
+  author's call while telling nothing about the rubric.
+- **Retry one level up (2686): yes.** A hint pick is a routed pick like a
+  `haiku` one: a hinted task that bounces retries one level up, the two-retry
+  cap counts from the hint pick, and a re-dispatch reads the log (check 3)
+  before the tags, so editing the tags after the task's first routed session
+  changes nothing (its history decides every later model).
+- **Telemetry (2692):** `naru cc router` rows carry `hinted` (a `hint` row,
+  or a `reused` row carrying one on); the Router review leaves them out of
+  the rubric-pick table and the pick-accuracy flags, and reports them on
+  their own line. A hinted task's escalations are `escalated` rows, as any.
+- **Subagents (2684):** a brief with a valid marker gets the hint's model,
+  source `hint`, **ahead of the role table**; the refusals (naru-live, a
+  fork, an explicit `model`) and the switch come first and are unchanged.
+  The `kind: subagent` line records the hint only in `source` and `reason`
+  (no `hint` object). The `agent-route.sh` hook body is unchanged.
+- The tags and the marker are untrusted text like the rest of a task: a hint
+  can send a task to `fable` (cost, flagged `costly`) or to `sonnet` — never
+  to `haiku` — exactly what the rubric already lets the text do by saying the
+  work is large or small.
 
 **Any failure is `opus`, source `fallback`**, with the error (bounded) as the
 reason, and never fails or blocks the spawn: `claude` missing, timeout,
@@ -216,11 +274,11 @@ write failure is one stderr line). Two kinds:
 {"kind":"parked","time":"2026-11-10 11:02:13","task_id":2683,"project_id":2,"model":"fable","attempt":3,"reason":"the fable session bounced; 2 retries one level up are spent, parked"}
 ```
 
-- `source`: `haiku` | `fallback` | `disabled` | `reused` | `escalation`. A
+- `source`: `haiku` | `hint` | `fallback` | `disabled` | `reused` | `escalation` (`rule` on a `subagent` line). A
   `reused` decision is logged too. `attempt` (naru task 2686) is 1 for the
   first routed session and one more per retry; a line without it reads as 1.
-  A `parked` line stands in for the decision of a retry that was not started. `hint` is always `null` (reserved for the author size hint, a
-  later slice). `"costly":true` is added when the model is `fable`.
+  A `parked` line stands in for the decision of a retry that was not started. `hint` is `null` except on a `hint` decision
+  (`{size, risk}`, "Size hints" above). `"costly":true` is added when the model is `fable`.
 - An **outcome** is logged by `forget_dispatch` (the one place a dispatched
   session leaves `todo_dispatched`), from the task's status at that moment:
   `done` -> `done`; `todo` or `backlog` -> `bounced`; cancelled, deleted, or
@@ -270,13 +328,16 @@ untouched. In order:
    spawning agent chose it; only the frontmatter default is overridden).
 2. **The switch** (`watchers.model-router`, the same one): off -> `disabled`,
    model null; unreadable config -> `fallback`, model null.
-3. **The role table** (`ROLE_MODELS`), no model call, source `rule`: recon,
+3. **The size-hint marker** (naru task 2685): a brief whose first non-empty
+   line is `[size: ..., risk: ...]` gets the hint table's model, source
+   `hint`, no model call, whatever its type ("Size hints" above).
+4. **The role table** (`ROLE_MODELS`), no model call, source `rule`: recon,
    Explore, researcher, claude-code-guide, verifier, ui-verifier,
    diff-reviewer, naru-retro, inbox-triage, ux-designer, implementer,
    swift-implementer -> `sonnet`; planner, Plan, supervisor -> `opus`. This
    is the delegate-brief role rule as a table (naru task 2690): the role
    decides, never the task the brief embeds.
-4. **Haiku**, source `haiku`: any other spawn (untyped, `general-purpose`,
+5. **Haiku**, source `haiku`: any other spawn (untyped, `general-purpose`,
    `claude`, an unknown named type) goes through the same prompt, schema and
    allowed set as a queued task, with the brief (the prompt, else the
    description) as the text. An unknown named type is prefixed `You are the
@@ -284,7 +345,7 @@ untouched. In order:
    declares its own role is routed by that role by the prompt itself. The
    call's timeout is **8 s** (`SUBAGENT_TIMEOUT`), shorter than a task's 15 s,
    because the spawning tool call waits on it.
-5. **Any failure** (timeout, non-JSON, a model outside the set, an empty
+6. **Any failure** (timeout, non-JSON, a model outside the set, an empty
    reason) -> `fallback`, model null: the spawn runs its frontmatter model.
    This is the opposite of a queued task's fallback (`opus`): a subagent
    already has a sane default.
@@ -415,6 +476,10 @@ scorecard`'s.
   retry ladder, not the rubric, so pick accuracy leaves it out.
   `after_experiment` is true on an escalated row whose escalation retried an
   `experiment: true` attempt (its own line logs `experiment: false`).
+- **Hints are not picks** (naru task 2685). `hinted` is true on a `hint` row
+  and on a `reused` row carrying one on: the author sized it, so pick
+  accuracy leaves it out too. A hinted task's escalation is `escalated`, not
+  `hinted`.
 - **Control group.** `fallback` and `disabled` decisions are rows too, flagged
   by `source`.
 - **Exploration arm.** `experiment` and `rubric_model` are the decision line's
@@ -442,8 +507,8 @@ holding the report and proposals; rejected (or timed out) logs it to the
 person; the inbox watcher only triages change requests), filed against task
 2689.
 
-The report has four sections: (1) per model, experiments and escalated rows
-excluded (shown as their own count, with the parked count): sessions,
+The report has four sections: (1) per model, experiments, escalated and size-hinted rows
+excluded (hinted sessions get their own line after it) (shown as their own count, with the parked count): sessions,
 finished, first-try landing (of finished first attempts), bounced, failed,
 retried up (a finished non-done session whose task's next attempt ran a
 higher model), median cost and wall-clock; (2) exploration: per

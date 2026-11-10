@@ -3960,6 +3960,10 @@ pub struct RouterRow {
     /// The escalation retried an experiment attempt (naru task 2688): set on
     /// an escalated row whose escalation followed an `experiment: true` line.
     pub after_experiment: bool,
+    /// This session's model came from the author's size hint, not the rubric
+    /// (naru task 2685): a `hint` line, or a `reused` line carrying one on.
+    /// Pick accuracy leaves these rows out too.
+    pub hinted: bool,
     /// The log's outcome line for this decision (`done`|`bounced`|`failed`).
     pub outcome: Option<String>,
     pub outcome_status: Option<String>,
@@ -4019,6 +4023,7 @@ pub fn router(
         attempt: usize,
         escalated: bool,
         after_experiment: bool,
+        hinted: bool,
         next_at: Option<i64>,
     }
     let mut decisions: Vec<Dec> = Vec::new();
@@ -4041,6 +4046,11 @@ pub fn router(
             (Some("reused"), Some(p)) => (p.escalated, p.after_experiment),
             _ => (false, false),
         };
+        let hinted = match (line["source"].as_str(), prev) {
+            (Some("hint"), _) => true,
+            (Some("reused"), Some(p)) => p.hinted,
+            _ => false,
+        };
         last_of_task.insert(task_id, decisions.len());
         decisions.push(Dec {
             line,
@@ -4049,6 +4059,7 @@ pub fn router(
             attempt,
             escalated,
             after_experiment,
+            hinted,
             next_at: None,
         });
     }
@@ -4117,6 +4128,7 @@ pub fn router(
             attempt: d.attempt,
             escalated: d.escalated,
             after_experiment: d.after_experiment,
+            hinted: d.hinted,
             outcome: text(outcome, "outcome"),
             outcome_status: text(outcome, "status"),
             outcome_detail: text(outcome, "detail"),
@@ -8586,6 +8598,42 @@ mod tests {
         let since = format!("{}Z", at(45).replace(' ', "T"));
         let r = router(&store, &lines, Some(&since), None).unwrap();
         assert_eq!((r.decisions, r.escalations, r.parked), (3, 1, 0));
+    }
+
+    #[test]
+    fn router_labels_hinted_rows_and_their_relays_but_not_their_escalations() {
+        use serde_json::json;
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(&tmp.path().join("naru.db")).unwrap();
+        let at = |d: i64| fmt_store_ts(1_700_000_000 + d);
+        let dec = |d: i64, task: i64, model: &str, source: &str, attempt: u64| {
+            json!({"kind":"decision","time":at(d),"task_id":task,"project_id":1,"model":model,
+                "reason":"r","source":source,"attempt":attempt,"experiment":false})
+        };
+        let lines = vec![
+            dec(0, 1, "sonnet", "hint", 1),
+            dec(10, 1, "sonnet", "reused", 1),
+            json!({"kind":"outcome","time":at(20),"task_id":1,"outcome":"bounced"}),
+            dec(30, 1, "opus", "escalation", 2),
+            dec(40, 2, "sonnet", "haiku", 1),
+            dec(50, 2, "sonnet", "reused", 1),
+        ];
+        let r = router(&store, &lines, None, None).unwrap();
+        let got: Vec<_> = r
+            .rows
+            .iter()
+            .map(|r| (r.task_id, r.hinted, r.escalated))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (1, true, false),
+                (1, true, false),
+                (1, false, true),
+                (2, false, false),
+                (2, false, false)
+            ]
+        );
     }
 
     #[test]

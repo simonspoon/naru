@@ -1148,7 +1148,10 @@ EXAMPLES
         /// Initial status: backlog|todo|in_progress|done|cancelled (default todo; `queued` or `q` is accepted as `todo`, which is shown as "queued")
         #[arg(long, value_parser = parse_status, default_value = "todo")]
         status: Status,
-        /// Comma-separated tags, e.g. --tags writing,web (alias --tag)
+        /// Comma-separated tags, e.g. --tags writing,web (alias --tag). Reserved:
+        /// a size hint for the model router, `size:small|medium|large` plus an
+        /// optional `risk:low|high` (e.g. --tags size:large,risk:high), maps to a
+        /// model with no Haiku call (docs/model-router.md "Size hints")
         #[arg(long, alias = "tag")]
         tags: Option<String>,
         /// Parent task id (makes this a subtask; same project required)
@@ -1331,7 +1334,9 @@ EXAMPLES
         /// New priority: low|medium|high
         #[arg(long, value_parser = parse_priority, group = "fields")]
         priority: Option<Priority>,
-        /// Comma-separated tags; replaces the FULL tag set ("" clears); alias --tag
+        /// Comma-separated tags; replaces the FULL tag set ("" clears); alias --tag.
+        /// `size:small|medium|large` and `risk:low|high` are the model router's
+        /// size hint (docs/model-router.md "Size hints")
         #[arg(long, alias = "tag", group = "fields")]
         tags: Option<String>,
         /// New parent task id (same project required)

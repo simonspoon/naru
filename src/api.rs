@@ -1457,6 +1457,7 @@ fn dispatch_task_session(
                 task_id,
                 project_id: task.project_id,
                 text: &task.description,
+                tags: &task.tags,
                 relay,
             },
             &prompts,

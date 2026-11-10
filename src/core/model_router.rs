@@ -69,6 +69,9 @@ pub struct Request<'a> {
     pub project_id: i64,
     /// The task's description, untrusted.
     pub text: &'a str,
+    /// The task's tags, untrusted; `size:` and `risk:` ones are the author's
+    /// size hint (naru task 2685, [`Hint::from_tags`]).
+    pub tags: &'a [String],
     /// The cost guard's relay: the same attempt goes on in a fresh session, so
     /// it never escalates (naru task 2686). Every other dispatch takes the
     /// task from the queue, which after an earlier routed session is a retry.
@@ -95,6 +98,9 @@ pub enum Source {
     /// A subagent spawn of a type the role table names (naru task 2684); no
     /// call was made.
     Rule,
+    /// The author's size hint mapped by the fixed table (naru task 2685); no
+    /// call was made.
+    Hint,
 }
 
 impl Source {
@@ -107,6 +113,7 @@ impl Source {
             Source::Escalation => "escalation",
             Source::Parked => "parked",
             Source::Rule => "rule",
+            Source::Hint => "hint",
         }
     }
 }
@@ -127,6 +134,8 @@ pub struct Decision {
     pub experiment: bool,
     /// The Haiku call's `risky` answer, on a `haiku` decision only.
     pub risky: Option<bool>,
+    /// The author's size hint, on a `hint` decision only (naru task 2685).
+    pub hint: Option<Hint>,
 }
 
 /// [`route`] declined to route this request.
@@ -242,6 +251,7 @@ fn decide(req: &Request<'_>, deps: &Deps<'_>) -> Decision {
         rubric_model: None,
         experiment: false,
         risky: None,
+        hint: None,
     };
     let disabled = |reason: &str| Decision {
         model: FALLBACK_MODEL.to_string(),
@@ -252,6 +262,7 @@ fn decide(req: &Request<'_>, deps: &Deps<'_>) -> Decision {
         rubric_model: None,
         experiment: false,
         risky: None,
+        hint: None,
     };
     match &deps.enabled {
         Err(e) => return fallback(format!("the config is unreadable: {e}")),
@@ -269,6 +280,21 @@ fn decide(req: &Request<'_>, deps: &Deps<'_>) -> Decision {
         && let Some(h) = history(path, req.task_id)
     {
         return after(req, h);
+    }
+    // The author's size hint replaces the Haiku call (naru task 2685). It is
+    // never explored: the author, not the rubric, sized the task.
+    if let Some(hint) = Hint::from_tags(req.tags) {
+        return Decision {
+            model: hint.model().to_string(),
+            reason: hint.reason(),
+            source: Source::Hint,
+            latency_ms: 0,
+            attempt: 1,
+            rubric_model: None,
+            experiment: false,
+            risky: None,
+            hint: Some(hint),
+        };
     }
     let started = Instant::now();
     let answer = (deps.call)(&prompt(req.text));
@@ -289,6 +315,7 @@ fn decide(req: &Request<'_>, deps: &Deps<'_>) -> Decision {
                 rubric_model: Some(rubric),
                 experiment,
                 risky: Some(risky),
+                hint: None,
             }
         }
         Err(e) => Decision {
@@ -344,6 +371,98 @@ const RUBRIC: &str = "\
 | Well-scoped change with a clear spec and a named check: single-file or few-file bug fix, small feature iteration, add a test, config/doc tweak with code, follows an existing pattern | sonnet |
 | DEFAULT and anything uncertain: multi-file feature, debugging with unknown cause, cross-module change, UI change needing live QA, anything touching concurrency, persistence/migrations of data, security, the spawn/queue machinery itself | opus |
 | Hardest work: large refactor or migration, architecture/design work, deep research or analysis, orchestrating many subagents, long unattended run, task text says it is large or high risk. Examples: \"design the architecture for ...\", \"large refactor/migration across the repo\", \"deep research and a written analysis\", \"orchestrate many subagents over a long unattended run\" | fable |";
+
+/// The author's optional size hint (naru task 2685): a size and an optional
+/// risk, mapped to a model by a fixed table with no model call. The author
+/// never names a model. A task carries it as reserved tags (`size:small`,
+/// `risk:high`, [`Hint::from_tags`]); a subagent brief as a first-line marker
+/// (`[size: large, risk: high]`, [`Hint::from_brief`]). Anything invalid is no
+/// hint, so Haiku classifies as before.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Hint {
+    /// 0 small, 1 medium, 2 large ([`SIZES`]).
+    size: usize,
+    /// `risk:high`; `risk:low` (or none) changes nothing.
+    risk_high: bool,
+}
+
+/// The hint's sizes and the model each maps to. `small` is `sonnet`, never
+/// `haiku`: whether the work is read-only or mechanical (the only case the
+/// rubric allows `haiku`) cannot be judged without the call a hint skips.
+const SIZES: [(&str, &str); 3] = [("small", "sonnet"), ("medium", "opus"), ("large", "fable")];
+
+impl Hint {
+    /// Builds a hint from `(key, value)` pairs: exactly one `size` of
+    /// [`SIZES`], at most one `risk` of `low`/`high`, nothing else. Keys and
+    /// values are trimmed and case-insensitive.
+    fn from_pairs<'a>(pairs: impl Iterator<Item = (&'a str, &'a str)>) -> Option<Hint> {
+        let (mut size, mut risk) = (None, None);
+        for (k, v) in pairs {
+            let v = v.trim().to_ascii_lowercase();
+            match k.trim().to_ascii_lowercase().as_str() {
+                "size" if size.is_none() => size = Some(SIZES.iter().position(|(s, _)| *s == v)?),
+                "risk" if risk.is_none() => {
+                    risk = Some(match v.as_str() {
+                        "high" => true,
+                        "low" => false,
+                        _ => return None,
+                    })
+                }
+                _ => return None,
+            }
+        }
+        Some(Hint {
+            size: size?,
+            risk_high: risk.unwrap_or(false),
+        })
+    }
+
+    /// The hint in a task's tags: its `size:` and `risk:` tags (other tags are
+    /// ignored). `None` when there is no `size:` tag, or a `size:`/`risk:` tag
+    /// is invalid or repeated.
+    pub fn from_tags(tags: &[String]) -> Option<Hint> {
+        let pairs: Vec<(&str, &str)> = tags
+            .iter()
+            .filter_map(|t| t.split_once(':'))
+            .filter(|(k, _)| matches!(k.trim().to_ascii_lowercase().as_str(), "size" | "risk"))
+            .collect();
+        Hint::from_pairs(pairs.into_iter())
+    }
+
+    /// The hint marker on a brief's first non-empty line, the whole line:
+    /// `[size: large]` or `[size: large, risk: high]`.
+    pub fn from_brief(brief: &str) -> Option<Hint> {
+        let line = brief.lines().find(|l| !l.trim().is_empty())?.trim();
+        let inner = line.strip_prefix('[')?.strip_suffix(']')?;
+        let pairs: Option<Vec<(&str, &str)>> =
+            inner.split(',').map(|p| p.split_once(':')).collect();
+        Hint::from_pairs(pairs?.into_iter())
+    }
+
+    /// The fixed table: small -> sonnet, medium -> opus, large -> fable;
+    /// `risk:high` one level up, capped at fable.
+    pub fn model(self) -> &'static str {
+        let base = SIZES[self.size].1;
+        if self.risk_high { one_up(base) } else { base }
+    }
+
+    fn label(self) -> String {
+        let size = SIZES[self.size].0;
+        if self.risk_high {
+            format!("size:{size}, risk:high")
+        } else {
+            format!("size:{size}")
+        }
+    }
+
+    fn reason(self) -> String {
+        format!("Hint {}: the size-hint table", self.label())
+    }
+
+    fn to_json(self) -> Value {
+        json!({"size": SIZES[self.size].0, "risk": if self.risk_high { "high" } else { "low" }})
+    }
+}
 
 /// The router's prompt: instructions, the rubric, and the task text fenced as
 /// data and capped.
@@ -432,8 +551,7 @@ fn decision_line(req: &Request<'_>, d: &Decision) -> Value {
         "task_id": req.task_id,
         "project_id": req.project_id,
         "input": req.text.chars().take(LOG_INPUT_MAX).collect::<String>(),
-        // Reserved for the author's size hint (a later slice).
-        "hint": Value::Null,
+        "hint": d.hint.map(Hint::to_json),
         "model": d.model,
         "reason": d.reason,
         "source": d.source.as_str(),
@@ -513,7 +631,7 @@ fn is_task(line: &Value, kind: &str, task_id: i64) -> bool {
 
 /// What the log holds for a task's routed sessions (naru task 2686).
 struct History {
-    /// The latest routed (`haiku`, `reused` or `escalation`) decision's model,
+    /// The latest routed (`haiku`, `hint`, `reused` or `escalation`) decision's model,
     /// reason and attempt.
     model: String,
     reason: String,
@@ -521,7 +639,7 @@ struct History {
     /// That decision's `rubric_model` and `experiment` (naru task 2688).
     rubric_model: Option<String>,
     experiment: bool,
-    /// `escalation` decisions since the latest `haiku` pick or park.
+    /// `escalation` decisions since the latest `haiku` or `hint` pick or park.
     escalations: usize,
     last: Last,
 }
@@ -552,9 +670,9 @@ fn history(path: &Path, task_id: i64) -> Option<History> {
                 let model = l["model"].as_str().filter(|m| MODELS.contains(m));
                 let reason = l["reason"].as_str();
                 match (source, model, reason) {
-                    ("haiku" | "reused" | "escalation", Some(model), Some(reason)) => {
+                    ("haiku" | "hint" | "reused" | "escalation", Some(model), Some(reason)) => {
                         match source {
-                            "haiku" => escalations = 0,
+                            "haiku" | "hint" => escalations = 0,
                             "escalation" => escalations += 1,
                             _ => {}
                         }
@@ -624,6 +742,7 @@ fn after(req: &Request<'_>, h: History) -> Decision {
         attempt,
         rubric_model: h.rubric_model.clone(),
         risky: None,
+        hint: None,
     };
     let why = match (&h.last, req.relay) {
         (_, true) | (Last::Unrouted, _) => {
@@ -814,7 +933,7 @@ impl SubagentRequest {
 pub struct SubagentDecision {
     pub model: Option<String>,
     pub reason: String,
-    /// `rule`, `haiku`, `fallback` or `disabled`.
+    /// `hint`, `rule`, `haiku`, `fallback` or `disabled`.
     pub source: Source,
     pub latency_ms: u64,
 }
@@ -918,6 +1037,20 @@ fn decide_subagent(req: &SubagentRequest, deps: &SubagentDeps<'_>) -> SubagentDe
         }
         Ok(true) => {}
     }
+    let brief = if req.prompt.trim().is_empty() {
+        req.description.as_str()
+    } else {
+        req.prompt.as_str()
+    };
+    // A brief's hint marker comes ahead of the role table (naru task 2685).
+    if let Some(hint) = Hint::from_brief(brief) {
+        return SubagentDecision {
+            model: Some(hint.model().to_string()),
+            reason: hint.reason(),
+            source: Source::Hint,
+            latency_ms: 0,
+        };
+    }
     let kind = req.subagent_type.as_deref().unwrap_or_default();
     if let Some((_, model)) = ROLE_MODELS.iter().find(|(t, _)| *t == kind) {
         return SubagentDecision {
@@ -927,11 +1060,6 @@ fn decide_subagent(req: &SubagentRequest, deps: &SubagentDeps<'_>) -> SubagentDe
             latency_ms: 0,
         };
     }
-    let brief = if req.prompt.trim().is_empty() {
-        req.description.as_str()
-    } else {
-        req.prompt.as_str()
-    };
     // A named type the table does not know is still a role: say so, so the
     // prompt's role rule (not the embedded task) decides.
     let text = if UNTYPED.contains(&kind) {
@@ -988,6 +1116,7 @@ mod tests {
             task_id: 7,
             project_id: 2,
             text,
+            tags: &[],
             relay: false,
         }
     }
@@ -1016,6 +1145,204 @@ mod tests {
 
     fn lines(path: &Path) -> Vec<Value> {
         read_lines(path)
+    }
+
+    fn tags(t: &[&str]) -> Vec<String> {
+        t.iter().map(|t| t.to_string()).collect()
+    }
+
+    #[test]
+    fn the_size_hint_table_maps_size_and_risk_to_a_model() {
+        let m = |t: &[&str]| Hint::from_tags(&tags(t)).map(Hint::model);
+        assert_eq!(m(&["size:small"]), Some("sonnet"), "small is never haiku");
+        assert_eq!(m(&["size:medium"]), Some("opus"));
+        assert_eq!(m(&["size:large"]), Some("fable"));
+        assert_eq!(m(&["size:small", "risk:high"]), Some("opus"));
+        assert_eq!(m(&["size:medium", "risk:high"]), Some("fable"));
+        assert_eq!(
+            m(&["size:large", "risk:high"]),
+            Some("fable"),
+            "capped at fable"
+        );
+        assert_eq!(
+            m(&["risk:low", "size:medium"]),
+            Some("opus"),
+            "risk:low changes nothing"
+        );
+        assert_eq!(
+            m(&["web", " Size : LARGE ", "writing"]),
+            Some("fable"),
+            "trimmed, any case, other tags ignored"
+        );
+    }
+
+    #[test]
+    fn an_invalid_size_hint_is_no_hint() {
+        for t in [
+            &[][..],
+            &["web"],
+            &["risk:high"],
+            &["size:huge"],
+            &["size:"],
+            &["size:small", "size:large"],
+            &["size:small", "risk:medium"],
+            &["size:small", "risk:high", "risk:low"],
+        ] {
+            assert_eq!(Hint::from_tags(&tags(t)), None, "{t:?}");
+        }
+    }
+
+    #[test]
+    fn a_brief_carries_its_hint_as_a_first_line_marker() {
+        let m = |b: &str| Hint::from_brief(b).map(Hint::model);
+        assert_eq!(m("[size: large, risk: high]\nDo the thing"), Some("fable"));
+        assert_eq!(m("\n  [size:small]  \nDo it"), Some("sonnet"));
+        assert_eq!(m("[ risk: high , size: small ]"), Some("opus"));
+        for bad in [
+            "Do it\n[size: large]",
+            "[size: large] and more",
+            "[size: huge]",
+            "[risk: high]",
+            "[size large]",
+            "[size: small, model: haiku]",
+            "",
+        ] {
+            assert_eq!(Hint::from_brief(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_hinted_task_makes_no_call_and_logs_source_hint() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("m.log");
+        let calls = Cell::new(0);
+        let call = |_: &str| {
+            calls.set(calls.get() + 1);
+            Ok(json!({"model": "haiku", "reason": "Task: x", "risky": false}))
+        };
+        let mut d = deps(Some(log.clone()), &call);
+        // An exploration rate of 1 would demote any Haiku pick: a hint is never explored.
+        d.explore = 1.0;
+        d.coin = &|| 0.0;
+        let t = tags(&["size:medium", "risk:high"]);
+        let r = Request {
+            tags: &t,
+            ..req(config::TODO_WATCHER, None, "summarize these logs")
+        };
+        let dec = route_with(&r, &d).unwrap();
+        assert_eq!(calls.get(), 0, "a hint makes zero claude calls");
+        assert_eq!((dec.model.as_str(), dec.source), ("fable", Source::Hint));
+        assert!(!dec.experiment);
+        let l = lines(&log);
+        assert_eq!(l.len(), 1);
+        assert_eq!(l[0]["source"], "hint");
+        assert_eq!(l[0]["hint"], json!({"size": "medium", "risk": "high"}));
+        assert_eq!(l[0]["experiment"], false);
+        assert!(l[0]["rubric_model"].is_null());
+        assert_eq!(l[0]["costly"], true);
+        assert_eq!(
+            l[0]["reason"],
+            "Hint size:medium, risk:high: the size-hint table"
+        );
+    }
+
+    #[test]
+    fn an_invalid_hint_falls_back_to_the_haiku_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("m.log");
+        let calls = Cell::new(0);
+        let call = |_: &str| {
+            calls.set(calls.get() + 1);
+            Ok(json!({"model": "sonnet", "reason": "Task: x", "risky": true}))
+        };
+        let d = deps(Some(log.clone()), &call);
+        let t = tags(&["size:huge"]);
+        let r = Request {
+            tags: &t,
+            ..req(config::TODO_WATCHER, None, "fix a bug")
+        };
+        let dec = route_with(&r, &d).unwrap();
+        assert_eq!(calls.get(), 1);
+        assert_eq!((dec.model.as_str(), dec.source), ("sonnet", Source::Haiku));
+        assert!(lines(&log)[0]["hint"].is_null());
+    }
+
+    #[test]
+    fn a_hinted_task_that_bounces_retries_one_level_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("m.log");
+        let call = |_: &str| -> Result<Value, String> { panic!("a hinted task never calls") };
+        let d = deps(Some(log.clone()), &call);
+        let t = tags(&["size:small"]);
+        let r = Request {
+            tags: &t,
+            ..req(config::TODO_WATCHER, None, "x")
+        };
+        assert_eq!(route_with(&r, &d).unwrap().model, "sonnet");
+        log_outcome_in(&log, 7, 1, Outcome::Bounced, Some("todo"), "s ended");
+        let up = route_with(&r, &d).unwrap();
+        assert_eq!(
+            (up.model.as_str(), up.source, up.attempt),
+            ("opus", Source::Escalation, 2)
+        );
+        log_outcome_in(&log, 7, 2, Outcome::Bounced, Some("todo"), "s ended");
+        assert_eq!(route_with(&r, &d).unwrap().model, "fable");
+        log_outcome_in(&log, 7, 3, Outcome::Bounced, Some("todo"), "s ended");
+        assert_eq!(
+            route_with(&r, &d).unwrap().source,
+            Source::Parked,
+            "the cap counts from the hint pick"
+        );
+    }
+
+    #[test]
+    fn a_brief_hint_comes_ahead_of_the_role_table_but_after_the_refusals() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("m.log");
+        let call = |_: &str| -> Result<Value, String> { panic!("a hinted brief never calls") };
+        let d = sub_deps(Some(log.clone()), &call);
+        for (kind, brief, model) in [
+            (Some("verifier"), "[size: large]\nverify it", "fable"),
+            (
+                Some("general-purpose"),
+                "[size: small, risk: high]\nfix it",
+                "opus",
+            ),
+            (None, "[size: small]\nfix it", "sonnet"),
+        ] {
+            let dec = route_subagent_with(&sub(kind, brief), &d).unwrap();
+            assert_eq!(
+                (dec.model.as_deref(), dec.source),
+                (Some(model), Source::Hint),
+                "{brief:?}"
+            );
+        }
+        assert_eq!(lines(&log).last().unwrap()["source"], "hint");
+        let explicit = SubagentRequest {
+            model: Some("haiku".to_string()),
+            ..sub(Some("recon"), "[size: large]\nx")
+        };
+        assert!(
+            route_subagent_with(&explicit, &d).is_err(),
+            "an explicit model stays untouched"
+        );
+        assert!(route_subagent_with(&sub(Some("fork"), "[size: large]\nx"), &d).is_err());
+        let live = SubagentRequest {
+            session_agent: Some(LIVE_AGENT_NAME.to_string()),
+            ..sub(None, "[size: large]\nx")
+        };
+        assert!(route_subagent_with(&live, &d).is_err());
+        let off = SubagentDeps {
+            enabled: Ok(false),
+            ..sub_deps(None, &call)
+        };
+        assert_eq!(
+            route_subagent_with(&sub(None, "[size: large]\nx"), &off)
+                .unwrap()
+                .model,
+            None,
+            "the switch still wins"
+        );
     }
 
     #[test]
