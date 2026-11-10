@@ -92,8 +92,8 @@ pub struct Builtin {
 /// body `core::barge_in::BARGE_IN_HOOK`, installed by `naru library hook enable
 /// live-barge-in.sh --event PreToolUse` (and again for `PostToolUse`).
 /// `agent-route` is the sixth (mesa task 1654): a `PreToolUse` hook that
-/// reroutes a misrouted general-purpose subagent spawn through `naru decide` —
-/// body `core::agent_route::AGENT_ROUTE_HOOK`, installed by `naru library hook
+/// reroutes a misrouted general-purpose subagent spawn through `naru decide`
+/// and sets each spawn's model through `naru model-router subagent` — body `core::agent_route::AGENT_ROUTE_HOOK`, installed by `naru library hook
 /// enable agent-route.sh --event PreToolUse --matcher 'Agent|Task'`.
 /// `dev-env-guard` is the seventh (naru task 2094): a `PreToolUse` hook that
 /// denies agents `install.sh`, `cargo install`, `launchctl` on

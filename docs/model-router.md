@@ -67,13 +67,14 @@ architects or supervises is `opus`; an unknown role is `opus`. Asking for the
 `Role <name>:` prefix on the reason is what makes Haiku do this check every
 time (without it one implementer brief went to `opus` about one run in five).
 
-The router in this slice **never sees a delegate brief**: its one call site
-passes a queued task's description. The rule is in the shared prompt so the
-subagent slice (naru task 2684) inherits it; that slice should prefer the
-role's frontmatter model over this wording when it can read it.
+The queued-task entry point **never sees a delegate brief**: its one call
+site passes a queued task's description. The subagent entry point (naru task
+2684, "Subagent spawns" below) applies the rule as a fixed table for the named
+agent types, and through this same prompt for a general-purpose spawn whose
+brief declares a role.
 
-Effort is untouched (medium everywhere). Out of scope for this slice: subagent
-model override, author size hints, effort routing, mid-session switching.
+Effort is untouched (medium everywhere). Out of scope: author size hints,
+effort routing, mid-session switching.
 Retrying one level up is naru task 2686 (below).
 
 ## naru-live is never routed
@@ -84,7 +85,10 @@ exception is explicit, the **first check** of `route`: an `action` of
 and no log line. Any action other than `queue-watcher` is refused too. A unit
 test asserts both, and another that neither `live.rs` nor `runner.rs` (the live
 spawn path) names `model_router`, and that `model_router::route(` appears
-exactly once in `api.rs`, inside `dispatch_task_session`.
+exactly once in `api.rs`, inside `dispatch_task_session`. The subagent entry
+point refuses it too, first: a spawn of `naru-live`, and any spawn the live
+session itself makes (payload `agent_type` `naru-live`), get no model call
+and no log line (`naru_live_a_fork_and_an_explicit_model_are_never_routed`).
 
 ## Order of checks and fallback
 
@@ -238,6 +242,78 @@ write failure is one stderr line). Two kinds:
   prints none is never tracked in `todo_dispatched`, so it logs a decision and
   no outcome.
 - A refusal (naru-live) logs nothing.
+- A third kind, `subagent`, is a subagent spawn's decision ("Subagent
+  spawns" below). Every task-side reader keys on `kind: "decision"`, so these
+  lines never reach the retry history, outcome pairing, `naru cc router` or
+  the Router review.
+
+## Subagent spawns (naru task 2684)
+
+The second entry point: a subagent or delegate a session starts (the `Agent`
+tool, older `Task`) gets its model from the router, chosen **once, at spawn**,
+and it **overrides** the agent definition's frontmatter model (the person's
+decision: the frontmatter is not a floor). `route_subagent` in
+`model_router.rs`, reached only through `naru model-router subagent`, which
+the `agent-route.sh` hook calls (`docs/agent-route.md`). The hook sets
+`tool_input.model` in its `updatedInput`; measured on Claude Code 2.1.322, an
+`updatedInput.model` beats the frontmatter (a `model: haiku` agent ran
+`claude-sonnet-5-5` with the hook, `claude-haiku-5-5` without).
+
+`naru model-router subagent` reads the `PreToolUse` payload on stdin and
+prints `{model, source, reason, latency_ms}`; `model: null` leaves the spawn
+untouched. In order:
+
+1. **Refused**, no call and no log line (`source: "refused"`): the spawning
+   session is naru-live (the payload's `agent_type`, set for a session started
+   with `--agent`), the target is `naru-live`, the target is `fork` (a fork
+   always runs its parent's model), or the spawn already names a `model` (the
+   spawning agent chose it; only the frontmatter default is overridden).
+2. **The switch** (`watchers.model-router`, the same one): off -> `disabled`,
+   model null; unreadable config -> `fallback`, model null.
+3. **The role table** (`ROLE_MODELS`), no model call, source `rule`: recon,
+   Explore, researcher, claude-code-guide, verifier, ui-verifier,
+   diff-reviewer, naru-retro, inbox-triage, ux-designer, implementer,
+   swift-implementer -> `sonnet`; planner, Plan, supervisor -> `opus`. This
+   is the delegate-brief role rule as a table (naru task 2690): the role
+   decides, never the task the brief embeds.
+4. **Haiku**, source `haiku`: any other spawn (untyped, `general-purpose`,
+   `claude`, an unknown named type) goes through the same prompt, schema and
+   allowed set as a queued task, with the brief (the prompt, else the
+   description) as the text. An unknown named type is prefixed `You are the
+   agent "<type>".`, so the role rule applies; a general-purpose brief that
+   declares its own role is routed by that role by the prompt itself. The
+   call's timeout is **8 s** (`SUBAGENT_TIMEOUT`), shorter than a task's 15 s,
+   because the spawning tool call waits on it.
+5. **Any failure** (timeout, non-JSON, a model outside the set, an empty
+   reason) -> `fallback`, model null: the spawn runs its frontmatter model.
+   This is the opposite of a queued task's fallback (`opus`): a subagent
+   already has a sane default.
+
+Not applied to subagents: controlled exploration (naru task 2688), retry one
+level up (naru task 2686) and parking. Each spawn is decided on its own.
+
+Each decision but a refusal is one line:
+
+```json
+{"kind":"subagent","time":"2026-11-10 19:40:02","session_id":"…","session_agent":"supervisor","subagent_type":"verifier","description":"<first 120 chars>","input":"<first 400 chars of the prompt>","model":"sonnet","reason":"Role verifier: the role table","source":"rule","latency_ms":0}
+```
+
+`costly: true` is added on `fable`. No `task_id`: the hook does not know the
+task.
+
+Cost per spawn: a rule-routed spawn adds ~25 ms of hook time (gate, debug
+build, including the swap step); a Haiku-routed one adds the call (see the
+live test below). Fixtures: `src/testdata/model_router_subagent_fixtures.json`,
+18 `{subagent_type, prompt, expected}` briefs, eight named types and ten
+general-purpose/untyped ones, four of those declaring a role. The live test
+
+```bash
+cargo test model_router_live_subagent_fixtures -- --ignored --nocapture
+```
+
+asserts all but two as expected, the Haiku-routed p95 under 5 s and every
+rule-routed one under 0.5 s. `scripts/agent-route-check.sh` is the hook's
+gate.
 
 ## Fable cost
 

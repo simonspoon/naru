@@ -8482,6 +8482,8 @@ mod tests {
             json!({"kind":"decision","time":at(0),"task_id":a,"project_id":p.id,"model":"sonnet","reason":"Task: one file","source":"haiku","latency_ms":2100}),
             json!({"kind":"decision","time":at(1),"task_id":b,"project_id":p.id,"model":"fable","reason":"Task: large","source":"haiku","latency_ms":3000,"costly":true,"experiment":false,"rubric_model":"fable"}),
             json!({"kind":"outcome","time":at(2),"task_id":b,"outcome":"failed","status":"todo","detail":"spawn failed"}),
+            // A subagent spawn's decision (naru task 2684) is not a task pick: no row.
+            json!({"kind":"subagent","time":at(3),"session_id":"sa1","subagent_type":"verifier","model":"sonnet","reason":"Role verifier: the role table","source":"rule","latency_ms":0}),
             json!({"kind":"outcome","time":at(500),"task_id":a,"outcome":"bounced","status":"todo","detail":"session sa1 ended"}),
             json!({"kind":"decision","time":at(1000),"task_id":a,"project_id":p.id,"model":"sonnet","reason":"Task: one file","source":"reused","latency_ms":0}),
             json!({"kind":"outcome","time":at(1500),"task_id":a,"outcome":"done","status":"done","detail":"session sa2 ended"}),

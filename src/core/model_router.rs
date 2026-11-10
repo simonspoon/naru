@@ -92,6 +92,9 @@ pub enum Source {
     /// The task came back with [`MAX_ESCALATIONS`] retries spent: the caller
     /// parks it instead of starting a session; no call was made.
     Parked,
+    /// A subagent spawn of a type the role table names (naru task 2684); no
+    /// call was made.
+    Rule,
 }
 
 impl Source {
@@ -103,6 +106,7 @@ impl Source {
             Source::Reused => "reused",
             Source::Escalation => "escalation",
             Source::Parked => "parked",
+            Source::Rule => "rule",
         }
     }
 }
@@ -731,6 +735,245 @@ fn log_outcome_in(
             "detail": bounded(detail, REASON_MAX),
         }),
     );
+}
+
+// ---- subagent spawns (naru task 2684) ------------------------------------
+
+/// The subagent router's Haiku call timeout. It runs inside a `PreToolUse`
+/// hook, so the spawning tool call waits on it; shorter than [`TIMEOUT`].
+pub const SUBAGENT_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// Agent types whose job fixes the model, the role rule of the shared prompt
+/// (naru task 2690) as a table: a spawn of one of these is routed without a
+/// model call. Verifies, reviews, checks, researches, does recon, designs UX
+/// or implements an already-planned brief: `sonnet`; plans, architects or
+/// supervises: `opus`.
+pub const ROLE_MODELS: &[(&str, &str)] = &[
+    ("recon", "sonnet"),
+    ("Explore", "sonnet"),
+    ("researcher", "sonnet"),
+    ("claude-code-guide", "sonnet"),
+    ("verifier", "sonnet"),
+    ("ui-verifier", "sonnet"),
+    ("diff-reviewer", "sonnet"),
+    ("naru-retro", "sonnet"),
+    ("inbox-triage", "sonnet"),
+    ("ux-designer", "sonnet"),
+    ("implementer", "sonnet"),
+    ("swift-implementer", "sonnet"),
+    ("planner", "opus"),
+    ("Plan", "opus"),
+    ("supervisor", "opus"),
+];
+
+/// Agent types that carry no role of their own: the brief alone decides.
+const UNTYPED: [&str; 3] = ["", "general-purpose", "claude"];
+
+/// One subagent spawn, read from a Claude Code `PreToolUse` payload for the
+/// `Agent` (older: `Task`) tool. Every text field is untrusted.
+#[derive(Debug, Default)]
+pub struct SubagentRequest {
+    pub session_id: Option<String>,
+    /// The spawning session's own agent (`agent_type` of the payload: the
+    /// `--agent` a main session started with, or the subagent spawning).
+    pub session_agent: Option<String>,
+    pub subagent_type: Option<String>,
+    pub description: String,
+    pub prompt: String,
+    /// The model the spawn already names (the Agent tool's `model`).
+    pub model: Option<String>,
+}
+
+impl SubagentRequest {
+    /// Reads a `PreToolUse` payload. `Err` when it is not an `Agent`/`Task`
+    /// call with a `tool_input` object.
+    pub fn from_payload(v: &Value) -> Result<Self, String> {
+        match v["tool_name"].as_str() {
+            Some("Agent" | "Task") => {}
+            _ => return Err("the payload is not an Agent or Task tool call".to_string()),
+        }
+        let input = v["tool_input"]
+            .as_object()
+            .ok_or("the payload has no tool_input object")?;
+        let text = |o: Option<&Value>| o.and_then(Value::as_str).map(str::to_string);
+        Ok(SubagentRequest {
+            session_id: text(v.get("session_id")),
+            session_agent: text(v.get("agent_type")),
+            subagent_type: text(input.get("subagent_type")),
+            description: text(input.get("description")).unwrap_or_default(),
+            prompt: text(input.get("prompt")).unwrap_or_default(),
+            model: text(input.get("model")).filter(|m| !m.trim().is_empty()),
+        })
+    }
+}
+
+/// What the subagent router decided. `model: None` leaves the spawn untouched
+/// (it runs its agent definition's frontmatter model): every failure, and the
+/// switch off.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubagentDecision {
+    pub model: Option<String>,
+    pub reason: String,
+    /// `rule`, `haiku`, `fallback` or `disabled`.
+    pub source: Source,
+    pub latency_ms: u64,
+}
+
+/// The subagent router's entry point (naru task 2684): refuse what is never
+/// routed, then pick a model, log the decision and return it. The pick
+/// **overrides** the agent definition's frontmatter model (the person's call,
+/// not a floor). Exploration and retry escalation are queued-task-only and do
+/// not apply here. `prompts` is read only when the Haiku call is made.
+pub fn route_subagent(
+    req: &SubagentRequest,
+    prompts: &dyn Fn() -> Result<config::Prompts, String>,
+    cwd: &str,
+) -> Result<SubagentDecision, Refused> {
+    refuse_subagent(req)?;
+    let call = |prompt: &str| {
+        llm::complete_structured(
+            config::MODEL_ROUTER,
+            None,
+            ROUTER_NAME,
+            prompt,
+            SCHEMA,
+            Some(ROUTER_MODEL),
+            &prompts()?,
+            cwd,
+            SUBAGENT_TIMEOUT,
+        )
+    };
+    route_subagent_with(
+        req,
+        &SubagentDeps {
+            log: log_path(),
+            enabled: config::model_router_enabled(),
+            call: &call,
+        },
+    )
+}
+
+/// What [`route_subagent_with`] reads from outside.
+struct SubagentDeps<'a> {
+    log: Option<PathBuf>,
+    enabled: Result<bool, String>,
+    call: &'a dyn Fn(&str) -> Result<Value, String>,
+}
+
+/// What is never routed, with no model call and no log line: anything in or
+/// to naru-live, a fork (it always runs its parent's model), and a spawn that
+/// names its own model (the spawning agent chose it; only the frontmatter
+/// default is overridden).
+fn refuse_subagent(req: &SubagentRequest) -> Result<(), Refused> {
+    if req.session_agent.as_deref() == Some(LIVE_AGENT_NAME)
+        || req.subagent_type.as_deref() == Some(LIVE_AGENT_NAME)
+    {
+        return Err(Refused(
+            "the live voice agent (naru-live) is never routed, nor are the spawns it makes"
+                .to_string(),
+        ));
+    }
+    if req.subagent_type.as_deref() == Some("fork") {
+        return Err(Refused("a fork always runs its parent's model".to_string()));
+    }
+    if req.model.is_some() {
+        return Err(Refused("the spawn names its own model".to_string()));
+    }
+    Ok(())
+}
+
+fn route_subagent_with(
+    req: &SubagentRequest,
+    deps: &SubagentDeps<'_>,
+) -> Result<SubagentDecision, Refused> {
+    refuse_subagent(req)?;
+    let d = decide_subagent(req, deps);
+    if let Some(path) = &deps.log {
+        append_line(path, &subagent_line(req, &d));
+    }
+    Ok(d)
+}
+
+fn decide_subagent(req: &SubagentRequest, deps: &SubagentDeps<'_>) -> SubagentDecision {
+    let untouched = |source: Source, reason: String, latency_ms: u64| SubagentDecision {
+        model: None,
+        reason: bounded(&reason, REASON_MAX),
+        source,
+        latency_ms,
+    };
+    match &deps.enabled {
+        Err(e) => {
+            return untouched(
+                Source::Fallback,
+                format!("the config is unreadable: {e}"),
+                0,
+            );
+        }
+        Ok(false) => {
+            return untouched(
+                Source::Disabled,
+                "the router is switched off (watchers.model-router)".to_string(),
+                0,
+            );
+        }
+        Ok(true) => {}
+    }
+    let kind = req.subagent_type.as_deref().unwrap_or_default();
+    if let Some((_, model)) = ROLE_MODELS.iter().find(|(t, _)| *t == kind) {
+        return SubagentDecision {
+            model: Some(model.to_string()),
+            reason: format!("Role {kind}: the role table"),
+            source: Source::Rule,
+            latency_ms: 0,
+        };
+    }
+    let brief = if req.prompt.trim().is_empty() {
+        req.description.as_str()
+    } else {
+        req.prompt.as_str()
+    };
+    // A named type the table does not know is still a role: say so, so the
+    // prompt's role rule (not the embedded task) decides.
+    let text = if UNTYPED.contains(&kind) {
+        brief.to_string()
+    } else {
+        format!("You are the agent {kind:?}.\n\n{brief}")
+    };
+    let started = Instant::now();
+    let answer = (deps.call)(&prompt(&text));
+    let latency_ms = started.elapsed().as_millis() as u64;
+    match parse_answer(answer) {
+        Ok((model, reason, _risky)) => SubagentDecision {
+            model: Some(model),
+            reason,
+            source: Source::Haiku,
+            latency_ms,
+        },
+        Err(e) => untouched(Source::Fallback, e, latency_ms),
+    }
+}
+
+/// A subagent decision's log line. Its `kind` is `subagent`, so every reader
+/// of task decisions (`kind: decision`: the retry history, `naru cc router`,
+/// the Router review) never sees it.
+fn subagent_line(req: &SubagentRequest, d: &SubagentDecision) -> Value {
+    let mut line = json!({
+        "kind": "subagent",
+        "time": now_ts(),
+        "session_id": req.session_id,
+        "session_agent": req.session_agent,
+        "subagent_type": req.subagent_type,
+        "description": bounded(&req.description, 120),
+        "input": req.prompt.chars().take(LOG_INPUT_MAX).collect::<String>(),
+        "model": d.model,
+        "reason": d.reason,
+        "source": d.source.as_str(),
+        "latency_ms": d.latency_ms,
+    });
+    if d.model.as_deref() == Some("fable") {
+        line["costly"] = json!(true);
+    }
+    line
 }
 
 #[cfg(test)]
@@ -1759,5 +2002,309 @@ mod tests {
             })
             .collect();
         std::fs::write(format!("{path}.out.json"), json!(out).to_string()).unwrap();
+    }
+
+    // ---- subagent spawns (naru task 2684) ----
+
+    fn sub(kind: Option<&str>, prompt: &str) -> SubagentRequest {
+        SubagentRequest {
+            session_id: Some("s-1".to_string()),
+            subagent_type: kind.map(str::to_string),
+            description: "do it".to_string(),
+            prompt: prompt.to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn sub_deps<'a>(
+        log: Option<PathBuf>,
+        call: &'a dyn Fn(&str) -> Result<Value, String>,
+    ) -> SubagentDeps<'a> {
+        SubagentDeps {
+            log,
+            enabled: Ok(true),
+            call,
+        }
+    }
+
+    #[derive(serde::Deserialize)]
+    struct SubFixture {
+        subagent_type: Option<String>,
+        prompt: String,
+        expected: String,
+    }
+
+    fn sub_fixtures() -> Vec<SubFixture> {
+        serde_json::from_str(include_str!(
+            "../testdata/model_router_subagent_fixtures.json"
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_payload_is_read_into_a_subagent_request() {
+        let v = json!({"session_id": "s", "agent_type": "supervisor", "tool_name": "Task",
+            "tool_input": {"subagent_type": "recon", "description": "d", "prompt": "p", "model": " "}});
+        let r = SubagentRequest::from_payload(&v).unwrap();
+        assert_eq!(r.session_id.as_deref(), Some("s"));
+        assert_eq!(r.session_agent.as_deref(), Some("supervisor"));
+        assert_eq!(r.subagent_type.as_deref(), Some("recon"));
+        assert_eq!((r.description.as_str(), r.prompt.as_str()), ("d", "p"));
+        assert_eq!(r.model, None, "a blank model is no model");
+        for bad in [
+            json!({"tool_name": "Bash", "tool_input": {}}),
+            json!({"tool_name": "Agent"}),
+            json!("x"),
+        ] {
+            assert!(SubagentRequest::from_payload(&bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn naru_live_a_fork_and_an_explicit_model_are_never_routed() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("m.log");
+        let call = |_: &str| -> Result<Value, String> { panic!("a refusal never calls") };
+        let d = sub_deps(Some(log.clone()), &call);
+        let live_session = SubagentRequest {
+            session_agent: Some(LIVE_AGENT_NAME.to_string()),
+            ..sub(Some("recon"), "x")
+        };
+        let explicit = SubagentRequest {
+            model: Some("haiku".to_string()),
+            ..sub(Some("recon"), "x")
+        };
+        for r in [
+            live_session,
+            sub(Some(LIVE_AGENT_NAME), "x"),
+            sub(Some("fork"), "x"),
+            explicit,
+        ] {
+            assert!(route_subagent_with(&r, &d).is_err(), "{r:?}");
+        }
+        assert!(!log.exists(), "a refusal logs nothing");
+        // The public entry point refuses before it reads anything.
+        let prompts = || -> Result<config::Prompts, String> { panic!("never read") };
+        assert!(route_subagent(&sub(Some(LIVE_AGENT_NAME), "x"), &prompts, ".").is_err());
+    }
+
+    #[test]
+    fn a_named_role_is_routed_by_the_table_without_a_call_and_logged_as_subagent() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("m.log");
+        let call = |_: &str| -> Result<Value, String> { panic!("the table needs no call") };
+        let d = sub_deps(Some(log.clone()), &call);
+        for (kind, want) in [
+            ("verifier", "sonnet"),
+            ("recon", "sonnet"),
+            ("planner", "opus"),
+        ] {
+            let got = route_subagent_with(&sub(Some(kind), "x"), &d).unwrap();
+            assert_eq!(got.model.as_deref(), Some(want), "{kind}");
+            assert_eq!(got.source, Source::Rule);
+            assert!(
+                got.reason.starts_with(&format!("Role {kind}:")),
+                "{}",
+                got.reason
+            );
+        }
+        let l = lines(&log);
+        assert_eq!(l.len(), 3);
+        assert_eq!(l[2]["kind"], "subagent");
+        assert_eq!(l[2]["source"], "rule");
+        assert_eq!(l[2]["subagent_type"], "planner");
+        assert_eq!(l[2]["session_id"], "s-1");
+        assert!(l[2].get("task_id").is_none());
+    }
+
+    #[test]
+    fn an_untyped_or_unknown_spawn_asks_haiku_and_a_named_one_is_declared_a_role() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("m.log");
+        let seen = std::cell::RefCell::new(Vec::<String>::new());
+        let call = |p: &str| {
+            seen.borrow_mut().push(p.to_string());
+            Ok(json!({"model": "fable", "reason": "Task: deep research", "risky": true}))
+        };
+        let d = sub_deps(Some(log.clone()), &call);
+        for kind in [
+            None,
+            Some("general-purpose"),
+            Some("claude"),
+            Some("auditor"),
+        ] {
+            let got = route_subagent_with(&sub(kind, "research it deeply"), &d).unwrap();
+            assert_eq!(got.model.as_deref(), Some("fable"));
+            assert_eq!(got.source, Source::Haiku);
+        }
+        let seen = seen.borrow();
+        assert_eq!(seen.len(), 4);
+        assert!(seen.iter().all(|p| p.contains("research it deeply")));
+        assert!(!seen[1].contains("You are the agent \"general-purpose\""));
+        assert!(
+            seen[3].contains("You are the agent \"auditor\"."),
+            "{}",
+            seen[3]
+        );
+        assert_eq!(lines(&log)[0]["costly"], true);
+        // An empty prompt falls back to the description.
+        let s = SubagentRequest {
+            prompt: String::new(),
+            ..sub(None, "")
+        };
+        let call = |p: &str| {
+            assert!(p.contains("do it"));
+            Ok(json!({"model": "haiku", "reason": "Task: list"}))
+        };
+        let got = route_subagent_with(&s, &sub_deps(None, &call)).unwrap();
+        assert_eq!(got.model.as_deref(), Some("haiku"));
+    }
+
+    #[test]
+    fn every_failure_and_the_switch_off_leave_the_spawn_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("m.log");
+        for answer in [
+            Err("timed out".to_string()),
+            Ok(json!({"model": "gpt", "reason": "x"})),
+            Ok(json!({"model": "opus", "reason": " "})),
+        ] {
+            let call = move |_: &str| answer.clone();
+            let got =
+                route_subagent_with(&sub(None, "x"), &sub_deps(Some(log.clone()), &call)).unwrap();
+            assert_eq!(got.model, None);
+            assert_eq!(got.source, Source::Fallback);
+        }
+        let call = |_: &str| -> Result<Value, String> { panic!("off never calls") };
+        for (enabled, source) in [
+            (Ok(false), Source::Disabled),
+            (Err("bad json".to_string()), Source::Fallback),
+        ] {
+            let d = SubagentDeps {
+                log: Some(log.clone()),
+                enabled,
+                call: &call,
+            };
+            // Not even a named role is routed.
+            let got = route_subagent_with(&sub(Some("verifier"), "x"), &d).unwrap();
+            assert_eq!((got.model, got.source), (None, source));
+        }
+        let l = lines(&log);
+        assert_eq!(l.len(), 5);
+        assert!(
+            l.iter()
+                .all(|l| l["kind"] == "subagent" && l["model"].is_null())
+        );
+    }
+
+    /// A subagent line never enters a task's history: no reuse, no
+    /// escalation, no outcome pairing.
+    #[test]
+    fn subagent_lines_stay_out_of_task_decisions() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("m.log");
+        let call = |_: &str| Ok(json!({"model": "haiku", "reason": "Task: list"}));
+        route_subagent_with(&sub(None, "x"), &sub_deps(Some(log.clone()), &call)).unwrap();
+        // A crafted task_id on a subagent line is still not a decision.
+        append_line(
+            &log,
+            &json!({"kind": "subagent", "task_id": 7, "model": "haiku", "source": "haiku",
+                "reason": "x"}),
+        );
+        assert!(history(&log, 7).is_none());
+        log_outcome_in(&log, 7, 1, Outcome::Done, Some("done"), "end");
+        assert_eq!(lines(&log).len(), 2, "no outcome for a subagent line");
+    }
+
+    #[test]
+    fn the_subagent_fixtures_cover_roles_and_the_table_routes_its_own() {
+        let f = sub_fixtures();
+        assert!(f.len() >= 15, "{}", f.len());
+        assert!(f.iter().all(|x| MODELS.contains(&x.expected.as_str())));
+        let declared = f
+            .iter()
+            .filter(|x| x.prompt.starts_with("You are the"))
+            .count();
+        assert!(declared >= 4, "role-declaring briefs: {declared}");
+        let call = |_: &str| -> Result<Value, String> {
+            Ok(json!({"model": "opus", "reason": "Task: stub"}))
+        };
+        let d = sub_deps(None, &call);
+        let mut tabled = 0;
+        for x in &f {
+            let kind = x.subagent_type.as_deref();
+            if ROLE_MODELS.iter().any(|(t, _)| Some(*t) == kind) {
+                tabled += 1;
+                let got = route_subagent_with(&sub(kind, &x.prompt), &d).unwrap();
+                assert_eq!(got.model.as_deref(), Some(x.expected.as_str()), "{kind:?}");
+            }
+        }
+        assert!(tabled >= 5, "{tabled}");
+    }
+
+    /// Every subagent fixture through the real router (the table offline, the
+    /// rest through the real Haiku call; no log). Uses the person's Claude
+    /// subscription:
+    /// `cargo test model_router_live_subagent_fixtures -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn model_router_live_subagent_fixtures() {
+        let f = sub_fixtures();
+        let cwd = config::workspace_dir().to_string_lossy().into_owned();
+        let call = |p: &str| {
+            llm::complete_structured(
+                config::MODEL_ROUTER,
+                None,
+                ROUTER_NAME,
+                p,
+                SCHEMA,
+                Some(ROUTER_MODEL),
+                &config::Prompts::default(),
+                &cwd,
+                SUBAGENT_TIMEOUT,
+            )
+        };
+        let d = sub_deps(None, &call);
+        let (mut correct, mut haiku_ms, mut rule_ms) = (0, Vec::new(), Vec::new());
+        for (i, x) in f.iter().enumerate() {
+            let started = Instant::now();
+            let got = route_subagent_with(&sub(x.subagent_type.as_deref(), &x.prompt), &d).unwrap();
+            let ms = started.elapsed().as_millis() as u64;
+            if got.source == Source::Rule {
+                rule_ms.push(ms)
+            } else {
+                haiku_ms.push(ms)
+            }
+            let model = got.model.clone().unwrap_or_else(|| "UNTOUCHED".to_string());
+            if model == x.expected {
+                correct += 1;
+            } else {
+                println!(
+                    "MISS #{i} {:?} expected {} got {model} ({}): {}",
+                    x.subagent_type,
+                    x.expected,
+                    got.source.as_str(),
+                    got.reason
+                );
+            }
+            println!(
+                "#{i} {:?} -> {model} {} {ms} ms",
+                x.subagent_type,
+                got.source.as_str()
+            );
+        }
+        haiku_ms.sort_unstable();
+        let p95 = haiku_ms[((haiku_ms.len() as f64) * 0.95).ceil() as usize - 1];
+        println!(
+            "correct {correct}/{}; haiku-routed {} median {} p95 {p95} ms; rule-routed {} max {} ms",
+            f.len(),
+            haiku_ms.len(),
+            haiku_ms[haiku_ms.len() / 2],
+            rule_ms.len(),
+            rule_ms.iter().max().unwrap_or(&0)
+        );
+        assert!(correct >= f.len() - 2, "only {correct}/{}", f.len());
+        assert!(p95 < 5_000, "haiku-routed p95 {p95} ms");
+        assert!(rule_ms.iter().all(|&ms| ms < 500));
     }
 }

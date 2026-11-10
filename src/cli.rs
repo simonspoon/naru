@@ -200,6 +200,10 @@ EXAMPLES
     /// proposes and writes the notes itself. See docs/kb.md.
     #[command(subcommand)]
     Kb(KbCmd),
+    /// The model router's hook entry point for subagent spawns (naru task
+    /// 2684, docs/model-router.md)
+    #[command(name = "model-router", subcommand)]
+    ModelRouter(ModelRouterCmd),
     /// Move mesa and Claude Code's home directory to a new computer
     /// (docs/migrate.md)
     #[command(subcommand)]
@@ -463,6 +467,26 @@ EXAMPLES
         #[arg(long)]
         print_default_rules: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum ModelRouterCmd {
+    /// Pick the model of one subagent spawn from a PreToolUse hook payload
+    ///
+    /// Reads a Claude Code `PreToolUse` payload for the `Agent` (or `Task`)
+    /// tool on stdin and prints `{model, source, reason, latency_ms}`. `model`
+    /// is the model the spawn should run on, overriding its agent
+    /// definition's frontmatter, or null to leave the spawn untouched: the
+    /// switch off, any failure, and `source: "refused"` (naru-live, a fork, a
+    /// spawn naming its own `model`). A named role (recon, verifier, planner,
+    /// ...) is routed by a fixed table with no model call; any other spawn by
+    /// one tool-less Haiku call (8 s timeout). Each decision but a refusal is
+    /// one `kind: "subagent"` line in `logs/model-router.log`. The
+    /// `agent-route.sh` library hook calls it. Takes no `--quiet`.
+    #[command(after_help = "\
+EXAMPLES
+  echo '{\"tool_name\":\"Agent\",\"tool_input\":{\"subagent_type\":\"verifier\",\"prompt\":\"check it\"}}' | naru model-router subagent")]
+    Subagent,
 }
 
 #[derive(Subcommand)]
@@ -5918,6 +5942,35 @@ fn execute(command: Command) -> Result<()> {
         Command::Cc(cmd) => run_cc(cmd),
         Command::Retro(cmd) => run_retro(cmd),
         Command::Kb(cmd) => run_kb(cmd),
+        Command::ModelRouter(ModelRouterCmd::Subagent) => {
+            use crate::core::model_router;
+            let mut input = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut input)?;
+            let payload: serde_json::Value = serde_json::from_str(&input)
+                .map_err(|e| Error::Validation(format!("stdin is not a JSON payload: {e}")))?;
+            let req =
+                model_router::SubagentRequest::from_payload(&payload).map_err(Error::Validation)?;
+            let prompts = || {
+                let store = Store::open_default().map_err(|e| e.to_string())?;
+                crate::core::library::prompts(&store).map_err(|e| e.to_string())
+            };
+            let dir = config::workspace_dir().to_string_lossy().into_owned();
+            print_json(&match model_router::route_subagent(&req, &prompts, &dir) {
+                Ok(d) => json!({
+                    "model": d.model,
+                    "source": d.source.as_str(),
+                    "reason": d.reason,
+                    "latency_ms": d.latency_ms,
+                }),
+                Err(refused) => json!({
+                    "model": null,
+                    "source": "refused",
+                    "reason": refused.0,
+                    "latency_ms": 0,
+                }),
+            });
+            Ok(())
+        }
         Command::Migrate(cmd) => run_migrate(cmd),
         Command::Serve {
             port,

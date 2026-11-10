@@ -1,0 +1,20 @@
+[
+  {"subagent_type": "recon", "prompt": "Find where dispatch_task_session is defined and who calls it. Read-only; report file:line.", "expected": "sonnet"},
+  {"subagent_type": "verifier", "prompt": "Verify task 2601: run scripts/queue-check.sh and cargo test queue_watcher against the spawn/queue machinery change and report PASS/FAIL with numbers.", "expected": "sonnet"},
+  {"subagent_type": "ui-verifier", "prompt": "Live-verify the new Agents sidebar with khora against the dev serve on :7771; baseline at HEAD, then the fix.", "expected": "sonnet"},
+  {"subagent_type": "diff-reviewer", "prompt": "Review the uncommitted diff, a large refactor of the store's migration machinery. Rank findings.", "expected": "sonnet"},
+  {"subagent_type": "implementer", "prompt": "Implement the planned brief: add the retry cap in src/core/store.rs and run the fast gate.", "expected": "sonnet"},
+  {"subagent_type": "planner", "prompt": "Turn this into a brief: fix one typo in README.md.", "expected": "opus"},
+  {"subagent_type": "supervisor", "prompt": "Supervise naru task 2700 end to end.", "expected": "opus"},
+  {"subagent_type": "Explore", "prompt": "Sweep frontend/src for every use of keyboardScope and summarize the patterns. Medium breadth.", "expected": "sonnet"},
+  {"subagent_type": "general-purpose", "prompt": "Summarize the last 200 lines of ~/.naru/logs/reaper.log and list the distinct error messages. Read-only: change nothing, edit no file.", "expected": "haiku"},
+  {"subagent_type": "general-purpose", "prompt": "List every file under src/core that defines a pub const whose name ends in _HOOK, with its line number. Read-only search; do not edit anything.", "expected": "haiku"},
+  {"subagent_type": null, "prompt": "Fix the typos \"recieve\" and \"occured\" in the comments of src/core/alarm.rs. Comment-only edit, no code logic changes. Check: git diff shows only comment lines.", "expected": "haiku"},
+  {"subagent_type": "general-purpose", "prompt": "Fix the off-by-one in bounded() in src/core/model_router.rs so a string of exactly max characters gets no ellipsis. Add a unit test beside the others. Check: cargo test model_router passes.", "expected": "sonnet"},
+  {"subagent_type": "general-purpose", "prompt": "Debug why the queue-watcher sometimes starts two sessions for the same task. The cause is unknown; it involves the claim loop in src/api.rs and the reaper running concurrently.", "expected": "opus"},
+  {"subagent_type": "general-purpose", "prompt": "Design the architecture for moving Naru's SQLite store to a sync-capable multi-device backend: deep research into the options and a written analysis of the trade-offs.", "expected": "fable"},
+  {"subagent_type": "general-purpose", "prompt": "You are the agent \"verifier\" for naru task 2650, which rewrites the spawn/queue machinery across src/api.rs and src/core/runner.rs (large, high risk). Run the gates and report PASS/FAIL with numbers. Never edit source.", "expected": "sonnet"},
+  {"subagent_type": "general-purpose", "prompt": "You are the reviewer stage of the Task loop workflow for naru task 2651, a migration of the task table. Read the diff and return ranked findings; do not edit.", "expected": "sonnet"},
+  {"subagent_type": "general-purpose", "prompt": "You are the planner for naru task 2652: turn the person's intent (a new cost dashboard) into an executable brief with scope, files, acceptance metric and risks. Never edit code.", "expected": "opus"},
+  {"subagent_type": null, "prompt": "You are the implementer. The brief is already planned and approved: add the --since flag to `naru inbox list` in src/cli.rs exactly as the brief says, then run cargo test inbox.", "expected": "sonnet"}
+]

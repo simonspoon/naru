@@ -10,7 +10,13 @@
 #   * Explore / fork / an already-specialist type, a no-match brief (no log),
 #     decide backend off, a missing agent definition -> no output;
 #   * a hostile description is logged literally and nothing runs;
-#   * garbage / empty stdin, no naru on PATH, no jq -> exit 0, no output.
+#   * garbage / empty stdin, no naru on PATH, no jq -> exit 0, no output;
+#   * the model step (naru task 2684), against a stub `claude`: a named role
+#     gets the role table's model with no model call, a swap and a model land
+#     in one updatedInput, an untyped brief takes the stub's pick, a failing
+#     call / the switch off leave the spawn untouched, naru-live (target or
+#     spawning session), a fork and an explicit model are never routed, and a
+#     rule-routed spawn costs the hook under 0.5 s.
 set -euo pipefail
 # Drop inherited NARU_* vars: Naru reads them before MESA_*, so one would escape this script's isolation.
 unset $(env | sed -n 's/^\(NARU_[A-Za-z0-9_]*\)=.*/\1/p')
@@ -25,7 +31,22 @@ BIN="$PWD/target/debug"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 export MESA_DB="$TMP/mesa.db"
-export MESA_CONFIG_FILE="$TMP/cfg/config.json" # absent until the backend-off case
+export MESA_CONFIG_FILE="$TMP/cfg/config.json"
+# The model router is off for every case before (j): those cases pin the swap alone.
+mkdir -p "$TMP/cfg"
+ROUTER_OFF='{"watchers": {"model-router": "off"}}'
+echo "$ROUTER_OFF" >"$MESA_CONFIG_FILE"
+# A stub `claude`: never the real one. Each call is one line in $STUB_CALLS.
+mkdir -p "$TMP/stub"
+export STUB_CALLS="$TMP/stub/calls"
+cat >"$TMP/stub/claude" <<'STUB'
+#!/usr/bin/env bash
+echo call >>"$STUB_CALLS"
+[ "${STUB_MODE:-ok}" = fail ] && { echo "stub failure" >&2; exit 1; }
+printf '{"type":"result","subtype":"success","is_error":false,"result":"","structured_output":{"reason":"Task: read-only summary","model":"%s","risky":false}}\n' "${STUB_MODEL:-haiku}"
+STUB
+chmod +x "$TMP/stub/claude"
+export MESA_CLAUDE_BIN="$TMP/stub/claude"
 export HOME="$TMP/home"
 mkdir -p "$HOME/.claude/agents"
 for a in ui-verifier implementer; do echo "# $a" >"$HOME/.claude/agents/$a.md"; done
@@ -118,11 +139,11 @@ mv "$TMP/ui-verifier.md" "$HOME/.claude/agents/ui-verifier.md"
 ok "a swap needs the agent definition (project or user scope)"
 
 # (g) backend off
-mkdir -p "$TMP/cfg"; echo '{"decide": {"backend": "off"}}' >"$MESA_CONFIG_FILE"
+echo '{"decide": {"backend": "off"}, "watchers": {"model-router": "off"}}' >"$MESA_CONFIG_FILE"
 before=$(lines)
 out=$("$HOOK" <<<"$(payload Agent general-purpose "$UI_D" "$UI_P")")
 [ -z "$out" ] && [ "$(lines)" = "$before" ] || fail "decide off must pass through: $out"
-rm -f "$MESA_CONFIG_FILE"
+echo "$ROUTER_OFF" >"$MESA_CONFIG_FILE"
 ok "decide backend off passes through"
 
 # (h) hostile description: logged literally, nothing executed
@@ -147,5 +168,67 @@ for b in bash cat head tr date mkdir; do ln -s "$(command -v $b)" "$TMP/nojq/$b"
 ln -s "$NARU" "$TMP/nojq/naru"
 out=$(PATH="$TMP/nojq" "$BASH" "$HOOK" <<<"$IN") && [ -z "$out" ] || fail "no jq"
 ok "garbage, empty stdin, no naru and no jq all exit 0 with no output"
+
+# (j) the model step (naru task 2684), the router on
+rm -f "$MESA_CONFIG_FILE"
+RLOG="$HOME/.naru/logs/model-router.log"
+rlines() { if [ -f "$RLOG" ]; then wc -l <"$RLOG" | tr -d ' '; else echo 0; fi; }
+calls() { if [ -f "$STUB_CALLS" ]; then wc -l <"$STUB_CALLS" | tr -d ' '; else echo 0; fi; }
+
+in=$(payload Agent verifier "Verify task 9" "You are the verifier. Check the gate output.")
+out=$("$HOOK" <<<"$in")
+[ "$(jq -r .hookSpecificOutput.updatedInput.model <<<"$out")" = sonnet ] || fail "verifier model: $out"
+[ "$(jq -cS '.hookSpecificOutput.updatedInput | del(.model)' <<<"$out")" = "$(jq -cS '.tool_input' <<<"$in")" ] \
+  || fail "the model step changed another field: $out"
+[ "$(calls)" = 0 ] || fail "a named role must not call the model"
+[ "$(tail -1 "$RLOG" | jq -r '[.kind, .source, .model, .subagent_type, .session_id] | join(" ")')" = "subagent rule sonnet verifier sess-1" ] \
+  || fail "verifier log line: $(tail -1 "$RLOG")"
+out=$("$HOOK" <<<"$(payload Agent planner "Plan it" "Fix one typo in README.md")")
+[ "$(jq -r .hookSpecificOutput.updatedInput.model <<<"$out")" = opus ] || fail "planner model: $out"
+ok "a named role gets the role table's model (verifier sonnet, planner opus), no model call, one subagent log line"
+
+out=$("$HOOK" <<<"$(payload Agent general-purpose "$UI_D" "$UI_P")")
+[ "$(jq -r '.hookSpecificOutput.updatedInput | "\(.subagent_type) \(.model)"' <<<"$out")" = "ui-verifier sonnet" ] \
+  || fail "swap and model in one updatedInput: $out"
+[ "$(calls)" = 0 ] || fail "a swapped spawn is rule-routed"
+ok "a general-purpose UI brief is swapped AND given the swapped role's model in one updatedInput"
+
+before=$(rlines)
+out=$("$HOOK" <<<"$(payload Agent general-purpose "Summarize the pricing history" "Read the notes and write two paragraphs.")")
+[ "$(jq -r '.hookSpecificOutput.updatedInput | "\(.subagent_type) \(.model)"' <<<"$out")" = "general-purpose haiku" ] \
+  || fail "untyped brief model: $out"
+[ "$(calls)" = 1 ] && [ "$(rlines)" = $((before + 1)) ] || fail "one model call, one log line"
+[ "$(tail -1 "$RLOG" | jq -r '.source')" = haiku ] || fail "haiku log line: $(tail -1 "$RLOG")"
+grep -q 'Read the notes and write two paragraphs' "$RLOG" || fail "the log keeps the brief's start"
+ok "a no-match general-purpose brief takes the router call's pick, logged source haiku"
+
+out=$(STUB_MODE=fail "$HOOK" <<<"$(payload Agent general-purpose "Summarize the pricing history" "Read the notes.")")
+[ -z "$out" ] || fail "a failed router call must leave the spawn untouched: $out"
+[ "$(tail -1 "$RLOG" | jq -r '"\(.source) \(.model)"')" = "fallback null" ] || fail "fallback log line: $(tail -1 "$RLOG")"
+ok "a failing router call leaves the spawn untouched (fallback, model null, logged)"
+
+before=$(rlines); c0=$(calls)
+LIVE=$(payload Agent recon "Look" "Find the file." | jq -c '.agent_type = "naru-live"')
+for p in "$LIVE" "$(payload Agent naru-live "Talk" "Say hi.")" "$(payload Agent fork "Fork" "Go on.")" \
+  "$(payload Agent recon "Look" "Find the file." | jq -c '.tool_input.model = "haiku"')"; do
+  out=$("$HOOK" <<<"$p")
+  [ -z "$out" ] || fail "never routed: $out <- $p"
+done
+[ "$(rlines)" = "$before" ] && [ "$(calls)" = "$c0" ] || fail "a refusal makes no call and logs nothing"
+ok "naru-live (target or spawning session), a fork and an explicit model are never routed, nothing logged"
+
+echo "$ROUTER_OFF" >"$MESA_CONFIG_FILE"
+out=$("$HOOK" <<<"$(payload Agent verifier "Verify" "Check it.")")
+[ -z "$out" ] || fail "the switch off must leave the spawn untouched: $out"
+rm -f "$MESA_CONFIG_FILE"
+ok "the switch off leaves the spawn untouched"
+
+IN=$(payload Agent recon "Look" "Find the file.")
+t0=$(perl -MTime::HiRes=time -e 'printf "%.3f", time')
+for i in 1 2 3 4 5; do "$HOOK" <<<"$IN" >/dev/null; done
+t1=$(perl -MTime::HiRes=time -e 'printf "%.3f", time')
+per=$(perl -e "printf '%.3f', ($t1 - $t0) / 5")
+perl -e "exit(!($per < 0.5))" || fail "a rule-routed spawn costs the hook ${per}s (budget 0.5 s)"
+ok "a rule-routed spawn costs the hook ${per}s (budget 0.5 s)"
 
 echo "agent-route-check: all ok"

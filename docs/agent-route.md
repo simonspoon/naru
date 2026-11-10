@@ -21,7 +21,8 @@ naru library hook enable agent-route.sh --event PreToolUse --matcher 'Agent|Task
 
 The payload's `tool_name` must be `Agent` (older: `Task`) and its
 `tool_input.subagent_type` missing, empty, `general-purpose` or `claude`;
-anything else (`fork`, `Explore`, any named type) passes through untouched.
+anything else (`fork`, `Explore`, any named type) is never swapped, though the
+model step below still applies to it.
 The hook then runs
 
 ```
@@ -35,15 +36,32 @@ back to the prompt's first line). Only full-toolset specialists are offered —
 `Explore` is read-only, so it never is. It swaps **only** when the choice is
 not null and not `general-purpose`, `confidence >= 0.8`, `agreement >= 1`, and
 `<project>/.claude/agents/<choice>.md` or `~/.claude/agents/<choice>.md`
-exists (a swap to an unknown type would fail the spawn).
+exists (a swap to an unknown type would fail the spawn). Either way the model
+step below then runs.
 
 A swap prints `{"hookSpecificOutput":{"hookEventName":"PreToolUse",
 "updatedInput":{…}}}` where `updatedInput` is the original `tool_input` with
-only `subagent_type` changed (it replaces the whole input). No
+only `subagent_type` (and, from the model step, `model`) changed (it replaces
+the whole input). No
 `permissionDecision` is set, so the normal permission flow applies. Every
-other case prints nothing; the hook always exits 0, never wedges, and treats
+other case prints nothing unless the model step sets a `model`; the hook always exits 0, never wedges, and treats
 description and prompt strictly as data (argv / stdin, never `eval`). No `jq`
 or `naru` on PATH is a pass-through.
+
+## The model step (naru task 2684)
+
+After the swap (or none), the hook pipes the payload, with the swapped
+`subagent_type` if there was one, to `naru model-router subagent` and, when it
+answers a `model`, sets `tool_input.model` in the same `updatedInput`. That
+overrides the agent definition's frontmatter model. It runs for **every**
+`Agent`/`Task` spawn, named types included; what is routed and how is
+`docs/model-router.md` ("Subagent spawns"). A null model, a non-zero exit, or
+a `naru` too old to have the subcommand leaves the model alone.
+
+The two steps are one hook on purpose: with two PreToolUse hooks that both
+return `updatedInput`, Claude Code keeps only one of them (measured on Claude
+Code 2.1.322: a hook setting `model` and a second setting `subagent_type` ran
+the second's type on the frontmatter model).
 
 ## Log
 

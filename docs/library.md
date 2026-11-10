@@ -225,7 +225,7 @@ The starter set — twenty-six rows:
 | `project-memory` | `hook` | `user` | A `SessionStart` hook that prints the session folder's project notebook into its context — literally `core::project_memory::PROJECT_MEMORY_HOOK` (mesa task 1333, `docs/project-memory.md`); name `project-memory.sh` |
 | `alarm-disarm` | `hook` | `user` | A `SubagentStop` hook that disarms the supervisor's `naru alarm arm` — literally `core::alarm::ALARM_HOOK` (`docs/alarm.md`); name `alarm-disarm.sh` |
 | `live-barge-in` | `hook` | `user` | A `PreToolUse`/`PostToolUse` hook that delivers what the person said mid-turn to the `naru-live` agent — literally `core::barge_in::BARGE_IN_HOOK`; name `live-barge-in.sh` |
-| `agent-route` | `hook` | `user` | A `PreToolUse` hook that reroutes a misrouted general-purpose subagent spawn through `naru decide` — literally `core::agent_route::AGENT_ROUTE_HOOK` (`docs/agent-route.md`); name `agent-route.sh` |
+| `agent-route` | `hook` | `user` | A `PreToolUse` hook that reroutes a misrouted general-purpose subagent spawn through `naru decide` and sets every subagent spawn's model through `naru model-router subagent` (naru task 2684) — literally `core::agent_route::AGENT_ROUTE_HOOK` (`docs/agent-route.md`); name `agent-route.sh` |
 | `dev-env-guard` | `hook` | `user` | A `PreToolUse` hook that denies agents `install.sh`, `cargo install`, `launchctl` on `com.naru.*` and writes to `/Applications/Naru.app` — literally `core::dev_guard::DEV_GUARD_HOOK` (naru task 2094, `docs/dev-env.md`); name `dev-env-guard.sh` |
 | `kb-lookup` | `hook` | `user` | A `UserPromptSubmit` hook that asks the knowledge base about a session's first prompt and adds the answer and note paths to its context — literally `core::kb_lookup::KB_LOOKUP_HOOK` (naru task 2274, `docs/kb.md` "Automatic lookup"); name `kb-lookup.sh` |
 | `implementer` | `agent` | `user` | Implements one scoped change in any non-Swift project, runs the fast gate tier from the repo's own docs and reports per finding (`sonnet`) |
@@ -798,7 +798,8 @@ exits 0, so it never wedges a session. See `docs/alarm.md`.
 
 `agent-route` (mesa task 1654, body `core::agent_route::AGENT_ROUTE_HOOK`) is a
 **PreToolUse** hook that reroutes a misrouted general-purpose subagent spawn
-through `naru decide`:
+through `naru decide`, and sets each spawn's model through `naru model-router
+subagent` (naru task 2684):
 
 ```
 naru library hook enable agent-route.sh --event PreToolUse --matcher 'Agent|Task'
