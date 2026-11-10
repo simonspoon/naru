@@ -376,6 +376,32 @@ asserts all but two as expected, the Haiku-routed p95 under 5 s and every
 rule-routed one under 0.5 s. `scripts/agent-route-check.sh` is the hook's
 gate.
 
+## On a new install
+
+Everything the router is made of ships in the binary; nothing is copied from
+another machine.
+
+| Piece | Where it lives | On a new install |
+|---|---|---|
+| Queued-task routing (rubric, prompt, schema, size hints, retry, exploration) | `src/core/model_router.rs` | **on**: the default `queue-watcher` template carries `{model}` and `watchers.model-router` defaults to `on` |
+| The Haiku call's command | the `model-router` template default (`docs/config.md`) | nothing to do; needs `claude` on `PATH` |
+| Subagent routing | the `agent-route.sh` library built-in (`docs/agent-route.md`), calling `naru model-router subagent` | **off until its hook is registered**, one command, below |
+| Router review, Router review (weekly) | managed built-in workflows | installed, on, at the first `serve` start (or `naru workflow defaults --builtins`) |
+| Telemetry | `naru cc router` | nothing to do |
+
+The one thing a person switches on, because it edits `~/.claude/settings.json`:
+
+```
+naru library hook enable agent-route.sh --event PreToolUse --matcher 'Agent|Task'
+```
+
+Two things can keep a queued task unrouted on an install that was configured
+by hand: a saved `commands.queue-watcher` template without `{model}` (add
+`--model {model}` to it), and `watchers.model-router: "off"`. To stop the
+weekly review: `naru workflow update "Router review (weekly)" --enabled false`.
+Windows: the review's `cli` nodes run under Git Bash like every `cli` node and
+need `jq`; nothing else differs.
+
 ## Fable cost
 
 `fable` is the most expensive model (about 2x Opus per token). It is **allowed**
@@ -486,26 +512,41 @@ scorecard`'s.
   own fields (controlled exploration, naru task 2688), passed through as
   logged, `null` on a line without them (naru task 2689).
 
-## Router review (naru task 2689)
+## Router review (naru tasks 2689, 2694)
 
-A workflow, **"Router review"** (voice phrase "review the router", bound to
-the naru project), reads `naru cc router` and files a review a person acts on.
-**"Router review (weekly)"** runs it every Monday 08:00 UTC (a `schedule` entry
-and a `subworkflow` node: one workflow cannot have two entry nodes). Both are
-built by `scripts/router-review-workflow.sh [--project P] [--task N]
-[--replace]` in the db the environment points at. It **never edits** the
-rubric, this doc or the router prompt; it only proposes.
+A workflow, **"Router review"** (voice phrase "review the router"), reads
+`naru cc router` and writes a review a person acts on. **"Router review
+(weekly)"** runs it every Monday 08:00 UTC (a `schedule` entry and a
+`subworkflow` node: one workflow cannot have two entry nodes). Both are
+**managed built-ins** (`install_router_review` in `src/core/workflow.rs`,
+`docs/workflows.md` "The router review built-ins"): global, read-only,
+installed on, on every install. It **never edits** the rubric, this doc or the
+router prompt; it only proposes.
 
 The graph: trigger -> `cli` "Score router telemetry" (one jq pass over `naru
-cc router --since`) -> `branch` "Any flags?" (`Flags raised: [1-9]`).
-No flag: `output` inbox "File report". Flags: `file` reads this doc,
+cc router --since`, `src/core/router_review.sh`) -> `branch` "Any flags?"
+(`Flags raised: [1-9]`). No flag: `output` "Log report" to the
+`router-review` workflow log (`naru workflow log router-review`). Flags:
 `prompt` (opus, tool-less `claude -p` through the `workflow-prompt` template)
-drafts the before/after wording, `output` inbox "File report + proposals",
-then a `gate` (one day): approved files a **backlog** task in the project
-holding the report and proposals; rejected (or timed out) logs it to the
-`router-review` workflow log. Inbox items are `task-summary` (they wait for a
-person; the inbox watcher only triages change requests), filed against task
-2689.
+drafts the before/after wording against the router's own prompt, which the
+node carries verbatim (`model_router::prompt`, so a rubric change reseeds the
+built-in), `output` "Log report + proposals" to the same log, then a `gate`
+(one day; the gate is what tells the person): approved runs `cli` "File
+proposal task", rejected (or timed out) logs it. Nothing in the graph names a
+task, a project id or a path of one machine.
+
+"File proposal task" files the report and proposals as a **backlog** task in
+the project named `naru` when the install has one (a rubric change is a change
+to Naru's own source, so only a machine that develops Naru has anywhere to put
+it); on any other install it logs that no task was filed and where the
+proposals are.
+
+Before naru task 2694 the pair was built by hand
+(`scripts/router-review-workflow.sh`, now gone), bound to a project, and filed
+its report as an inbox item against task 2689. An install that has that pair
+keeps it: the first start of a newer build adopts both in place (same id, runs,
+revisions and on/off; unbound from the project, graph reseeded as a `seed`
+revision), so there is still exactly one of each.
 
 The report has four sections: (1) per model, experiments, escalated and size-hinted rows
 excluded (hinted sessions get their own line after it) (shown as their own count, with the parked count): sessions,

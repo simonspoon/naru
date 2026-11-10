@@ -972,8 +972,9 @@ default is never overwritten.
 
 ## Built-in workflows (naru task 2103)
 
-Two workflows ship in the binary and are **managed**: the two KB workflows
-(see "The KB built-ins" below). The Task loop workflows that shipped before
+Five workflows ship in the binary and are **managed**: the two KB mining
+workflows and `KB: cleanup` (see "The KB built-ins" below), and the two
+router-review workflows ("The router review built-ins"). The Task loop workflows that shipped before
 naru task 2264 are gone: migration index 101 deletes the managed rows (their
 nodes, edges, runs and revisions cascade), and a user's own `Task loop (custom)`
 copy is untouched. `serve` installs or updates the built-ins on **every start**,
@@ -1050,6 +1051,25 @@ missing one; state is `~/.naru/kb-mined.txt` (`NARU_KB_MINED` overrides).
   `require_agent_access`) run the same `install_builtins` as `serve` start and
   answer `{created, skipped}` — `created` holds the built-ins created *or*
   updated (a reseed counts), each with its `enabled`.
+
+### The router review built-ins (naru task 2694)
+
+**`Router review`** (a `voice` trigger, phrase "review the router") and
+**`Router review (weekly)`** (a `schedule`, cron `0 8 * * 1`, Monday 08:00 UTC,
+running the first through a `subworkflow` node) score the model router's
+telemetry; what the graph does is `docs/model-router.md` "Router review".
+
+- **Installed on.** Neither makes a model call until the telemetry raises a
+  flag, and every sink is the `router-review` workflow log, so a fresh install
+  with no routed sessions writes one log line a week.
+- **Self-contained.** The scoring script is `src/core/router_review.sh`,
+  embedded at compile time; the proposal prompt embeds the router's own prompt.
+  No node names a task id, a project id or a path.
+- **Upgrade.** A same-named workflow whose description says `naru task 2689`
+  is the pair `scripts/router-review-workflow.sh` used to build: it is adopted
+  in place (id, runs, revisions and `enabled` kept; made global; graph reseeded
+  as a `seed` revision). Any other same-named workflow is a person's own and
+  is renamed `"<name> (custom)"`, as for the KB mining built-ins.
 
 ### KB: cleanup (naru task 2571)
 

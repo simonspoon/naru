@@ -2387,6 +2387,14 @@ TLN=$("$NARU" workflow show "KB: mine past sessions" | jq -r '.nodes[1].id')
 [ "$("$NARU" workflow show "KB: mine past sessions" | jq -r '.workflow | "\(.builtin) \(.project_id) \(.enabled)"')" = "true null false" ] || fail "KB: mine past sessions is a global, disabled built-in"
 [ "$("$NARU" workflow list HistProj | jq 'length')" = "0" ] || fail "the built-ins are global, not in the project"
 [ "$("$NARU" workflow list | jq '[.[] | select(.name | startswith("Task loop"))] | length')" = "0" ] || fail "no Task loop built-in is installed"
+# the router review pair (naru task 2694): global built-ins, on, voice phrase + Monday 08:00 UTC, nothing of one machine
+for RW in "Router review" "Router review (weekly)"; do
+  [ "$("$NARU" workflow show "$RW" | jq -r '.workflow | "\(.builtin) \(.project_id) \(.enabled)"')" = "true null true" ] || fail "$RW is a global, enabled built-in"
+done
+[ "$("$NARU" workflow show "Router review" | jq -r '[.nodes[] | select(.kind == "trigger") | .config.phrase] | join(",")')" = "review the router" ] || fail "Router review has its voice phrase"
+[ "$("$NARU" workflow show "Router review (weekly)" | jq -r '[.nodes[] | select(.kind == "schedule") | .config.cron] | join(",")')" = "0 8 * * 1" ] || fail "Router review (weekly) runs Monday 08:00 UTC"
+[ "$("$NARU" workflow show "Router review" | jq -r '[.nodes[].config | tostring | select(test("/Users/|\"task_id\"|\"project\""))] | length')" = "0" ] || fail "Router review names no machine path, task or project"
+[ "$("$NARU" workflow list | jq '[.[] | select(.name | startswith("Router review"))] | length')" = "2" ] || fail "exactly one of each router review workflow"
 run 1 "$NARU" workflow node update "$TLN" --title "Edited by hand"
 grep -q "read-only; duplicate it to customise" <<<"$STDERR" || fail "node update names the way out: $STDERR"
 run 1 "$NARU" workflow update "$TL" --name Renamed
