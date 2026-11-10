@@ -133,6 +133,96 @@ fn serve_port(settings: std::result::Result<super::config::ServeSettings, String
     }
 }
 
+/// The vox to call, or `None` where the phone must not be reached: a
+/// sandboxed home (naru task 2696) or `cargo test`, unless `VOX_BIN` names
+/// one explicitly.
+fn allowed_vox(sandboxed: bool, vox_override: Option<String>) -> Option<String> {
+    if vox_override.is_none() && (cfg!(test) || sandboxed) {
+        return None;
+    }
+    Some(vox_override.unwrap_or_else(vox_bin))
+}
+
+/// Whether `bin` is a vox with the `events` subcommand (and so `notify
+/// --choice`, both from vox task 2698). An older or missing vox is `false`.
+/// `--help` touches neither the network nor vox's config.
+pub fn events_supported(bin: &str) -> bool {
+    Command::new(bin)
+        .args(["events", "--help"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// Whether a notification sent now can carry choice buttons: this is an
+/// environment whose `serve` runs the reader ([`reader_bin`]) and vox is new
+/// enough to deliver the taps (naru task 2699).
+pub fn phone_answers() -> bool {
+    reader_bin().is_some_and(|bin| events_supported(&bin))
+}
+
+/// Whether `NARU_DB` / `MESA_DB` (`db_var`) names a db other than the
+/// account's own (`own`): a throwaway db. Unset or empty is the own db.
+fn foreign_db(db_var: Option<String>, own: &[std::path::PathBuf]) -> bool {
+    let Some(db) = db_var.filter(|d| !d.is_empty()) else {
+        return false;
+    };
+    let canon = |p: &std::path::Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let db = canon(std::path::Path::new(&db));
+    !own.iter().any(|p| canon(p) == db)
+}
+
+/// The vox whose `events` the one reader inside `serve` runs, or `None` when
+/// it must not start: wherever [`send`] would skip vox, and also when
+/// `NARU_DB` / `MESA_DB` names a throwaway db (a test serve on the real home
+/// would otherwise consume the real bot's updates; the launchd plist sets
+/// `NARU_DB` to the real db, which is not one). `VOX_BIN` opts back in.
+pub fn reader_bin() -> Option<String> {
+    let own: Vec<_> = ["naru", "mesa"]
+        .iter()
+        .filter_map(|app| {
+            let dirs = directories::ProjectDirs::from("", "", app)?;
+            Some(dirs.data_dir().join(format!("{app}.db")))
+        })
+        .collect();
+    let throwaway = sandboxed_home() || foreign_db(crate::core::env::var("DB"), &own);
+    allowed_vox(throwaway, crate::core::env::var("VOX_BIN"))
+}
+
+/// Runs vox for its side effect only; a failure is `unavailable`. A no-op
+/// where the phone must not be reached.
+fn vox_quiet(args: &[&str]) -> Result<()> {
+    let Some(bin) = allowed_vox(sandboxed_home(), crate::core::env::var("VOX_BIN")) else {
+        return Ok(());
+    };
+    let out = Command::new(&bin)
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| Error::Unavailable(format!("could not run `{bin}`: {e}")))?;
+    if !out.status.success() {
+        return Err(Error::Unavailable(format!(
+            "vox failed ({}): {}",
+            out.status,
+            excerpt(&out.stderr)
+        )));
+    }
+    Ok(())
+}
+
+/// Replaces the text of a message Naru sent, which also removes its buttons
+/// (`vox progress`).
+pub fn edit_message(message_id: i64, text: &str) -> Result<()> {
+    vox_quiet(&["progress", &message_id.to_string(), "--", text])
+}
+
+/// Sends `text` as a reply to Telegram message `reply_to`.
+pub fn reply_to(reply_to: i64, text: &str) -> Result<()> {
+    vox_quiet(&["notify", &format!("--reply-to={reply_to}"), "--", text])
+}
+
 /// Send `message` through vox. Returns the JSON the CLI prints.
 pub fn send(
     message: &str,
@@ -140,11 +230,25 @@ pub fn send(
     open: Option<&str>,
     base_url: Option<&str>,
 ) -> Result<Value> {
+    send_choices(message, title, open, base_url, &[])
+}
+
+/// [`send`] with choice buttons, each a `(label, data)` pair: a tap comes
+/// back through `vox events` as `data` (see `core::phone`). Call it with
+/// choices only when [`phone_answers`] holds.
+pub fn send_choices(
+    message: &str,
+    title: Option<&str>,
+    open: Option<&str>,
+    base_url: Option<&str>,
+    choices: &[(&str, String)],
+) -> Result<Value> {
     send_with(
         message,
         title,
         open,
         base_url,
+        choices,
         sandboxed_home(),
         crate::core::env::var("VOX_BIN"),
     )
@@ -157,6 +261,7 @@ fn send_with(
     title: Option<&str>,
     open: Option<&str>,
     base_url: Option<&str>,
+    choices: &[(&str, String)],
     sandboxed: bool,
     vox_override: Option<String>,
 ) -> Result<Value> {
@@ -210,6 +315,9 @@ fn send_with(
     cmd.arg("notify").arg("--json");
     if let Some(title) = title {
         cmd.arg(format!("--title={title}"));
+    }
+    for (label, data) in choices {
+        cmd.arg("--choice").arg(format!("{label}={data}"));
     }
     if let Some(url) = &open_url {
         cmd.arg("--button").arg(format!("Open Naru={url}"));
@@ -317,7 +425,7 @@ mod tests {
 
     #[test]
     fn send_is_stubbed_under_test_without_a_vox_override() {
-        let v = send_with("x", None, None, None, false, None).unwrap();
+        let v = send_with("x", None, None, None, &[], false, None).unwrap();
         assert_eq!(v["sent"], false);
         assert_eq!(v["stubbed"], true);
     }
@@ -343,13 +451,13 @@ mod tests {
         let real = account.join(".naru");
         // Sandbox home: skipped, the stub is never invoked.
         assert!(sandboxed_dir(Some(dir.display().to_string()), account));
-        let v = send_with("hello", None, None, None, true, None).unwrap();
+        let v = send_with("hello", None, None, None, &[], true, None).unwrap();
         assert_eq!(v["skipped"], true);
         assert_eq!(v["sent"], false);
         assert!(!log.exists());
         // Explicit opt-in: the stub is called.
         let stub_path = stub.display().to_string();
-        let v = send_with("hello", None, None, None, true, Some(stub_path)).unwrap();
+        let v = send_with("hello", None, None, None, &[], true, Some(stub_path)).unwrap();
         assert_eq!(v["sent"], true);
         assert!(log.exists());
         // The real home is not a sandbox.
@@ -357,6 +465,28 @@ mod tests {
         assert!(!sandboxed_dir(Some(String::new()), account));
         assert!(!sandboxed_dir(None, account));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn only_a_db_other_than_the_accounts_own_is_foreign() {
+        let own = [
+            std::path::PathBuf::from("/nonexistent-naru-test/naru/naru.db"),
+            std::path::PathBuf::from("/nonexistent-naru-test/mesa/mesa.db"),
+        ];
+        assert!(!foreign_db(None, &own));
+        assert!(!foreign_db(Some(String::new()), &own));
+        for mine in &own {
+            assert!(!foreign_db(Some(mine.display().to_string()), &own));
+        }
+        assert!(foreign_db(Some("/tmp/t.db".into()), &own));
+    }
+
+    #[test]
+    fn vox_is_allowed_only_outside_tests_and_sandboxes_unless_named() {
+        // Under `cargo test` nothing reaches vox without an explicit binary.
+        assert_eq!(allowed_vox(false, None), None);
+        assert_eq!(allowed_vox(true, None), None);
+        assert_eq!(allowed_vox(true, Some("stub".into())), Some("stub".into()));
     }
 
     #[test]

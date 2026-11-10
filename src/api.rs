@@ -3845,18 +3845,25 @@ pub fn serve(flags: ServeFlags) -> crate::core::Result<()> {
             });
         }
         let listener = tokio::net::TcpListener::bind((host, port)).await?;
+        // The one reader of taps and replies from the phone (naru task 2699,
+        // `docs/notify.md`): its own thread, off the request path.
+        let phone_reader = crate::core::phone::start_reader(state.store.clone());
 
         println!("{}", json!({"listening": format!("http://{host}:{port}")}));
         // ConnectInfo carries the peer address so the agent endpoints can be
         // gated on loopback in default mode (see `require_agent_access`).
-        axum::serve(
+        let served = axum::serve(
             listener,
             router(state).into_make_service_with_connect_info::<SocketAddr>(),
         )
         .with_graceful_shutdown(async move {
             let _ = shutdown_rx.await;
         })
-        .await?;
+        .await;
+        if let Some(reader) = &phone_reader {
+            reader.stop();
+        }
+        served?;
         Ok::<(), crate::core::Error>(())
     })?;
     // `axum::serve` only returns once the listener (and thus the port) is

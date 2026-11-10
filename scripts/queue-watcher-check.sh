@@ -1268,6 +1268,7 @@ chmod +x "$STALL_STUB/claude"
 VOX_LOG="$TMP/stall-vox.log"
 cat > "$STALL_STUB/vox" <<EOF
 #!/usr/bin/env bash
+[ "\$1" = notify ] || exit 2 # an older vox: no `events`, so `serve` starts no reader (naru task 2699)
 printf '%s\n' "\$*" >> "$VOX_LOG"
 printf '{"ok":true,"message_id":1,"chat_id":1}\n'
 EOF

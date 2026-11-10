@@ -5183,8 +5183,12 @@ const GATE_DEFAULT_TIMEOUT_SECS: u64 = 3600;
 
 /// Tells the phone a gate is waiting. Best-effort: with no `vox` the web UI
 /// and `naru workflow gate` still decide it, so a failure is only logged.
-fn notify_gate(gate: &WorkflowGate, workflow_name: &str) {
-    let text = if gate.message.is_empty() {
+///
+/// When vox can deliver answers (`notify::phone_answers`) the message carries
+/// Approve and Cancel buttons (naru task 2699). Returns the Telegram message
+/// id and the text sent, for `run_gate` to remember.
+fn notify_gate(gate: &WorkflowGate, workflow_name: &str) -> Option<(i64, String)> {
+    let mut text = if gate.message.is_empty() {
         format!("Workflow {workflow_name:?} is waiting for approval.")
     } else {
         format!(
@@ -5193,10 +5197,45 @@ fn notify_gate(gate: &WorkflowGate, workflow_name: &str) {
         )
     };
     let route = format!("workflows/{}", gate.workflow_id);
-    if let Err(e) =
-        crate::core::notify::send(&text, Some("Naru: approval needed"), Some(&route), None)
+    let mut choices = Vec::new();
+    if crate::core::notify::phone_answers() {
+        text.push_str(" Tap a button, or reply approve / cancel.");
+        choices.push(("Approve", crate::core::phone::gate_data(gate.id, true)));
+        choices.push(("Cancel", crate::core::phone::gate_data(gate.id, false)));
+    }
+    match crate::core::notify::send_choices(
+        &text,
+        Some("Naru: approval needed"),
+        Some(&route),
+        None,
+        &choices,
+    ) {
+        Ok(sent) => sent["message_id"].as_i64().map(|id| (id, text)),
+        Err(e) => {
+            eprintln!("naru: gate {} notification not sent: {e}", gate.id);
+            None
+        }
+    }
+}
+
+/// Closes a decided gate's Telegram message: the text gains the outcome and
+/// the buttons go (naru task 2699). Best-effort. A decision that came from
+/// Telegram is closed by the reader that took it (`phone::handle_line`).
+fn close_gate_prompt<A: StoreAccess>(access: &A, gate_id: i64) {
+    let found = access.with(|s| {
+        Ok::<_, crate::core::Error>((
+            s.phone_prompt_for("gate", gate_id)?,
+            s.get_workflow_gate(gate_id)?,
+        ))
+    });
+    if let Ok((Some(prompt), gate)) = found
+        && gate.reason.as_deref() != Some("telegram")
+        && let Err(e) = crate::core::notify::edit_message(
+            prompt.message_id,
+            &crate::core::phone::decided_text(&prompt.text, &gate),
+        )
     {
-        eprintln!("naru: gate {} notification not sent: {e}", gate.id);
+        eprintln!("naru: gate {gate_id} message not updated: {e}");
     }
 }
 
@@ -5212,7 +5251,7 @@ fn run_gate<A: StoreAccess>(
     input: &str,
     run_id: i64,
     poll: Duration,
-    notify: impl FnOnce(&WorkflowGate, &str),
+    notify: impl FnOnce(&WorkflowGate, &str) -> Option<(i64, String)>,
 ) -> std::result::Result<(String, Option<String>), String> {
     let message = node
         .config
@@ -5228,13 +5267,18 @@ fn run_gate<A: StoreAccess>(
     let gate = access
         .with(|s| s.create_workflow_gate(run_id, node.id, message))
         .map_err(|e| e.to_string())?;
-    notify(&gate, &view.workflow.name);
+    if let Some((message_id, text)) = notify(&gate, &view.workflow.name)
+        && let Err(e) = access.with(|s| s.record_phone_prompt(message_id, "gate", gate.id, &text))
+    {
+        eprintln!("naru: gate {} message not recorded: {e}", gate.id);
+    }
     let started = Instant::now();
     loop {
         let g = access
             .with(|s| s.get_workflow_gate(gate.id))
             .map_err(|e| e.to_string())?;
         if g.status != WorkflowGateStatus::Pending {
+            close_gate_prompt(access, gate.id);
             return Ok((input.to_string(), Some(g.status.as_str().to_string())));
         }
         if started.elapsed() >= Duration::from_secs(timeout) {
@@ -5251,6 +5295,7 @@ fn run_gate<A: StoreAccess>(
                         .status
                 }
             };
+            close_gate_prompt(access, gate.id);
             return Ok((input.to_string(), Some(status.as_str().to_string())));
         }
         std::thread::sleep(poll);
@@ -8972,6 +9017,7 @@ esac
                 |_, name| {
                     assert_eq!(name, "G");
                     notified += 1;
+                    None
                 },
             )
             .unwrap();
@@ -8991,7 +9037,7 @@ esac
             "x",
             run,
             Duration::from_millis(20),
-            |_, _| {},
+            |_, _| None,
         )
         .unwrap();
         assert_eq!(route.as_deref(), Some("rejected"));

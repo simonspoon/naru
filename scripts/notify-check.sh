@@ -46,6 +46,7 @@ mkdir -p "$STUB_DIR"
 export STUB_DIR
 cat > "$STUB_DIR/vox" <<'STUB_EOF'
 #!/usr/bin/env bash
+[ "$1" = notify ] || exit 2 # an older vox: no `events`, so `serve` starts no reader (naru task 2699)
 printf '%s\n' "$@" > "$STUB_DIR/last-argv"
 if [ -e "$STUB_DIR/vox-uninit" ]; then
   echo 'Error: vox is not configured. Run `vox init` first.' >&2

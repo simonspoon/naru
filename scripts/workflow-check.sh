@@ -1750,6 +1750,7 @@ ok "delay: a missing/both/out-of-range/unparseable config is validation, HH:MM i
 
 cat > "$STUB_DIR/vox" <<VOXEOF
 #!/usr/bin/env bash
+[ "\$1" = notify ] || exit 2 # an older vox: no `events`, so no choice buttons and no reader (naru task 2699)
 printf '%s\n' "\$@" > "$STUB_DIR/vox.argv"
 echo '{"message_id":1,"chat_id":2}'
 VOXEOF

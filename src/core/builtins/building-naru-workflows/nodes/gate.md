@@ -14,6 +14,7 @@ In `in: any`, out `out: any`. The output is the input, unchanged. Routes by edge
 Every edge leaving a gate needs `--branch approved` or `--branch rejected`; any other label, or none, is `validation`. A rejection is data, not a failure: the run continues down the `rejected` edge and still ends `succeeded`. An unwired branch skips everything behind it.
 
 Decide with `naru workflow gate approve <id>` / `reject <id>`, list with `naru workflow gate list [--run N] [--all]`, or use the Approve / Reject buttons in the web UI.
+The phone notification also carries Approve and Cancel buttons, and a reply to it saying `approve` or `cancel` decides the gate too; the first answer wins. This is the only way to wait for a person on the phone: never run `vox ask`, `vox confirm`, `vox pick`, `vox wait` or `vox listen` from a `cli` or `script` node (they would steal the answers Naru's own reader is waiting for). Use a `gate`.
 A `serve` restart fails the run; a pending gate does not resume.
 
 ## Use when / not when

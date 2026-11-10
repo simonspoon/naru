@@ -31,6 +31,7 @@ pub mod migrate;
 pub mod model_router;
 pub mod notify;
 pub mod orbit;
+pub mod phone;
 pub mod proc;
 pub mod project_memory;
 pub mod receipt;

@@ -8,6 +8,7 @@ use super::attachments;
 use super::board;
 use super::files;
 use super::live;
+use super::phone::PhonePrompt;
 use super::types::{
     AgentQuestion, ArchiveOutcome, Artifact, Attachment, DiffStat, GitCommit, InboxItem, InboxKind,
     LibraryItem, LibraryKind, LibraryScope, LibraryVersion, LiveAction, LiveBoard, LiveBoardKind,
@@ -1627,6 +1628,18 @@ const MIGRATIONS: &[&str] = &[
      (SELECT status FROM tasks WHERE tasks.id = agent_questions.task_id) || ')' \
      WHERE kind = 'question' AND status = 'open' AND task_id IN \
      (SELECT id FROM tasks WHERE status IN ('done', 'cancelled'));",
+    // Naru task 2699: which Telegram message asks about which record, so a
+    // button tap or a reply to that message can answer it (`core::phone`).
+    // `kind` is `gate` today (`ref_id` = the workflow gate's id); `text` is
+    // what was sent, for the edit that closes the message.
+    "CREATE TABLE phone_prompts ( \
+       message_id INTEGER PRIMARY KEY, \
+       kind TEXT NOT NULL, \
+       ref_id INTEGER NOT NULL, \
+       text TEXT NOT NULL DEFAULT '', \
+       created_at TEXT NOT NULL DEFAULT (datetime('now')) \
+     ); \
+     CREATE INDEX idx_phone_prompts_ref ON phone_prompts(kind, ref_id);",
 ];
 
 /// Selects full task rows including the derived `blocked` flag.
@@ -7634,6 +7647,62 @@ impl Store {
             )));
         }
         Ok(gate)
+    }
+
+    /// Remembers that Telegram message `message_id` asks about record
+    /// `ref_id` of `kind` (naru task 2699), with the text that was sent.
+    pub fn record_phone_prompt(
+        &mut self,
+        message_id: i64,
+        kind: &str,
+        ref_id: i64,
+        text: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO phone_prompts (message_id, kind, ref_id, text) \
+             VALUES (?1, ?2, ?3, ?4)",
+            (message_id, kind, ref_id, text),
+        )?;
+        Ok(())
+    }
+
+    const PHONE_PROMPT_SELECT: &'static str =
+        "SELECT message_id, kind, ref_id, text FROM phone_prompts";
+
+    fn read_phone_prompt(r: &rusqlite::Row<'_>) -> rusqlite::Result<PhonePrompt> {
+        Ok(PhonePrompt {
+            message_id: r.get(0)?,
+            kind: r.get(1)?,
+            ref_id: r.get(2)?,
+            text: r.get(3)?,
+        })
+    }
+
+    /// The prompt a Telegram message carries, if Naru sent it as one.
+    pub fn phone_prompt(&self, message_id: i64) -> Result<Option<PhonePrompt>> {
+        Ok(self
+            .conn
+            .query_row(
+                &format!("{} WHERE message_id = ?1", Self::PHONE_PROMPT_SELECT),
+                [message_id],
+                Self::read_phone_prompt,
+            )
+            .optional()?)
+    }
+
+    /// The newest prompt sent for record `ref_id` of `kind`.
+    pub fn phone_prompt_for(&self, kind: &str, ref_id: i64) -> Result<Option<PhonePrompt>> {
+        Ok(self
+            .conn
+            .query_row(
+                &format!(
+                    "{} WHERE kind = ?1 AND ref_id = ?2 ORDER BY message_id DESC LIMIT 1",
+                    Self::PHONE_PROMPT_SELECT
+                ),
+                (kind, ref_id),
+                Self::read_phone_prompt,
+            )
+            .optional()?)
     }
 
     /// Persists a still-running run's steps so far (the live run view). A run
@@ -19415,15 +19484,15 @@ mod tests {
         );
         assert_eq!(
             MIGRATIONS.len(),
-            109,
-            "a fresh db should report user_version 109"
+            110,
+            "a fresh db should report user_version 110"
         );
         let (store, _dir) = temp_store();
         let version: i64 = store
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 109);
+        assert_eq!(version, 110);
     }
 
     /// Naru task 2651: legacy loop reports stored as questions become
@@ -19568,6 +19637,11 @@ mod tests {
                 .conn
                 .execute("UPDATE tasks SET status = 'done' WHERE id = ?1", [done.id])
                 .unwrap();
+            // Undo what a later migration added, so it re-runs cleanly.
+            store
+                .conn
+                .execute_batch("DROP TABLE phone_prompts;")
+                .unwrap();
             store
                 .conn
                 .pragma_update(None, "user_version", EXPIRE as i64)
@@ -19643,7 +19717,7 @@ mod tests {
             .conn
             // Undo what later migrations added, so they re-run cleanly.
             .execute_batch(&format!(
-                "ALTER TABLE live_results DROP COLUMN report_file; ALTER TABLE live_results DROP COLUMN artifact_id; ALTER TABLE workflow_edges DROP COLUMN kind; ALTER TABLE cc_messages DROP COLUMN cache_creation_1h_tokens; ALTER TABLE projects DROP COLUMN run_restart; ALTER TABLE projects DROP COLUMN run_dir; ALTER TABLE projects DROP COLUMN run_health; DROP TABLE live_board_clips; PRAGMA user_version = {DROP_LOOP}"
+                "DROP TABLE phone_prompts; ALTER TABLE live_results DROP COLUMN report_file; ALTER TABLE live_results DROP COLUMN artifact_id; ALTER TABLE workflow_edges DROP COLUMN kind; ALTER TABLE cc_messages DROP COLUMN cache_creation_1h_tokens; ALTER TABLE projects DROP COLUMN run_restart; ALTER TABLE projects DROP COLUMN run_dir; ALTER TABLE projects DROP COLUMN run_health; DROP TABLE live_board_clips; PRAGMA user_version = {DROP_LOOP}"
             ))
             .unwrap();
         drop(store);
@@ -19700,7 +19774,7 @@ mod tests {
         store
             .conn
             .execute_batch(
-                "ALTER TABLE live_results DROP COLUMN report_file; ALTER TABLE live_results DROP COLUMN artifact_id; DROP TABLE live_board_clips; ALTER TABLE projects DROP COLUMN run_restart; ALTER TABLE projects DROP COLUMN run_dir; ALTER TABLE projects DROP COLUMN run_health; ALTER TABLE cc_messages DROP COLUMN cache_creation_1h_tokens; DROP TABLE workflow_builtin_copies; DROP TABLE mark_skins; ALTER TABLE live_sessions DROP COLUMN listen_gen; DROP TABLE agent_questions; DROP TABLE custom_themes; DROP TABLE task_notes; ALTER TABLE live_sessions DROP COLUMN ambient_request_seq; ALTER TABLE live_sessions DROP COLUMN ambient_request; ALTER TABLE live_sessions DROP COLUMN host_seen_at; ALTER TABLE live_sessions DROP COLUMN host_ambient; ALTER TABLE live_notebook DROP COLUMN category; ALTER TABLE cc_messages DROP COLUMN cost_micro_usd; ALTER TABLE cc_sessions DROP COLUMN main_agent; ALTER TABLE live_boards DROP COLUMN pinned_at; DROP TABLE workflow_builtins; DROP TABLE workflow_revisions; DROP TABLE workflow_log; DROP TABLE workflow_gates; DROP TABLE workflow_runs; DROP TABLE workflow_edges; \
+                "DROP TABLE phone_prompts; ALTER TABLE live_results DROP COLUMN report_file; ALTER TABLE live_results DROP COLUMN artifact_id; DROP TABLE live_board_clips; ALTER TABLE projects DROP COLUMN run_restart; ALTER TABLE projects DROP COLUMN run_dir; ALTER TABLE projects DROP COLUMN run_health; ALTER TABLE cc_messages DROP COLUMN cache_creation_1h_tokens; DROP TABLE workflow_builtin_copies; DROP TABLE mark_skins; ALTER TABLE live_sessions DROP COLUMN listen_gen; DROP TABLE agent_questions; DROP TABLE custom_themes; DROP TABLE task_notes; ALTER TABLE live_sessions DROP COLUMN ambient_request_seq; ALTER TABLE live_sessions DROP COLUMN ambient_request; ALTER TABLE live_sessions DROP COLUMN host_seen_at; ALTER TABLE live_sessions DROP COLUMN host_ambient; ALTER TABLE live_notebook DROP COLUMN category; ALTER TABLE cc_messages DROP COLUMN cost_micro_usd; ALTER TABLE cc_sessions DROP COLUMN main_agent; ALTER TABLE live_boards DROP COLUMN pinned_at; DROP TABLE workflow_builtins; DROP TABLE workflow_revisions; DROP TABLE workflow_log; DROP TABLE workflow_gates; DROP TABLE workflow_runs; DROP TABLE workflow_edges; \
                  DROP TABLE workflow_nodes; DROP TABLE workflows; \
                  CREATE TABLE diagrams (id INTEGER PRIMARY KEY, title TEXT); \
                  INSERT INTO diagrams (title) VALUES ('stale'); \

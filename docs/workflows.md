@@ -329,7 +329,8 @@ a run cannot be stopped mid-wait. Flow group colour (`--wf-flow`; board export
 **`gate`** (naru task 1993) is a human approval. When it starts, the engine
 writes a `pending` row in `workflow_gates` (CASCADE from the run), sends a
 best-effort phone notification (`core::notify`, an "Open Naru" button to
-`/open/workflows/<id>`; a missing `vox` is only logged), and polls the row once
+`/open/workflows/<id>`, plus Approve / Cancel buttons answered inside Telegram,
+`docs/notify.md` "Answering from Telegram"; a missing `vox` is only logged), and polls the row once
 a second **with no store lock held** until a person decides or `timeout_secs`
 pass. The input passes through unchanged; the node's route is `approved` or
 `rejected`, so its edges carry `--branch approved|rejected` (a `decide`-style

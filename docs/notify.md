@@ -15,8 +15,9 @@ Output is one JSON object, `{"sent": true, "message_id": …, "chat_id": …,
 
 ## argv
 
-Always argv, never a shell: `vox notify --json [--title T] [--button "Open
-Naru=<url>"] -- <message>`. The `--` means a message starting with `-` is
+Always argv, never a shell: `vox notify --json [--title T] [--choice
+"<label>=<data>"]… [--button "Open Naru=<url>"] -- <message>` (`--choice` only
+for an approval gate, see "Answering from Telegram"). The `--` means a message starting with `-` is
 still the message. `MESA_VOX_BIN` / `NARU_VOX_BIN` name a different binary
 (the test seam, as `MESA_LOKI_BIN` is for `live look`).
 
@@ -84,4 +85,89 @@ to the web UI as `<base>/#/projects/<pid>/tasks/<id>` (base resolved as
 above), so a phone needs `serve --lan`; there is no per-task button. An empty
 digest sends nothing and calls no `vox`.
 
-Gate: `scripts/notify-check.sh`.
+## Answering from Telegram
+
+A workflow approval gate (`docs/workflows.md`) can be decided inside Telegram
+(naru task 2699): its notification carries **Approve** and **Cancel** buttons
+above the Open Naru button, and a reply to that message decides it too. The web
+UI, `naru workflow gate approve|reject` and the live voice keep working; the
+first answer wins, because every path ends in the one conditional
+`Store::decide_workflow_gate`.
+
+**Sending.** `notify::send_choices` adds `--choice "<label>=<data>"` items before
+`--button`. A gate sends `Approve=gate:<gate id>:approve` and
+`Cancel=gate:<gate id>:reject`, and its text ends "Tap a button, or reply
+approve / cancel." The Telegram message id vox returns is stored with the text
+in `phone_prompts(message_id, kind, ref_id, text)` (`kind` is `gate`, `ref_id`
+the gate id; the table is generic so another kind can join it).
+
+**The single reader.** Telegram delivers a bot's updates to one consumer only,
+so `naru serve` runs exactly one supervised `vox events --json` child
+(`core::phone::start_reader`, on its own thread; the store lock is held only
+while one line is applied). It is restarted with backoff (1 s doubling to 60 s)
+when it exits and killed when `serve` shuts down or restarts; if `serve` is
+killed outright, vox's own parent watchdog ends it within a second. vox also
+holds an `events.lock`, so a second reader on the same account exits and is
+retried rather than competing.
+
+The reader does **not** start:
+
+- when `NARU_HOME` / `MESA_HOME` is not the real home (the dev environment, a
+  sandbox, a temp home — the rule of "Dev and sandbox runs never notify"), or
+  when `NARU_DB` / `MESA_DB` names a db other than the account's own
+  `…/naru/naru.db` / `…/mesa/mesa.db` (a throwaway `serve` on the real home
+  must not consume the real bot's updates), unless `NARU_VOX_BIN` names a
+  binary explicitly;
+- when the vox on hand has no `events` subcommand (not installed, or older than
+  vox task 2698): `serve` logs one line and looks again every five minutes. With
+  such a vox a gate sends the plain notification it always did, with no choice
+  buttons, and nothing errors.
+
+**Handling a line.** A line is untrusted input: it is parsed as JSON and
+matched, never executed, and the only thing it can cause is a gate decision
+with the reason `telegram`.
+
+- `{"kind":"choice","message_id":N,"data":"gate:<id>:approve|reject"}` decides
+  gate `<id>` only when `N` is the message Naru sent for that same gate. vox
+  does not bind a button's data to its message, so Naru checks both; a tap
+  whose data names a gate its message was not sent for changes nothing. Any
+  other data shape is ignored.
+- `{"kind":"reply","reply_to_message_id":N,"message_id":M,"text":"…"}` to a
+  gate's message: the trimmed, lowercased text `approve`, `approved`, `yes`,
+  `y` or `ok` approves; `cancel`, `reject`, `rejected`, `no` or `n` rejects.
+  Any other text decides nothing and is answered once, as a reply to `M`:
+  "Reply approve or cancel, or tap a button."
+- An unknown message, an unknown gate and an already-decided gate are not
+  errors. Delivery is at-least-once (vox re-delivers its last batch after a
+  crash), and a repeated event for a decided gate changes nothing.
+
+**Closing the message.** A decided gate's message is edited with `vox progress
+<message_id> -- "<text> - Approved|Cancelled (from Telegram|in Naru|timed
+out)"`, which also removes the buttons: by the reader for an answer from
+Telegram (so a gate whose run is gone still loses its buttons), and by the
+waiting run for every other path (web, CLI, timeout). A tap or reply for a gate
+that is already decided triggers the same edit. Best-effort: a failure is only
+logged.
+
+Buttons are only sent from an environment whose `serve` runs the reader. A
+gate reached by `naru workflow run` while no `serve` is up still gets them;
+Telegram holds the tap and the reader applies it when `serve` starts, if the
+gate is still pending.
+
+**Security.** Only the person's own Telegram account may answer. vox drops
+every update that is not from the configured chat, but **an empty
+`user_id_allowlist` accepts anyone in that chat**: set the allowlist in
+`~/.config/vox/config.toml` to the person's own Telegram user id. Naru does
+not rely on vox alone: it accepts only well-formed data for a gate that
+exists, is pending, and whose message id matches, and trusts no text beyond the
+two fixed word lists.
+
+**Naru is the only one waiting on this bot.** Because the reader is the bot's
+single update consumer, nothing else — no workflow node, script, hook or agent
+brief — may run `vox ask`, `vox confirm`, `vox pick`, `vox wait` or
+`vox listen` on it: each polls for updates itself and would take the answers
+meant for the reader (or fail with a 409). To wait for a person, use a workflow
+`gate` or `naru ask`. Nothing in this repo or its built-in library calls those
+commands.
+
+Gates: `scripts/notify-check.sh`, `scripts/phone-answer-check.sh`.
