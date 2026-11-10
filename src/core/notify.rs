@@ -35,15 +35,21 @@ fn vox_bin() -> String {
 /// account's real naru home (`~/.naru`, `~/.mesa`): a dev environment, a
 /// sandbox or a temp home. Unset means the real install.
 fn sandboxed_home() -> bool {
-    let Some(dir) = crate::core::env::var("HOME").filter(|d| !d.is_empty()) else {
-        return false;
-    };
     let Some(base) = directories::BaseDirs::new() else {
-        return true;
+        return crate::core::env::var("HOME").is_some_and(|d| !d.is_empty());
+    };
+    sandboxed_dir(crate::core::env::var("HOME"), base.home_dir())
+}
+
+/// [`sandboxed_home`] for an already-read `NARU_HOME` value and account home
+/// directory, so a test can decide without touching the process environment.
+fn sandboxed_dir(home_var: Option<String>, account_home: &std::path::Path) -> bool {
+    let Some(dir) = home_var.filter(|d| !d.is_empty()) else {
+        return false;
     };
     let canon = |p: &std::path::Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
     let dir = canon(std::path::Path::new(&dir));
-    let home = canon(base.home_dir());
+    let home = canon(account_home);
     dir != home.join(".naru") && dir != home.join(".mesa")
 }
 
@@ -134,6 +140,26 @@ pub fn send(
     open: Option<&str>,
     base_url: Option<&str>,
 ) -> Result<Value> {
+    send_with(
+        message,
+        title,
+        open,
+        base_url,
+        sandboxed_home(),
+        crate::core::env::var("VOX_BIN"),
+    )
+}
+
+/// [`send`] with the sandbox decision and the vox override passed in rather
+/// than read from the environment.
+fn send_with(
+    message: &str,
+    title: Option<&str>,
+    open: Option<&str>,
+    base_url: Option<&str>,
+    sandboxed: bool,
+    vox_override: Option<String>,
+) -> Result<Value> {
     if message.trim().is_empty() {
         return Err(Error::Validation("message must not be empty".into()));
     }
@@ -153,7 +179,7 @@ pub fn send(
 
     // A dev environment, sandbox or temp home must never reach the person's
     // phone either (naru task 2696); an explicit `VOX_BIN` opts back in.
-    if sandboxed_home() && crate::core::env::var("VOX_BIN").is_none() {
+    if sandboxed && vox_override.is_none() {
         eprintln!(
             "naru: notification skipped (NARU_HOME is not the real home; set NARU_VOX_BIN to send): {message}"
         );
@@ -169,7 +195,7 @@ pub fn send(
     // Unit tests must never reach the person's phone: without an explicit
     // vox override (a stub), `cargo test` sends nothing (naru task 2097).
     #[cfg(test)]
-    if crate::core::env::var("VOX_BIN").is_none() {
+    if vox_override.is_none() {
         return Ok(json!({
             "sent": false,
             "stubbed": true,
@@ -179,7 +205,7 @@ pub fn send(
         }));
     }
 
-    let bin = vox_bin();
+    let bin = vox_override.unwrap_or_else(vox_bin);
     let mut cmd = Command::new(&bin);
     cmd.arg("notify").arg("--json");
     if let Some(title) = title {
@@ -291,36 +317,14 @@ mod tests {
 
     #[test]
     fn send_is_stubbed_under_test_without_a_vox_override() {
-        let _lock = crate::core::attachments::ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if crate::core::env::var("VOX_BIN").is_some() {
-            return;
-        }
-        let home = (std::env::var("NARU_HOME"), std::env::var("MESA_HOME"));
-        // SAFETY: ENV_LOCK gives this test exclusive access to the env vars.
-        unsafe {
-            std::env::remove_var("NARU_HOME");
-            std::env::remove_var("MESA_HOME");
-        }
-        let v = send("x", None, None, None).unwrap();
+        let v = send_with("x", None, None, None, false, None).unwrap();
         assert_eq!(v["sent"], false);
         assert_eq!(v["stubbed"], true);
-        unsafe {
-            if let Ok(h) = home.0 {
-                std::env::set_var("NARU_HOME", h);
-            }
-            if let Ok(h) = home.1 {
-                std::env::set_var("MESA_HOME", h);
-            }
-        }
     }
 
     #[test]
     fn sandboxed_home_skips_vox_but_an_override_sends() {
-        use crate::core::attachments::ENV_LOCK;
         use std::os::unix::fs::PermissionsExt;
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("naru-notify-2696-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let log = dir.join("calls.log");
@@ -334,40 +338,24 @@ mod tests {
         )
         .unwrap();
         std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let old_path = std::env::var("PATH").unwrap_or_default();
-        let real = directories::BaseDirs::new()
-            .unwrap()
-            .home_dir()
-            .join(".naru");
-        // SAFETY: ENV_LOCK gives this test exclusive access to the env vars.
-        unsafe {
-            std::env::set_var("PATH", format!("{}:{old_path}", dir.display()));
-            std::env::remove_var("NARU_VOX_BIN");
-            std::env::remove_var("MESA_VOX_BIN");
-            std::env::remove_var("MESA_HOME");
-            std::env::set_var("NARU_HOME", &dir);
-        }
-        // Sandbox home: skipped, the stub on PATH is never invoked.
-        let v = send("hello", None, None, None).unwrap();
+        // A fixed account home: `BaseDirs` reads `$HOME`, which other tests change.
+        let account = std::path::Path::new("/nonexistent-naru-test-home");
+        let real = account.join(".naru");
+        // Sandbox home: skipped, the stub is never invoked.
+        assert!(sandboxed_dir(Some(dir.display().to_string()), account));
+        let v = send_with("hello", None, None, None, true, None).unwrap();
         assert_eq!(v["skipped"], true);
         assert_eq!(v["sent"], false);
         assert!(!log.exists());
         // Explicit opt-in: the stub is called.
-        unsafe { std::env::set_var("NARU_VOX_BIN", &stub) };
-        let v = send("hello", None, None, None).unwrap();
+        let stub_path = stub.display().to_string();
+        let v = send_with("hello", None, None, None, true, Some(stub_path)).unwrap();
         assert_eq!(v["sent"], true);
         assert!(log.exists());
         // The real home is not a sandbox.
-        unsafe {
-            std::env::remove_var("NARU_VOX_BIN");
-            std::env::set_var("NARU_HOME", &real);
-        }
-        assert!(!sandboxed_home());
-        unsafe { std::env::set_var("NARU_HOME", "") };
-        assert!(!sandboxed_home());
-        unsafe { std::env::remove_var("NARU_HOME") };
-        assert!(!sandboxed_home());
-        unsafe { std::env::set_var("PATH", old_path) };
+        assert!(!sandboxed_dir(Some(real.display().to_string()), account));
+        assert!(!sandboxed_dir(Some(String::new()), account));
+        assert!(!sandboxed_dir(None, account));
         std::fs::remove_dir_all(&dir).ok();
     }
 
