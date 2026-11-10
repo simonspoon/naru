@@ -21,7 +21,7 @@ never changed mid-session (a switch would break the prompt cache). Code:
   command template (`docs/config.md`, the `kb` shape: tool-less
   `claude -p --model haiku --json-schema`), `{name}` `naru model-router`, hard
   timeout **15 s**, cwd `~/.naru/workspace` (a folder Claude Code trusts). The
-  schema is `{reason: string, model: haiku|sonnet|opus|fable}`, both required, `reason` first so the model states its reasoning before it commits (measured: with `model` first Haiku named a fable signal in its reason and still answered opus).
+  schema is `{reason: string, model: haiku|sonnet|opus|fable, risky: boolean}`, all required, `reason` first so the model states its reasoning before it commits (measured: with `model` first Haiku named a fable signal in its reason and still answered opus); `risky` last so it does not sway the pick (controlled exploration, below).
 - The task text is untrusted. It rides in the prompt between `<<<TASK` and
   `TASK>>>`, capped at 6000 characters, and the prompt says it is data, not
   instructions.
@@ -100,7 +100,9 @@ After the refusal, in order:
    history (retry one level up, below). A re-dispatch or a cost-guard relay
    never re-routes.
 4. Otherwise the Haiku call. The answer must be an object whose `model` is one
-   of the four and whose `reason` is non-empty.
+   of the four and whose `reason` is non-empty; a missing `risky` reads as
+   `true`.
+5. On that fresh Haiku pick only, the exploration coin (below).
 
 **Any failure is `opus`, source `fallback`**, with the error (bounded) as the
 reason, and never fails or blocks the spawn: `claude` missing, timeout,
@@ -145,6 +147,52 @@ What the latest routed decision's history says, in order:
 So a task picked `haiku` runs at most haiku, sonnet, opus, then parks; one
 picked `fable` runs fable three times, then parks.
 
+## Controlled exploration (naru task 2688)
+
+To learn whether a cheaper model would have done the job, a share of routed
+sessions runs **one level below** the rubric's pick (`fable -> opus -> sonnet
+-> haiku`) on purpose, flagged as an experiment, and the outcome telemetry
+(`naru cc router`, the Router review) splits results by arm.
+
+- **The rate** is `watchers.model-router-explore` (`docs/config.md`):
+  `0.0..=1.0`, default `0.1`, `0` disables. One plain Bernoulli coin per
+  task (`explores` in `model_router.rs`), one global rate.
+- **Who can be demoted:** only a fresh `haiku`-source pick of `sonnet` or
+  `opus` whose answer says `risky: false`. Never a risky task, never a
+  `fable` pick (the rubric's own risk signal), never a `haiku` pick (nothing
+  below it), never a `fallback`/`disabled` decision, never naru-live (refused
+  before anything). The coin is not even drawn for those. `risky` is the
+  Haiku answer's own flag: true for security, persistence or migration of
+  data (schemas, files or config users keep), concurrency, the
+  spawn/queue/watcher machinery itself, or a `fable` pick.
+- **The log line** carries `experiment` (`true|false`), `rubric_model` (what
+  the rubric picked; `null` on `fallback`/`disabled`) and `model` (what runs),
+  plus `risky` on a `haiku` line. An experiment line's `rubric_model` is one
+  level above its `model`.
+- **No second flip.** A re-dispatch reads the log (check 3) and never calls
+  Haiku or the coin: a relay or a failed spawn reuses the experiment model
+  with `experiment: true` (same attempt). Every later attempt has `experiment:
+  false` and keeps the task's `rubric_model`.
+- **Safety net.** A bounced or failed experiment session is an ordinary retry
+  one level up (naru task 2686), which is exactly the rubric's pick: a failed
+  experiment costs one retry, and it counts against the two-escalation cap.
+- **Randomness** is std's randomly keyed hasher in production (no `rand`
+  dependency); the unit tests inject a seeded splitmix64 coin (`Deps.coin`).
+
+Sample size (open question 1). At 10% the opus -> sonnet arm fills slowly and
+the sonnet -> haiku arm barely at all: in the replay trial 44 of 50 tasks were
+`opus` and 6 `sonnet`; if about half the tasks are risky (17 of the 33
+fixtures are; real tasks are not measured yet), 50 tasks a week give ~2 opus
+experiments and ~0.3 sonnet ones. The Router
+review's `min_n` (6 finished first attempts per arm) then takes about three
+weeks for the opus row and many months for the sonnet row. A per-row floor
+(explore a row at a higher rate until its arm reaches `min_n`) would fix
+that; it is not built (one global rate, open question 2's default). Haiku's
+`risky` was checked against the fixtures' `risky` labels with the live test
+(open question 3): on 2026-11-10 all 33 matched (0 risky fixtures answered
+`false`, 0 of 16 safe ones answered `true`), and the picks stayed 33/33,
+median 3.2 s, p95 4.3 s.
+
 ## The switch
 
 `watchers.model-router` in `~/.naru/config.json`: `"on"` (default when absent)
@@ -159,7 +207,7 @@ dev env writes `~/.naru-dev/logs`), one JSON object per line, best effort (a
 write failure is one stderr line). Two kinds:
 
 ```json
-{"kind":"decision","time":"2026-11-10 09:41:02","task_id":2683,"project_id":2,"input":"<first 400 chars>","hint":null,"model":"opus","reason":"...","source":"haiku","latency_ms":2104,"attempt":1}
+{"kind":"decision","time":"2026-11-10 09:41:02","task_id":2683,"project_id":2,"input":"<first 400 chars>","hint":null,"model":"sonnet","reason":"...","source":"haiku","latency_ms":2104,"attempt":1,"experiment":true,"rubric_model":"opus","risky":false}
 {"kind":"outcome","time":"2026-11-10 10:12:40","task_id":2683,"outcome":"done","status":"done","detail":"session 1a2b3c4d ended"}
 {"kind":"parked","time":"2026-11-10 11:02:13","task_id":2683,"project_id":2,"model":"fable","attempt":3,"reason":"the fable session bounced; 2 retries one level up are spent, parked"}
 ```
@@ -201,7 +249,8 @@ at `opus` until the log shows it pays off.
 ## Fixtures and the live test
 
 `src/testdata/model_router_fixtures.json`: 33 task texts `{text, expected,
-ambiguous}`, nine each for `haiku` and `fable` (the last four of each mirror
+ambiguous, risky}` (`risky` labelled for controlled exploration: 17, every
+`fable` one among them), nine each for `haiku` and `fable` (the last four of each mirror
 the row's examples, naru task 2690), five each for `sonnet` and `opus`, plus
 five ambiguous (conflicting or missing signals; expected is the higher model). `cargo test model_router` checks the
 file's shape and every pure path (parse and validate, switch off, fallback,
@@ -215,7 +264,8 @@ cargo test model_router_live_fixtures -- --ignored --nocapture
 ```
 
 It asserts all but at most two as expected, every ambiguous fixture on the higher
-model, and p95 under 10 s. It uses the person's Claude subscription through
+model, no fixture labelled risky answered `risky: false` unless it went to
+`fable` (a demotion leak), and p95 under 10 s. It uses the person's Claude subscription through
 `claude -p`.
 
 ### Replay of real session starts (naru task 2690)

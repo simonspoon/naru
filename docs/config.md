@@ -755,6 +755,11 @@ queue-watcher's per-project concurrency limit (mesa task 777,
   body key `model_router`, `"on"`/`"off"`/`null` (anything else is `422
   validation`), `ts(skip)`ped (no Settings UI). Read on every dispatch; an
   unreadable file makes the router fall back to `opus`.
+- `model-router-explore` (naru task 2688, hand-edited only, no route) is the
+  share of routed task sessions sent one model level below the rubric's pick
+  as an experiment (`docs/model-router.md`, controlled exploration). **Absent
+  or `null` ⇒ 0.1.** A number is clamped into `0.0..=1.0`; `0`, or any
+  non-number, disables it. Read on every dispatch.
 
 ### Routes
 

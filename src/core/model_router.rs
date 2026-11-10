@@ -53,8 +53,10 @@ pub const MAX_ESCALATIONS: usize = 2;
 pub const SPAWN_FAILED: &str = "spawn failed";
 
 /// The answer schema Naru owns. `reason` comes first so the model states its
-/// reasoning before it commits to a `model`.
-const SCHEMA: &str = r#"{"type":"object","properties":{"reason":{"type":"string"},"model":{"type":"string","enum":["haiku","sonnet","opus","fable"]}},"required":["reason","model"],"additionalProperties":false}"#;
+/// reasoning before it commits to a `model`; `risky` (naru task 2688) comes
+/// last so it does not sway the pick, and keeps a risky task out of the
+/// exploration arm.
+const SCHEMA: &str = r#"{"type":"object","properties":{"reason":{"type":"string"},"model":{"type":"string","enum":["haiku","sonnet","opus","fable"]},"risky":{"type":"boolean"}},"required":["reason","model","risky"],"additionalProperties":false}"#;
 
 /// What to route: one spawn of a task session.
 pub struct Request<'a> {
@@ -113,6 +115,14 @@ pub struct Decision {
     pub latency_ms: u64,
     /// 1 for the task's first routed session, one more for each retry.
     pub attempt: u64,
+    /// The model the rubric picked for this task (naru task 2688); `None` when
+    /// no Haiku pick was made (`fallback`, `disabled`).
+    pub rubric_model: Option<String>,
+    /// This session runs one level below `rubric_model` on purpose (controlled
+    /// exploration, naru task 2688).
+    pub experiment: bool,
+    /// The Haiku call's `risky` answer, on a `haiku` decision only.
+    pub risky: Option<bool>,
 }
 
 /// [`route`] declined to route this request.
@@ -137,6 +147,9 @@ pub fn route(req: &Request<'_>, prompts: &config::Prompts, cwd: &str) -> Result<
         log: log_path(),
         enabled: config::model_router_enabled(),
         template: config::queue_watcher_template(),
+        // An unreadable config already falls the decision back to opus.
+        explore: config::model_router_explore().unwrap_or(0.0),
+        coin: &random_unit,
         call: &|prompt: &str| {
             llm::complete_structured(
                 config::MODEL_ROUTER,
@@ -183,6 +196,24 @@ struct Deps<'a> {
     template: Result<String, String>,
     /// The Haiku call: prompt in, the answer object out.
     call: &'a dyn Fn(&str) -> Result<Value, String>,
+    /// The exploration rate, `0.0..=1.0` (naru task 2688).
+    explore: f64,
+    /// A uniform draw in `[0, 1)`; a test injects a seeded one.
+    coin: &'a dyn Fn() -> f64,
+}
+
+/// A uniform draw in `[0, 1)` from std's randomly keyed hasher (no `rand`
+/// dependency for one coin flip per dispatch).
+fn random_unit() -> f64 {
+    use std::hash::{BuildHasher, Hasher};
+    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+    h.write_u128(
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0),
+    );
+    (h.finish() >> 11) as f64 / (1u64 << 53) as f64
 }
 
 fn route_with(req: &Request<'_>, deps: &Deps<'_>) -> Result<Decision, Refused> {
@@ -204,6 +235,9 @@ fn decide(req: &Request<'_>, deps: &Deps<'_>) -> Decision {
         source: Source::Fallback,
         latency_ms: 0,
         attempt: 1,
+        rubric_model: None,
+        experiment: false,
+        risky: None,
     };
     let disabled = |reason: &str| Decision {
         model: FALLBACK_MODEL.to_string(),
@@ -211,6 +245,9 @@ fn decide(req: &Request<'_>, deps: &Deps<'_>) -> Decision {
         source: Source::Disabled,
         latency_ms: 0,
         attempt: 1,
+        rubric_model: None,
+        experiment: false,
+        risky: None,
     };
     match &deps.enabled {
         Err(e) => return fallback(format!("the config is unreadable: {e}")),
@@ -233,13 +270,23 @@ fn decide(req: &Request<'_>, deps: &Deps<'_>) -> Decision {
     let answer = (deps.call)(&prompt(req.text));
     let latency_ms = started.elapsed().as_millis() as u64;
     match parse_answer(answer) {
-        Ok((model, reason)) => Decision {
-            model,
-            reason,
-            source: Source::Haiku,
-            latency_ms,
-            attempt: 1,
-        },
+        Ok((rubric, reason, risky)) => {
+            let experiment = explores(&rubric, risky, deps);
+            Decision {
+                model: if experiment {
+                    one_down(&rubric).to_string()
+                } else {
+                    rubric.clone()
+                },
+                reason,
+                source: Source::Haiku,
+                latency_ms,
+                attempt: 1,
+                rubric_model: Some(rubric),
+                experiment,
+                risky: Some(risky),
+            }
+        }
         Err(e) => Decision {
             latency_ms,
             ..fallback(e)
@@ -247,10 +294,22 @@ fn decide(req: &Request<'_>, deps: &Deps<'_>) -> Decision {
     }
 }
 
+/// Whether this Haiku pick goes to the exploration arm (naru task 2688): one
+/// coin flip at `deps.explore`, never for a risky task, a `fable` pick (the
+/// rubric's own risk signal) or a `haiku` pick (nothing below it). Only a
+/// fresh Haiku pick reaches here, so a re-dispatch never flips again.
+fn explores(rubric: &str, risky: bool, deps: &Deps<'_>) -> bool {
+    !risky
+        && matches!(rubric, "sonnet" | "opus")
+        && deps.explore > 0.0
+        && (deps.coin)() < deps.explore
+}
+
 /// Validates the Haiku call's answer: an object whose `model` is one of
-/// [`MODELS`] and whose `reason` is non-empty. Pure, so each failure is
-/// testable without a model.
-fn parse_answer(answer: Result<Value, String>) -> Result<(String, String), String> {
+/// [`MODELS`] and whose `reason` is non-empty; `risky` is read as `true`
+/// unless it is `false` (a missing flag never lets a task be demoted). Pure,
+/// so each failure is testable without a model.
+fn parse_answer(answer: Result<Value, String>) -> Result<(String, String, bool), String> {
     let v = answer?;
     let model = v
         .get("model")
@@ -268,7 +327,8 @@ fn parse_answer(answer: Result<Value, String>) -> Result<(String, String), Strin
         .map(str::trim)
         .filter(|r| !r.is_empty())
         .ok_or("the answer has no reason")?;
-    Ok((model.to_string(), bounded(reason, REASON_MAX)))
+    let risky = v.get("risky").and_then(Value::as_bool).unwrap_or(true);
+    Ok((model.to_string(), bounded(reason, REASON_MAX), risky))
 }
 
 /// The rubric table (naru task 2683; the examples on the haiku and fable rows
@@ -320,7 +380,11 @@ pub fn prompt(text: &str) -> String {
          fable signal, the fable signal decides (the higher model wins a conflict).\n\
          - Answer with model = one of haiku, sonnet, opus, fable, and reason = ONE sentence \
          quoting the signal from the task text you used. Start the reason with `Role <name>:` \
-         when the text opens by declaring an agent role, and with `Task:` when it does not.\n\n\
+         when the text opens by declaring an agent role, and with `Task:` when it does not.\n\
+         - Also answer risky = true when the work touches security, persistence or migration \
+         of data (a database schema, files or config users keep), concurrency, or the \
+         spawn/queue/watcher machinery itself, or when you chose fable; otherwise false. \
+         risky never changes which model you choose.\n\n\
          <<<TASK\n{text}\nTASK>>>"
     )
 }
@@ -371,7 +435,12 @@ fn decision_line(req: &Request<'_>, d: &Decision) -> Value {
         "source": d.source.as_str(),
         "latency_ms": d.latency_ms,
         "attempt": d.attempt,
+        "experiment": d.experiment,
+        "rubric_model": d.rubric_model,
     });
+    if let Some(risky) = d.risky {
+        line["risky"] = json!(risky);
+    }
     if d.model == "fable" {
         line["costly"] = json!(true);
     }
@@ -445,6 +514,9 @@ struct History {
     model: String,
     reason: String,
     attempt: u64,
+    /// That decision's `rubric_model` and `experiment` (naru task 2688).
+    rubric_model: Option<String>,
+    experiment: bool,
     /// `escalation` decisions since the latest `haiku` pick or park.
     escalations: usize,
     last: Last,
@@ -487,6 +559,8 @@ fn history(path: &Path, task_id: i64) -> Option<History> {
                             reason: reason.to_string(),
                             // A line from before attempts were logged is a first.
                             attempt: l["attempt"].as_u64().unwrap_or(1),
+                            rubric_model: l["rubric_model"].as_str().map(str::to_string),
+                            experiment: l["experiment"].as_bool().unwrap_or(false),
                             escalations: 0,
                             last: Last::Unrouted,
                         });
@@ -514,6 +588,13 @@ fn history(path: &Path, task_id: i64) -> Option<History> {
     })
 }
 
+/// The model one level down the ladder fable -> opus -> sonnet -> haiku;
+/// `haiku` stays `haiku` (naru task 2688).
+fn one_down(model: &str) -> &'static str {
+    let i = MODELS.iter().position(|m| *m == model).unwrap_or(2);
+    MODELS[i.saturating_sub(1)]
+}
+
 /// The model one level up the ladder haiku -> sonnet -> opus -> fable; `fable`
 /// stays `fable`.
 fn one_up(model: &str) -> &'static str {
@@ -524,13 +605,21 @@ fn one_up(model: &str) -> &'static str {
 /// The decision for a task that already had a routed session: the same model
 /// for a relay, a spawn that never started, or a re-queued park; otherwise a
 /// retry, one level up, or parked once [`MAX_ESCALATIONS`] are spent.
+///
+/// Every decision keeps the task's `rubric_model`. Only a decision for the
+/// same attempt keeps `experiment` (the experiment session carries on); a new
+/// attempt is never one. An experiment is one level below the rubric's pick,
+/// so its retry one level up returns to that pick (naru task 2688).
 fn after(req: &Request<'_>, h: History) -> Decision {
     let decision = |model: String, reason: String, source: Source, attempt: u64| Decision {
         model,
         reason: bounded(&reason, REASON_MAX),
         source,
         latency_ms: 0,
+        experiment: h.experiment && attempt == h.attempt && source == Source::Reused,
         attempt,
+        rubric_model: h.rubric_model.clone(),
+        risky: None,
     };
     let why = match (&h.last, req.relay) {
         (_, true) | (Last::Unrouted, _) => {
@@ -677,6 +766,8 @@ mod tests {
             enabled: Ok(true),
             template: Ok(config::DEFAULT_TODO_WATCHER.to_string()),
             call,
+            explore: 0.0,
+            coin: &|| panic!("a rate of 0 never flips the coin"),
         }
     }
 
@@ -830,8 +921,18 @@ mod tests {
 
     #[test]
     fn parse_answer_rejects_every_bad_shape() {
-        let ok = parse_answer(Ok(json!({"model": "opus", "reason": " because "}))).unwrap();
-        assert_eq!(ok, ("opus".to_string(), "because".to_string()));
+        let ok = parse_answer(Ok(
+            json!({"model": "opus", "reason": " because ", "risky": false}),
+        ))
+        .unwrap();
+        assert_eq!(ok, ("opus".to_string(), "because".to_string(), false));
+        // A missing or non-boolean risky flag reads as risky: never demoted.
+        for v in [
+            json!({"model": "opus", "reason": "r"}),
+            json!({"model": "opus", "reason": "r", "risky": "no"}),
+        ] {
+            assert!(parse_answer(Ok(v)).unwrap().2);
+        }
         for (label, bad) in [
             (
                 "no structured_output",
@@ -1194,6 +1295,7 @@ mod tests {
             "\"summarize these logs\"",
             "\"design the architecture for ...\"",
             "DATA to classify",
+            "it does not.\n- Also answer risky = true",
         ] {
             assert!(p.contains(needle), "missing {needle}");
         }
@@ -1289,6 +1391,9 @@ mod tests {
         text: String,
         expected: String,
         ambiguous: bool,
+        /// Security, data persistence/migration, concurrency, the spawn/queue
+        /// machinery, or a fable pick: never in the exploration arm.
+        risky: bool,
     }
 
     fn fixtures() -> Vec<Fixture> {
@@ -1309,6 +1414,217 @@ mod tests {
         assert_eq!(f.iter().filter(|x| x.ambiguous).count(), 5);
         assert!(f.iter().all(|x| MODELS.contains(&x.expected.as_str())));
         assert!(f.iter().all(|x| !x.text.trim().is_empty()));
+        assert!(f.iter().filter(|x| x.expected == "fable").all(|x| x.risky));
+        assert_eq!(f.iter().filter(|x| x.risky).count(), 17);
+    }
+
+    // ---- controlled exploration (naru task 2688) -------------------------
+
+    /// splitmix64 as a seeded uniform draw in `[0, 1)`.
+    fn seeded(seed: u64) -> impl Fn() -> f64 {
+        let state = Cell::new(seed);
+        move || {
+            let mut z = state.get().wrapping_add(0x9E37_79B9_7F4A_7C15);
+            state.set(z);
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            ((z ^ (z >> 31)) >> 11) as f64 / (1u64 << 53) as f64
+        }
+    }
+
+    fn eligible(fx: &Fixture) -> bool {
+        !fx.risky && matches!(fx.expected.as_str(), "sonnet" | "opus")
+    }
+
+    /// Routes `n` fresh tasks (ids 1000..), task `i` the `i`th of `pool`
+    /// round robin, each answered with its fixture's `expected` and `risky`,
+    /// at `rate` with a seeded coin; returns their decision lines.
+    fn explore_run(pool: &[&Fixture], n: usize, rate: f64, log: &Path) -> Vec<Value> {
+        let coin = seeded(2688);
+        for i in 0..n {
+            let fx = pool[i % pool.len()];
+            let call =
+                |_: &str| Ok(json!({"model": fx.expected, "reason": "Task: x", "risky": fx.risky}));
+            let mut d = deps(Some(log.to_path_buf()), &call);
+            d.explore = rate;
+            d.coin = &coin;
+            let r = Request {
+                task_id: 1000 + i as i64,
+                ..req(config::TODO_WATCHER, None, &fx.text)
+            };
+            route_with(&r, &d).unwrap();
+        }
+        lines(log)
+    }
+
+    #[test]
+    fn a_tenth_of_200_seeded_eligible_routings_explore_one_level_down() {
+        let f = fixtures();
+        let pool: Vec<&Fixture> = f.iter().filter(|x| eligible(x)).collect();
+        assert_eq!(pool.len(), 7);
+        let dir = tempfile::tempdir().unwrap();
+        let l = explore_run(&pool, 200, 0.1, &dir.path().join("m.log"));
+        assert_eq!(l.len(), 200);
+        let exp: Vec<&Value> = l.iter().filter(|l| l["experiment"] == true).collect();
+        let share = exp.len() as f64 / 200.0;
+        println!("exploration share {share} ({} of 200)", exp.len());
+        assert!((0.06..=0.14).contains(&share), "share {share}");
+        for e in &exp {
+            let model = e["model"].as_str().unwrap();
+            assert_eq!(e["rubric_model"], one_up(model), "{e}");
+            assert_ne!(e["rubric_model"], e["model"]);
+            assert_eq!(e["source"], "haiku");
+        }
+        for c in l.iter().filter(|l| l["experiment"] == false) {
+            assert_eq!(c["rubric_model"], c["model"], "{c}");
+        }
+    }
+
+    #[test]
+    fn no_risky_fable_or_haiku_pick_is_ever_demoted() {
+        let f = fixtures();
+        let pool: Vec<&Fixture> = f.iter().collect();
+        let dir = tempfile::tempdir().unwrap();
+        // Rate 1: every eligible pick is demoted, so any leak would show.
+        let l = explore_run(&pool, 200, 1.0, &dir.path().join("m.log"));
+        for (i, line) in l.iter().enumerate() {
+            let fx = pool[i % pool.len()];
+            assert_eq!(line["experiment"], eligible(fx), "#{i}: {line}");
+            assert_eq!(line["risky"], fx.risky);
+            if !eligible(fx) {
+                assert_eq!(line["model"], fx.expected.as_str(), "#{i}");
+            }
+        }
+        assert!(l.iter().any(|l| l["experiment"] == true));
+    }
+
+    #[test]
+    fn rate_zero_explores_nothing() {
+        let f = fixtures();
+        let pool: Vec<&Fixture> = f.iter().collect();
+        let dir = tempfile::tempdir().unwrap();
+        let l = explore_run(&pool, 200, 0.0, &dir.path().join("m.log"));
+        assert!(l.iter().all(|l| l["experiment"] == false));
+        assert!(l.iter().all(|l| l["rubric_model"] == l["model"]));
+    }
+
+    #[test]
+    fn naru_live_fallback_and_disabled_never_explore() {
+        let draws = Cell::new(0);
+        let coin = || {
+            draws.set(draws.get() + 1);
+            0.0
+        };
+        let sonnet = |_: &str| Ok(json!({"model": "sonnet", "reason": "r", "risky": false}));
+        let failing = |_: &str| Err("timed out".to_string());
+        let run = |d: Deps<'_>, r: &Request<'_>| route_with(r, &d);
+        let mk = |call: &dyn Fn(&str) -> Result<Value, String>| -> Decision {
+            let mut d = deps(None, call);
+            d.explore = 1.0;
+            d.coin = &coin;
+            run(d, &req(config::TODO_WATCHER, None, "t")).unwrap()
+        };
+        let fb = mk(&failing);
+        assert_eq!(
+            (fb.source, fb.experiment, fb.rubric_model),
+            (Source::Fallback, false, None)
+        );
+        let mut d = deps(None, &sonnet);
+        d.explore = 1.0;
+        d.coin = &coin;
+        d.enabled = Ok(false);
+        let off = run(d, &req(config::TODO_WATCHER, None, "t")).unwrap();
+        assert_eq!((off.source, off.experiment), (Source::Disabled, false));
+        let mut d = deps(None, &sonnet);
+        d.explore = 1.0;
+        d.coin = &coin;
+        assert!(run(d, &req(config::LIVE_AGENT, Some("naru-live"), "t")).is_err());
+        assert_eq!(
+            draws.get(),
+            0,
+            "no coin for naru-live, fallback or disabled"
+        );
+        // The control: the same call with the router on is demoted.
+        let on = mk(&sonnet);
+        assert_eq!((on.model.as_str(), on.experiment), ("haiku", true));
+        assert_eq!(draws.get(), 1);
+    }
+
+    /// A re-dispatch reuses the logged experiment with no second coin flip,
+    /// and a retry of a bounced experiment returns to the rubric's pick.
+    #[test]
+    fn an_experiment_is_reused_and_its_retry_returns_to_the_rubric_pick() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("m.log");
+        let draws = Cell::new(0);
+        let coin = || {
+            draws.set(draws.get() + 1);
+            0.0
+        };
+        let route_once = |r: &Request<'_>| {
+            let call = |_: &str| Ok(json!({"model": "opus", "reason": "Task: x", "risky": false}));
+            let mut d = deps(Some(log.clone()), &call);
+            d.explore = 0.1;
+            d.coin = &coin;
+            route_with(r, &d).unwrap()
+        };
+        let first = route_once(&req(config::TODO_WATCHER, None, "t"));
+        assert_eq!(
+            (
+                first.model.as_str(),
+                first.rubric_model.as_deref(),
+                first.experiment
+            ),
+            ("sonnet", Some("opus"), true)
+        );
+        // The cost guard's relay and a failed spawn carry the experiment on.
+        let relayed = route_once(&relay("t"));
+        assert_eq!(
+            (relayed.model.as_str(), relayed.experiment),
+            ("sonnet", true)
+        );
+        log_outcome_in(&log, 7, 1, Outcome::Failed, Some("todo"), SPAWN_FAILED);
+        let respawn = route_once(&req(config::TODO_WATCHER, None, "t"));
+        assert_eq!(
+            (respawn.model.as_str(), respawn.source, respawn.experiment),
+            ("sonnet", Source::Reused, true)
+        );
+        assert_eq!(draws.get(), 1, "one coin flip per task");
+        // The experiment session bounced: one level up is the rubric's pick.
+        log_outcome_in(
+            &log,
+            7,
+            1,
+            Outcome::Bounced,
+            Some("todo"),
+            "session a ended",
+        );
+        let retry = route_once(&req(config::TODO_WATCHER, None, "t"));
+        assert_eq!(
+            (
+                retry.model.as_str(),
+                retry.source,
+                retry.attempt,
+                retry.experiment
+            ),
+            ("opus", Source::Escalation, 2, false)
+        );
+        assert_eq!(retry.rubric_model.as_deref(), Some("opus"));
+        let l = lines(&log);
+        let last = l.last().unwrap();
+        assert_eq!(
+            (last["experiment"].clone(), last["rubric_model"].clone()),
+            (json!(false), json!("opus"))
+        );
+        assert_eq!(draws.get(), 1);
+    }
+
+    #[test]
+    fn the_ladder_goes_down_one_level_and_stops_at_haiku() {
+        assert_eq!(one_down("fable"), "opus");
+        assert_eq!(one_down("opus"), "sonnet");
+        assert_eq!(one_down("sonnet"), "haiku");
+        assert_eq!(one_down("haiku"), "haiku");
     }
 
     /// The real Haiku call for one text, and how long it took (ms).
@@ -1341,11 +1657,21 @@ mod tests {
         let mut ambiguous_wrong = 0;
         let mut table = std::collections::BTreeMap::<(String, String), u32>::new();
         let mut misses = Vec::new();
+        // Risky fixtures Haiku called safe (a demotion leak unless it chose
+        // fable), and safe ones it called risky (only a smaller sample).
+        let mut risky_leaks = Vec::new();
+        let mut risky_extra = 0;
         for (i, fx) in f.iter().enumerate() {
             let (answer, ms) = live_call(&fx.text);
             lat.push(ms);
-            let (model, reason) = parse_answer(answer)
-                .unwrap_or_else(|e| (FALLBACK_MODEL.to_string(), format!("FALLBACK: {e}")));
+            let (model, reason, risky) = parse_answer(answer)
+                .unwrap_or_else(|e| (FALLBACK_MODEL.to_string(), format!("FALLBACK: {e}"), true));
+            if fx.risky && !risky && model != "fable" {
+                risky_leaks.push(format!("#{i} ({model}): {reason}"));
+            }
+            if !fx.risky && risky {
+                risky_extra += 1;
+            }
             *table
                 .entry((fx.expected.clone(), model.clone()))
                 .or_default() += 1;
@@ -1392,6 +1718,15 @@ mod tests {
             lat[lat.len() - 1]
         );
         println!("correct {correct}/{}", f.len());
+        for l in &risky_leaks {
+            println!("RISKY LEAK {l}");
+        }
+        println!(
+            "risky: {} leaks, {risky_extra} of {} safe fixtures called risky",
+            risky_leaks.len(),
+            f.iter().filter(|x| !x.risky).count()
+        );
+        assert!(risky_leaks.is_empty(), "a risky fixture could be demoted");
         assert!(
             correct >= f.len() - 2,
             "only {correct}/{} routed as expected",
@@ -1417,9 +1752,10 @@ mod tests {
             .iter()
             .map(|s| {
                 let (answer, ms) = live_call(s["prompt"].as_str().expect("prompt"));
-                let (model, reason) = parse_answer(answer)
-                    .unwrap_or_else(|e| (FALLBACK_MODEL.to_string(), format!("FALLBACK: {e}")));
-                json!({"model": model, "reason": reason, "latency_ms": ms})
+                let (model, reason, risky) = parse_answer(answer).unwrap_or_else(|e| {
+                    (FALLBACK_MODEL.to_string(), format!("FALLBACK: {e}"), true)
+                });
+                json!({"model": model, "reason": reason, "risky": risky, "latency_ms": ms})
             })
             .collect();
         std::fs::write(format!("{path}.out.json"), json!(out).to_string()).unwrap();

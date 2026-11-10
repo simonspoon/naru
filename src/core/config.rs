@@ -2287,6 +2287,9 @@ struct WatchersSection {
     /// the read every other watcher key shares.
     #[serde(default, rename = "model-router")]
     model_router: Option<serde_json::Value>,
+    /// The exploration rate, raw for the same reason (naru task 2688).
+    #[serde(default, rename = "model-router-explore")]
+    model_router_explore: Option<serde_json::Value>,
 }
 
 fn read_watchers(path: &Path) -> Result<WatchersSection, String> {
@@ -2374,6 +2377,28 @@ fn model_router_enabled_in(path: &Path) -> Result<bool, String> {
         Some(serde_json::Value::String(s)) => !s.trim().eq_ignore_ascii_case("off"),
         Some(serde_json::Value::Bool(b)) => b,
         _ => true,
+    })
+}
+
+/// The share of routed task sessions sent one model level below the rubric's
+/// pick (naru task 2688, `docs/model-router.md`): `watchers.model-router-explore`,
+/// hand-edited only, absent or `null` is [`DEFAULT_MODEL_ROUTER_EXPLORE`], a
+/// number is clamped into `0.0..=1.0`, anything else (a string, a bool) is
+/// `0.0`, no exploration. An unreadable file is `Err`.
+pub fn model_router_explore() -> Result<f64, String> {
+    model_router_explore_in(&config_file())
+}
+
+/// The exploration rate with no config: one routed session in ten.
+pub const DEFAULT_MODEL_ROUTER_EXPLORE: f64 = 0.1;
+
+fn model_router_explore_in(path: &Path) -> Result<f64, String> {
+    Ok(match read_watchers(path)?.model_router_explore {
+        None => DEFAULT_MODEL_ROUTER_EXPLORE,
+        Some(v) => v
+            .as_f64()
+            .filter(|r| r.is_finite())
+            .map_or(0.0, |r| r.clamp(0.0, 1.0)),
     })
 }
 
@@ -7451,6 +7476,30 @@ mod tests {
         save(serde_json::json!("off")).unwrap();
         assert!(!model_router_enabled_in(&path).unwrap());
         assert_eq!(stall_minutes_in(&path).unwrap(), 5);
+    }
+
+    #[test]
+    fn model_router_explore_defaults_to_a_tenth_and_clamps() {
+        let dir = tempfile::tempdir().unwrap();
+        let read = |body: &str| model_router_explore_in(&write_config(dir.path(), body)).unwrap();
+        assert_eq!(
+            model_router_explore_in(&dir.path().join("absent.json")).unwrap(),
+            0.1
+        );
+        assert_eq!(read(r#"{"watchers": {}}"#), 0.1);
+        assert_eq!(read(r#"{"watchers": {"model-router-explore": 0}}"#), 0.0);
+        assert_eq!(
+            read(r#"{"watchers": {"model-router-explore": 0.25}}"#),
+            0.25
+        );
+        assert_eq!(read(r#"{"watchers": {"model-router-explore": 7}}"#), 1.0);
+        assert_eq!(read(r#"{"watchers": {"model-router-explore": -1}}"#), 0.0);
+        assert_eq!(
+            read(r#"{"watchers": {"model-router-explore": "lots"}}"#),
+            0.0
+        );
+        assert_eq!(read(r#"{"watchers": {"model-router-explore": null}}"#), 0.1);
+        assert!(model_router_explore_in(&write_config(dir.path(), "{ nope")).is_err());
     }
 
     #[test]
