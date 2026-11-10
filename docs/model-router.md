@@ -285,9 +285,12 @@ is never tuned to reproduce them.
 the log, joined to the session it started and to how its task went, so
 quality, cost and time per model can be watched over time. Derived on every
 read from the log and the cc tables (`core::cc::router`), nothing stored, no
-migration, no route (CLI only). Output `{rows, decisions, joined, since,
-until}`; `joined / decisions` is the join coverage. `since`/`until` bound the
-**decision** time and parse exactly as `cc scorecard`'s.
+migration, no route (CLI only). Output `{rows, decisions, joined, escalations,
+parked, since, until}`; `joined / decisions` is the join coverage,
+`escalations` counts rows with source `escalation` and `parked` the log's
+`parked` lines (retries spent, no session) in the window (naru task 2692).
+`since`/`until` bound the **decision** time and parse exactly as `cc
+scorecard`'s.
 
 - **The join.** A decision line carries no session id: it is logged before
   the spawn, and Claude Code does not store the `--name`. So a decision for
@@ -301,10 +304,13 @@ until}`; `joined / decisions` is the join coverage. `since`/`until` bound the
 - **From the log:** `task_id`, `project_id`, `decided_at`, `model`, `reason`,
   `source`, `router_latency_ms`, `costly`, and `outcome` / `outcome_status` /
   `outcome_detail` (the task's first outcome line between this decision and
-  its next; `null` while the session runs). `attempt` is 1 for a task's first
-  decision, 2 for its first re-dispatch, and so on: a re-dispatch or a
-  cost-guard relay logs its own `reused` decision, so each session has its own
-  row and several rows can share one Haiku pick.
+  its next; `null` while the session runs). `attempt` is the line's logged
+  `attempt` (naru task 2692): a cost-guard relay or a failed-spawn reuse logs
+  its own `reused` decision with the same attempt, so each session has its own
+  row and several rows can share one attempt and one Haiku pick. The Router
+  review leaves a `spawn failed` row (no session) out of finished and
+  first-try counts, so its reuse is the attempt's one counted row. A line from before attempts were
+  logged counts in log order (1, 2, ...).
 - **From the session** (`core::cc::session_detail`, so exactly what `naru cc
   session <id>` prints): `session_id`, `start`, `end`, `duration_minutes`,
   `tokens`, `total_tokens`, `est_cost_usd`, `models_used`, `agent_runs`.
@@ -327,6 +333,12 @@ until}`; `joined / decisions` is the join coverage. `since`/`until` bound the
   no task note uses a `verifier: PASS|FAIL` line, and `result` mentions PASS
   only in free prose. A final-note convention would make it derivable; that is
   a separate task.
+- **Escalations are not picks** (naru task 2692). `escalated` is true on an
+  `escalation` row and on a `reused` row carrying one on (a relay, a
+  failed-spawn reuse, a re-queued park): that session's model came from the
+  retry ladder, not the rubric, so pick accuracy leaves it out.
+  `after_experiment` is true on an escalated row whose escalation retried an
+  `experiment: true` attempt (its own line logs `experiment: false`).
 - **Control group.** `fallback` and `disabled` decisions are rows too, flagged
   by `source`.
 - **Exploration arm.** `experiment` and `rubric_model` are the decision line's
@@ -354,12 +366,14 @@ holding the report and proposals; rejected (or timed out) logs it to the
 person; the inbox watcher only triages change requests), filed against task
 2689.
 
-The report has four sections: (1) per model, experiments excluded: sessions,
+The report has four sections: (1) per model, experiments and escalated rows
+excluded (shown as their own count, with the parked count): sessions,
 finished, first-try landing (of finished first attempts), bounced, failed,
 retried up (a finished non-done session whose task's next attempt ran a
 higher model), median cost and wall-clock; (2) exploration: per
 `rubric_model`, the experiment arm vs the control (rows on that model from a
-`haiku`/`reused` pick); (3) flags with their numbers; (4) proposals.
+`haiku`/`reused` pick), each counted in attempts so a relay is not a second
+one; (3) flags with their numbers; (4) proposals.
 
 Flags, each only at **n >= min_n** (else listed under "Not enough data"):
 a model's bounce rate over `max_bounce` (with the commonest words of the

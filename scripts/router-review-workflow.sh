@@ -68,14 +68,19 @@ def median: sort | if length == 0 then null elif length % 2 == 1 then .[length /
 def p95: sort | if length == 0 then null else .[((length * 0.95) | ceil) - 1] end;
 def money: if . == null then "-" else "$\(. * 100 | round / 100)" end;
 def mins: if . == null then "-" else "\(. * 10 | round / 10) min" end;
-def finished: map(select(.outcome != null));
-def landed: map(select(.attempt == 1 and .outcome != null));
+# a spawn that never started is no session: its reuse carries the same attempt on
+def finished: map(select(.outcome != null and .outcome_detail != "spawn failed"));
+def landed: finished | map(select(.attempt == 1));
 def nums($k): map(.[$k] | select(. != null));
+# sessions of one attempt (a relay or failed-spawn reuse is the same attempt) count once
+def attempts: unique_by([.task_id, .attempt]) | length;
 def topwords: map(.reason // "" | ascii_downcase | [scan("[a-z][a-z-]{3,}")] | unique) | add // []
   | map(select(IN("task","with","that","this","from","the","into","rule","signal","named","text","which","work","change","says","than","there","applies","default","only","them","they","have","does","when","same","each","also","single","file","opus","sonnet","haiku","fable") | not))
   | group_by(.) | map({w: .[0], n: length}) | sort_by(-.n, .w) | .[:6] | map("\(.w) (\(.n))") | join(", ");
 .rows as $all
-| ($all | map(select(.experiment != true))) as $rows
+# rubric picks only: an escalation (and a relay of one) is a retry, not a pick (naru task 2692)
+| ($all | map(select(.experiment != true and .escalated != true))) as $rows
+| ($all | map(select(.experiment != true and .escalated == true))) as $esc
 | ($all | map(select(.experiment == true))) as $exp
 # the next attempt of the same task, to see whether a retry went up a level
 | ($all | group_by(.task_id) | map(sort_by(.attempt)) | map(. as $g | range(0; length) | {key: "\($g[.].task_id)/\($g[.].attempt)", value: ($g[. + 1].model // null)}) | from_entries) as $next
@@ -94,10 +99,10 @@ def topwords: map(.reason // "" | ascii_downcase | [scan("[a-z][a-z-]{3,}")] | u
 | ($costed[($cn / 2 | floor):] | nums("est_cost_usd") | median) as $c2
 | ($exp | group_by(.rubric_model) | map(.[0].rubric_model as $rm
     | ($rows | map(select(.model == $rm and (.source == "haiku" or .source == "reused")))) as $ctl
-    | {row: $rm, down: (.[0].model), en: length, efin: (finished | length),
+    | {row: $rm, down: (.[0].model), en: attempts, efin: (finished | length),
        eland: (landed | map(select(.landed_first_try == true)) | length), efirst: (landed | length),
        ebounce: (finished | map(select(.outcome == "bounced")) | length),
-       cn: ($ctl | length), cfin: ($ctl | finished | length),
+       cn: ($ctl | attempts), cfin: ($ctl | finished | length),
        cland: ($ctl | landed | map(select(.landed_first_try == true)) | length), cfirst: ($ctl | landed | length),
        cbounce: ($ctl | finished | map(select(.outcome == "bounced")) | length)})) as $arms
 | ($rows | map(select((.reason // "") | startswith("Role ")))) as $deleg
@@ -139,11 +144,11 @@ def topwords: map(.reason // "" | ascii_downcase | [scan("[a-z][a-z-]{3,}")] | u
   ] as $checks
 | ($checks | map(select(.flag == true))) as $flags
 | ($checks | map(select(.ok == false))) as $thin
-| "Router review \($today): \($flags | length) flag(s), \($rows | length) routed decisions and \($exp | length) experiments since \($since)",
+| "Router review \($today): \($flags | length) flag(s), \($rows | length) rubric-pick decisions, \($exp | length) experiments and \($esc | length) escalated since \($since)",
   "",
   "Telemetry: `naru cc router --since \($since)` (\(.decisions) decisions, \(.joined) joined to a session). Minimum sample for a flag: \($min). Nothing in this report changes the rubric.",
   "",
-  "## 1. Per model (rubric picks; experiments excluded)",
+  "## 1. Per model (rubric picks; experiments and escalations excluded)",
   "",
   "| model | sessions | finished | first-try landing | bounced | failed | retried up | median cost | median time |",
   "|---|---|---|---|---|---|---|---|---|",
@@ -151,10 +156,12 @@ def topwords: map(.reason // "" | ascii_downcase | [scan("[a-z][a-z-]{3,}")] | u
   "",
   "Sources: \($rows | group_by(.source) | map("\(.[0].source // "unknown") \(length)") | join(", ") | if . == "" then "none" else . end). Router latency p95 (haiku calls): \($lat // "-") ms. Median cost, older half vs newer half: \($c1 | money) -> \($c2 | money).",
   "",
+  "Escalations (retries one level up, out of the table above): \(.escalations) decisions, \($esc | map(select(.after_experiment == true and .source == "escalation")) | length) after an experiment; \($esc | length) escalated sessions with their relays. Parked with retries spent: \(.parked).",
+  "",
   "## 2. Exploration (one level down vs control)",
   "",
   (if ($arms | length) == 0 then "No experiment sessions in this window (an experiment is a decision logged with `experiment: true` and its `rubric_model`, naru task 2688)."
-   else ("| rubric row | arm | sessions | first-try landing | bounced |", "|---|---|---|---|---|",
+   else ("| rubric row | arm | attempts | first-try landing | bounced |", "|---|---|---|---|---|",
      ($arms[] | "| \(.row) | experiment (\(.down)) | \(.en) | \(pct(.eland; .efirst)) | \(pct(.ebounce; .efin)) |",
                 "| \(.row) | control (\(.row)) | \(.cn) | \(pct(.cland; .cfirst)) | \(pct(.cbounce; .cfin)) |")) end),
   "",

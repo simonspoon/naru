@@ -3920,6 +3920,11 @@ pub struct RouterReport {
     pub decisions: usize,
     /// Rows joined to a cc session.
     pub joined: usize,
+    /// Rows whose source is `escalation` (naru task 2692): retries one level
+    /// up, not rubric picks.
+    pub escalations: usize,
+    /// `parked` lines in the window: retries spent, no session started.
+    pub parked: usize,
     pub since: Option<String>,
     pub until: Option<String>,
 }
@@ -3944,8 +3949,17 @@ pub struct RouterRow {
     /// line that has none.
     pub experiment: Option<bool>,
     pub rubric_model: Option<String>,
-    /// 1 for the task's first logged decision, 2 for its first re-dispatch...
+    /// The line's logged `attempt`, so a relay or failed-spawn reuse keeps
+    /// its attempt (naru task 2692); a line from before attempts were logged
+    /// counts in log order: 1 for the task's first decision, 2 for the next...
     pub attempt: usize,
+    /// This session's model came from an escalation, not the rubric (naru
+    /// task 2692): an `escalation` line, or a `reused` line carrying one on.
+    /// Pick accuracy leaves these rows out.
+    pub escalated: bool,
+    /// The escalation retried an experiment attempt (naru task 2688): set on
+    /// an escalated row whose escalation followed an `experiment: true` line.
+    pub after_experiment: bool,
     /// The log's outcome line for this decision (`done`|`bounced`|`failed`).
     pub outcome: Option<String>,
     pub outcome_status: Option<String>,
@@ -3996,13 +4010,15 @@ pub fn router(
         .transpose()?;
     let line_at = |l: &serde_json::Value| l["time"].as_str().and_then(parse_ts);
 
-    // Decisions in log order, each with its attempt and the time of the same
-    // task's next decision.
+    // Decisions in log order, each with its attempt, whether its model came
+    // from an escalation, and the time of the same task's next decision.
     struct Dec<'a> {
         line: &'a serde_json::Value,
         task_id: i64,
         at: i64,
         attempt: usize,
+        escalated: bool,
+        after_experiment: bool,
         next_at: Option<i64>,
     }
     let mut decisions: Vec<Dec> = Vec::new();
@@ -4011,12 +4027,19 @@ pub fn router(
         let (Some(task_id), Some(at)) = (line["task_id"].as_i64(), line_at(line)) else {
             continue;
         };
-        let attempt = match last_of_task.get(&task_id) {
-            Some(&i) => {
-                decisions[i].next_at = Some(at);
-                decisions[i].attempt + 1
-            }
-            None => 1,
+        let prev = last_of_task.get(&task_id).copied();
+        if let Some(i) = prev {
+            decisions[i].next_at = Some(at);
+        }
+        let prev = prev.map(|i| &decisions[i]);
+        let attempt = line["attempt"]
+            .as_u64()
+            .map(|a| a as usize)
+            .unwrap_or_else(|| prev.map_or(1, |p| p.attempt + 1));
+        let (escalated, after_experiment) = match (line["source"].as_str(), prev) {
+            (Some("escalation"), p) => (true, p.is_some_and(|p| p.line["experiment"] == true)),
+            (Some("reused"), Some(p)) => (p.escalated, p.after_experiment),
+            _ => (false, false),
         };
         last_of_task.insert(task_id, decisions.len());
         decisions.push(Dec {
@@ -4024,6 +4047,8 @@ pub fn router(
             task_id,
             at,
             attempt,
+            escalated,
+            after_experiment,
             next_at: None,
         });
     }
@@ -4090,6 +4115,8 @@ pub fn router(
             experiment: d.line["experiment"].as_bool(),
             rubric_model: text(Some(d.line), "rubric_model"),
             attempt: d.attempt,
+            escalated: d.escalated,
+            after_experiment: d.after_experiment,
             outcome: text(outcome, "outcome"),
             outcome_status: text(outcome, "status"),
             outcome_detail: text(outcome, "detail"),
@@ -4136,9 +4163,21 @@ pub fn router(
         rows.push(row);
     }
     let joined = rows.iter().filter(|r| r.session_id.is_some()).count();
+    let escalations = rows
+        .iter()
+        .filter(|r| r.source.as_deref() == Some("escalation"))
+        .count();
+    let parked = lines
+        .iter()
+        .filter(|l| l["kind"] == "parked")
+        .filter_map(line_at)
+        .filter(|&t| since_ts.is_none_or(|s| t >= s) && until_ts.is_none_or(|u| t < u))
+        .count();
     Ok(RouterReport {
         decisions: rows.len(),
         joined,
+        escalations,
+        parked,
         rows,
         since: since.map(str::to_string),
         until: until.map(str::to_string),
@@ -8494,6 +8533,57 @@ mod tests {
         assert_eq!((r.decisions, r.joined), (1, 1));
         assert_eq!(r.rows[0].session_id.as_deref(), Some("sa2"));
         assert!(router(&store, &lines, Some("2026-09-01T00:00:00+01:00"), None).is_err());
+    }
+
+    #[test]
+    fn router_labels_escalations_and_keys_attempts_on_the_logged_attempt() {
+        use serde_json::json;
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(&tmp.path().join("naru.db")).unwrap();
+        let at = |d: i64| fmt_store_ts(1_700_000_000 + d);
+        let dec = |d: i64, task: i64, model: &str, source: &str, attempt: u64, exp: bool| {
+            json!({"kind":"decision","time":at(d),"task_id":task,"project_id":1,"model":model,
+                "reason":"r","source":source,"attempt":attempt,"experiment":exp,"rubric_model":"opus"})
+        };
+        let lines = vec![
+            // Task 1: a rubric pick that bounces, then an escalation and its relay.
+            dec(0, 1, "sonnet", "haiku", 1, false),
+            json!({"kind":"outcome","time":at(10),"task_id":1,"outcome":"bounced"}),
+            dec(20, 1, "opus", "escalation", 2, false),
+            dec(30, 1, "opus", "reused", 2, false),
+            // Task 1's retries are spent: parked, no session.
+            json!({"kind":"parked","time":at(40),"task_id":1,"model":"opus","attempt":2,"reason":"r"}),
+            // Task 2: an experiment, its relay, then the escalation back to the pick.
+            dec(50, 2, "sonnet", "haiku", 1, true),
+            dec(60, 2, "sonnet", "reused", 1, true),
+            json!({"kind":"outcome","time":at(70),"task_id":2,"outcome":"failed"}),
+            dec(80, 2, "opus", "escalation", 2, false),
+        ];
+        let r = router(&store, &lines, None, None).unwrap();
+        assert_eq!((r.decisions, r.escalations, r.parked), (6, 2, 1));
+        let got: Vec<_> = r
+            .rows
+            .iter()
+            .map(|r| (r.task_id, r.attempt, r.escalated, r.after_experiment))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (1, 1, false, false),
+                (1, 2, true, false),
+                (1, 2, true, false),
+                (2, 1, false, false),
+                // The relay keeps its attempt: one experiment attempt, not two.
+                (2, 1, false, false),
+                (2, 2, true, true),
+            ]
+        );
+        // The experiment attempt's outcome lands on its relay row.
+        assert_eq!(r.rows[4].outcome.as_deref(), Some("failed"));
+        // `since` bounds the parked count too.
+        let since = format!("{}Z", at(45).replace(' ', "T"));
+        let r = router(&store, &lines, Some(&since), None).unwrap();
+        assert_eq!((r.decisions, r.escalations, r.parked), (3, 1, 0));
     }
 
     #[test]
