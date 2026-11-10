@@ -73,8 +73,8 @@ subagent slice (naru task 2684) inherits it; that slice should prefer the
 role's frontmatter model over this wording when it can read it.
 
 Effort is untouched (medium everywhere). Out of scope for this slice: subagent
-model override, author size hints, retrying one level up, effort routing,
-mid-session switching.
+model override, author size hints, effort routing, mid-session switching.
+Retrying one level up is naru task 2686 (below).
 
 ## naru-live is never routed
 
@@ -95,9 +95,10 @@ After the refusal, in order:
    `{model}` -> `opus`, source `disabled`, reason says so. A saved template
    without `{model}` keeps working unchanged and is never routed (no wasted
    call).
-3. The log already holds a `source: haiku` decision for this task id -> reuse
-   it (source `reused`, no call). A re-dispatch or a cost-guard relay does not
-   re-route.
+3. The log already holds a routed (`haiku`, `reused` or `escalation`)
+   decision for this task id -> no call; the next model comes from that
+   history (retry one level up, below). A re-dispatch or a cost-guard relay
+   never re-routes.
 4. Otherwise the Haiku call. The answer must be an object whose `model` is one
    of the four and whose `reason` is non-empty.
 
@@ -106,6 +107,43 @@ reason, and never fails or blocks the spawn: `claude` missing, timeout,
 non-JSON or no `structured_output`, a disallowed model, an empty reason, an
 unreadable config. With the default template and `opus` the spawn argv is what
 it was before the router.
+
+## Retry one level up (naru task 2686)
+
+The escape hatch for a wrong pick. When a task that already had a routed
+session comes back through the queue-watcher, the next session runs **one
+level up** the ladder `haiku -> sonnet -> opus -> fable`; `fable` retries on
+`fable`. The model is still chosen once per session start. Everything is read
+from the log (`after` in `model_router.rs`); no task column, no migration.
+
+What the latest routed decision's history says, in order:
+
+- **A cost-guard relay** (`Request.relay`, the relay's own
+  `dispatch_task_session` call) -> the same model, the same attempt, source
+  `reused`. The relay carries one attempt on in a fresh session.
+- **The latest decision is `fallback` or `disabled`** -> the last routed
+  model, `reused`: that session was not router-chosen, so it does not
+  escalate.
+- **Its outcome is `failed` with detail `spawn failed`**
+  (`model_router::SPAWN_FAILED`, logged by `queue_watcher_tick`) -> the same
+  model, the same attempt, `reused`. A process that never started is not a
+  model problem.
+- **Otherwise it is a retry**: outcome `bounced` (back to `todo`/`backlog`),
+  `failed` (the session died, the reaper re-queued or parked it), `done`
+  (a reviewer or a person reopened the finished task), or no outcome at all
+  (the task came back to the queue while its session was still tracked) ->
+  source `escalation`, `attempt` + 1, reason
+  `escalation: the sonnet session bounced; one level up to opus`.
+- **The cap**: at most `MAX_ESCALATIONS` (2) escalations since the task's
+  latest `haiku` pick or park. The retry after that is source `parked`:
+  `dispatch_task_session` moves the task to `backlog`, adds a task note
+  (`Model router: parked in backlog instead of starting attempt N ...`),
+  starts nothing, and only then logs the `parked` line (`log_parked`), so a
+  park whose store write failed is retried as a park. A person re-queuing it gets the same model, `attempt` + 1,
+  source `reused`, and a fresh budget of two escalations.
+
+So a task picked `haiku` runs at most haiku, sonnet, opus, then parks; one
+picked `fable` runs fable three times, then parks.
 
 ## The switch
 
@@ -121,12 +159,15 @@ dev env writes `~/.naru-dev/logs`), one JSON object per line, best effort (a
 write failure is one stderr line). Two kinds:
 
 ```json
-{"kind":"decision","time":"2026-11-10 09:41:02","task_id":2683,"project_id":2,"input":"<first 400 chars>","hint":null,"model":"opus","reason":"...","source":"haiku","latency_ms":2104}
+{"kind":"decision","time":"2026-11-10 09:41:02","task_id":2683,"project_id":2,"input":"<first 400 chars>","hint":null,"model":"opus","reason":"...","source":"haiku","latency_ms":2104,"attempt":1}
 {"kind":"outcome","time":"2026-11-10 10:12:40","task_id":2683,"outcome":"done","status":"done","detail":"session 1a2b3c4d ended"}
+{"kind":"parked","time":"2026-11-10 11:02:13","task_id":2683,"project_id":2,"model":"fable","attempt":3,"reason":"the fable session bounced; 2 retries one level up are spent, parked"}
 ```
 
-- `source`: `haiku` | `fallback` | `disabled` | `reused`. A `reused` decision is
-  logged too. `hint` is always `null` (reserved for the author size hint, a
+- `source`: `haiku` | `fallback` | `disabled` | `reused` | `escalation`. A
+  `reused` decision is logged too. `attempt` (naru task 2686) is 1 for the
+  first routed session and one more per retry; a line without it reads as 1.
+  A `parked` line stands in for the decision of a retry that was not started. `hint` is always `null` (reserved for the author size hint, a
   later slice). `"costly":true` is added when the model is `fable`.
 - An **outcome** is logged by `forget_dispatch` (the one place a dispatched
   session leaves `todo_dispatched`), from the task's status at that moment:
@@ -136,10 +177,15 @@ write failure is one stderr line). Two kinds:
   parks (`backlog`) the task: the reaper logs that outcome just before
   `forget_dispatch`, whose own line is then a no-op. Only a task moved by hand
   (`Abandoned::Moved`) is read from its status. A session that was *superseded* (re-dispatch,
-  cost-guard relay) logs no outcome, the task goes on. A failed spawn in
-  `queue_watcher_tick` logs `failed` (`detail: spawn failed`). An outcome is
-  appended only when the log holds a decision for that task id with no outcome
-  after it: one per decision, and a task that was never routed logs nothing.
+  cost-guard relay) logs no outcome, the task goes on. A spawn that did not
+  start (`agents::spawn_bg` failed, in `dispatch_task_session`) logs `failed`
+  (`detail: spawn failed`); a failure before the router ran (seeding) logs
+  nothing. An outcome is appended only when the task's latest decision has no
+  outcome after it **and** is the attempt the session was started for (each
+  `todo_dispatched` entry carries its `attempt`, naru task 2686): one per
+  decision, a task that was never routed logs nothing, and a session that
+  ends after its task was dispatched again (the reaper and the queue-watcher
+  run concurrently) never closes the newer attempt's decision.
 - An outcome line needs the spawn to print a job receipt: a template that
   prints none is never tracked in `todo_dispatched`, so it logs a decision and
   no outcome.
@@ -287,7 +333,7 @@ experiment sessions count as ordinary picks and section 2 says there are none.
   that way, never `haiku` or `fable`. The text is untrusted, so this is a way
   to down-route a hard task to `sonnet`, nothing more.
 
-- A reused decision never escalates: a task that bounced after a `sonnet` pick
-  runs on `sonnet` again (retry one level up is a later slice).
+- Any return of a routed task to the queue is a retry, including a person
+  re-queuing or reopening it for unrelated reasons; the cap bounds the cost.
 - Routing is serial inside the queue-watcher's claim loop: each task's Haiku call
   takes up to 15 s (typically 2-5 s) before the next task is dispatched.

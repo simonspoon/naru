@@ -1322,7 +1322,7 @@ fn relay_context_sessions(
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .insert((sid.clone(), guard::CONTEXT.to_string()));
-                match dispatch_task_session(state, task_id, &local_path, &session_name) {
+                match dispatch_task_session(state, task_id, &local_path, &session_name, true) {
                     Ok(new_job) => {
                         // Anything else marked for the task is stopped as a
                         // re-dispatch would; the old job and what stopped are
@@ -1339,15 +1339,19 @@ fn relay_context_sessions(
                         for job in &gone {
                             map.remove(job);
                         }
-                        if let Some(job) = &new_job {
+                        let new_job = new_job.map(|(job, attempt)| {
                             map.insert(
                                 job.clone(),
-                                DispatchedSession::new(
-                                    DispatchTarget::Task(task_id),
-                                    Instant::now(),
-                                ),
+                                DispatchedSession {
+                                    attempt,
+                                    ..DispatchedSession::new(
+                                        DispatchTarget::Task(task_id),
+                                        Instant::now(),
+                                    )
+                                },
                             );
-                        }
+                            job
+                        });
                         guard::StopOutcome::Relayed {
                             old_job,
                             new_job,
@@ -1397,13 +1401,16 @@ fn relay_context_sessions(
 /// Starts the queue-watcher's session for `task_id` in `local_path`: seeds the
 /// `supervisor` definition and the `execute-naru-task` skill, reads the library's prompts and runs the
 /// `queue-watcher` template through `spawn_bg`. The one spawn both the watcher's
-/// dispatch and the cost guard's relay use; returns the receipt's job id.
+/// dispatch and the cost guard's relay use; returns the receipt's job id and
+/// the router's attempt number for it (naru task 2686), `None` when the spawn
+/// printed no receipt or the task was parked instead.
 fn dispatch_task_session(
     state: &AppState,
     task_id: i64,
     local_path: &str,
     session_name: &str,
-) -> Result<Option<String>, String> {
+    relay: bool,
+) -> Result<Option<(String, u64)>, String> {
     // A configured template may spawn `--agent supervisor` (the default did
     // until naru task 2273), so the definition has to be on disk before the
     // spawn — `claude --agent` errors on an agent it has never seen (mesa
@@ -1436,26 +1443,58 @@ fn dispatch_task_session(
     // task's text. The task is read under its own short lock, which is dropped
     // before the router runs: the Haiku call may take up to its 15 s timeout.
     // Every failure inside it is an `opus` decision, so it never fails the spawn.
+    // A task back from an earlier routed session runs one level up, and one
+    // with its retries spent is parked instead (naru task 2686).
     let task = {
         let store = state.store.lock().unwrap();
         store.get_task(task_id).ok()
     };
-    let model = match task {
-        Some(task) => model_router::route(
+    let decision = task.and_then(|task| {
+        model_router::route(
             &model_router::Request {
                 action: config::TODO_WATCHER,
                 agent: None,
                 task_id,
                 project_id: task.project_id,
                 text: &task.description,
+                relay,
             },
             &prompts,
             &config::workspace_dir().to_string_lossy(),
         )
+        .ok()
+    });
+    if let Some(d) = decision
+        .as_ref()
+        .filter(|d| d.source == model_router::Source::Parked)
+    {
+        let note = format!(
+            "Model router: parked in backlog instead of starting attempt {}. {}. Re-queue it \
+             to run again on {}.",
+            d.attempt + 1,
+            d.reason,
+            d.model
+        );
+        let mut store = state.store.lock().unwrap();
+        store
+            .update_task(
+                task_id,
+                &TaskPatch {
+                    status: Some(Status::Backlog),
+                    ..Default::default()
+                },
+            )
+            .and_then(|_| store.add_task_note(task_id, &note, None))
+            .map_err(|e| format!("cannot park task {task_id}: {e}"))?;
+        // Logged only once the park holds, so a failed one is retried as a park.
+        model_router::log_parked(task_id, d);
+        eprintln!("queue-watcher: task {task_id}: {note}");
+        return Ok(None);
+    }
+    let attempt = decision.as_ref().map_or(1, |d| d.attempt);
+    let model = decision
         .map(|d| d.model)
-        .unwrap_or_else(|_| model_router::FALLBACK_MODEL.to_string()),
-        None => model_router::FALLBACK_MODEL.to_string(),
-    };
+        .unwrap_or_else(|| model_router::FALLBACK_MODEL.to_string());
     let spawn = || {
         agents::spawn_bg(
             config::TODO_WATCHER,
@@ -1474,7 +1513,18 @@ fn dispatch_task_session(
             spawn()
         }
         other => other,
-    }?;
+    }
+    // Only a spawn that did not start is `spawn failed`, the one failure that
+    // never escalates; a seeding failure before the router logs nothing.
+    .inspect_err(|_| {
+        model_router::log_outcome(
+            task_id,
+            attempt,
+            model_router::Outcome::Failed,
+            Some("todo"),
+            model_router::SPAWN_FAILED,
+        )
+    })?;
     // Whatever checkpoint the task already carries is what this session starts
     // from, so the cost guard's relay must not treat it as one the session
     // wrote: only a checkpoint rewritten after this point counts.
@@ -1494,7 +1544,7 @@ fn dispatch_task_session(
         Some((_, updated_at)) => seeded.insert(task_id, updated_at),
         None => seeded.remove(&task_id),
     };
-    Ok(job)
+    Ok(job.map(|job| (job, attempt)))
 }
 
 /// Marks `local_path` trusted in Claude Code's `.claude.json`, logging a write
@@ -1884,7 +1934,7 @@ fn queue_watcher_tick(state: &AppState) {
         // Seeds the definition and runs the `queue-watcher` template; a failure
         // of either is a failed spawn for *this* task — reverted, backed off
         // and alerted below — and the tick goes on.
-        let spawned = dispatch_task_session(state, task_id, &local_path, &session_name);
+        let spawned = dispatch_task_session(state, task_id, &local_path, &session_name, false);
         match spawned {
             // The receipt's short job id is what `claude stop` takes, so
             // remembering it here is the whole of what the reaper needs
@@ -1899,7 +1949,7 @@ fn queue_watcher_tick(state: &AppState) {
                     };
                     failed.remove(&task_id);
                 }
-                if let Some(job_id) = job_id {
+                if let Some((job_id, attempt)) = job_id {
                     // Starting a *second* agent on this task says the first is
                     // finished with it, whatever the task's status reads right
                     // now — so the superseded session is stopped here rather
@@ -1927,18 +1977,15 @@ fn queue_watcher_tick(state: &AppState) {
                     };
                     dispatched.insert(
                         job_id,
-                        DispatchedSession::new(DispatchTarget::Task(task_id), Instant::now()),
+                        DispatchedSession {
+                            attempt,
+                            ..DispatchedSession::new(DispatchTarget::Task(task_id), Instant::now())
+                        },
                     );
                 }
             }
             Err(e) => {
                 eprintln!("queue-watcher: spawn failed for task {task_id}: {e}");
-                model_router::log_outcome(
-                    task_id,
-                    model_router::Outcome::Failed,
-                    Some("todo"),
-                    "spawn failed",
-                );
                 // The alert body and the dedup key: escapes stripped (the real
                 // `claude` colours its output) and the length bounded, since
                 // the body may be spoken.
@@ -2148,6 +2195,9 @@ struct DispatchedSession {
     /// This landing has been handed to the run-profile queue (naru task
     /// 2647, [`RunLandings`]), so later passes do not queue it again.
     restarted: bool,
+    /// The model router's attempt this session was started for (naru task
+    /// 2686): its outcome closes that decision only, never a later one.
+    attempt: u64,
 }
 
 impl DispatchedSession {
@@ -2166,6 +2216,7 @@ impl DispatchedSession {
             stall_notified: false,
             stall_filed: false,
             restarted: false,
+            attempt: 1,
         }
     }
 }
@@ -2830,6 +2881,7 @@ fn todo_reaper_tick(state: &AppState) {
                         // requeued status (which would read as bounced).
                         model_router::log_outcome(
                             task_id,
+                            dispatch.attempt,
                             model_router::Outcome::Failed,
                             Some("todo"),
                             &format!("session {job_id} died; re-queued"),
@@ -2849,6 +2901,7 @@ fn todo_reaper_tick(state: &AppState) {
                     Abandoned::Parked(deaths) => {
                         model_router::log_outcome(
                             task_id,
+                            dispatch.attempt,
                             model_router::Outcome::Failed,
                             Some("backlog"),
                             &format!("session {job_id} died; parked"),
@@ -3333,6 +3386,7 @@ fn forget_dispatch(state: &AppState, job_id: &str) {
     let Some(DispatchedSession {
         target: DispatchTarget::Task(task_id),
         superseded: false,
+        attempt,
         ..
     }) = removed
     else {
@@ -3353,6 +3407,7 @@ fn forget_dispatch(state: &AppState, job_id: &str) {
     let status = status.map(Status::as_str);
     model_router::log_outcome(
         task_id,
+        attempt,
         outcome,
         status.or(Some("deleted")),
         &format!("session {job_id} ended"),
@@ -17751,6 +17806,136 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
                 Status::InProgress,
                 "unarchived project's task must be claimed in_progress"
             );
+        });
+    }
+
+    /// Retry one level up (naru task 2686) through the real tick and a stub
+    /// spawn: a task back from a bounced `sonnet` session starts on `opus`; one
+    /// whose last spawn never started keeps its model; one with its retries
+    /// spent is parked with a note and starts nothing.
+    #[test]
+    fn queue_watcher_tick_retries_a_bounced_task_one_model_level_up() {
+        // SAFETY: ENV_LOCK gives this test exclusive access to
+        // MESA_CLAUDE_BIN / MESA_CONFIG_FILE for its duration.
+        let _env = attachments::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::core::library::test_home::with_home_dir(|_| {
+            let stub_dir = tempfile::tempdir().unwrap();
+            let log_path = stub_dir.path().join("bg.log");
+            let bin = stub_claude_bg(stub_dir.path(), &log_path);
+            unsafe { std::env::set_var("MESA_CLAUDE_BIN", &bin) };
+            let router_log = model_router::log_path().unwrap();
+            std::fs::create_dir_all(router_log.parent().unwrap()).unwrap();
+            let line = |task: i64, kind: &str, rest: serde_json::Value| {
+                let mut l = serde_json::json!({"kind": kind, "time": "2026-11-10 10:00:00", "task_id": task});
+                l.as_object_mut()
+                    .unwrap()
+                    .extend(rest.as_object().unwrap().clone());
+                l.to_string()
+            };
+            let decision = |task: i64, model: &str, source: &str, attempt: u64| {
+                line(
+                    task,
+                    "decision",
+                    serde_json::json!({"model": model, "reason": "Task: x", "source": source, "attempt": attempt}),
+                )
+            };
+            let outcome = |task: i64, outcome: &str, detail: &str| {
+                line(
+                    task,
+                    "outcome",
+                    serde_json::json!({"outcome": outcome, "status": "todo", "detail": detail}),
+                )
+            };
+            let last_model = || {
+                std::fs::read_to_string(stub_dir.path().join("last-model"))
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string()
+            };
+            let (_dir, state) = test_state();
+            let proj_dir = tempfile::tempdir().unwrap();
+            let project = new_project(&state, Some(proj_dir.path().to_str().unwrap()));
+
+            // Bounced on sonnet: the next session is opus, logged as attempt 2.
+            let task = new_task(&state, project);
+            std::fs::write(
+                &router_log,
+                [
+                    decision(task, "sonnet", "haiku", 1),
+                    outcome(task, "bounced", "session a ended"),
+                ]
+                .join("\n")
+                    + "\n",
+            )
+            .unwrap();
+            queue_watcher_tick(&state);
+            assert_eq!(last_model(), "opus");
+            let lines = model_router::read_log();
+            let last = lines.last().unwrap();
+            assert_eq!(
+                (&last["source"], &last["attempt"], &last["model"]),
+                (
+                    &serde_json::json!("escalation"),
+                    &serde_json::json!(2),
+                    &serde_json::json!("opus")
+                )
+            );
+            set_status(&state, task, Status::Done);
+
+            // The spawn never started: same model, same attempt.
+            let task = new_task(&state, project);
+            std::fs::write(
+                &router_log,
+                [
+                    decision(task, "sonnet", "haiku", 1),
+                    outcome(task, "failed", model_router::SPAWN_FAILED),
+                ]
+                .join("\n")
+                    + "\n",
+            )
+            .unwrap();
+            queue_watcher_tick(&state);
+            assert_eq!(last_model(), "sonnet", "a failed spawn must not escalate");
+            set_status(&state, task, Status::Done);
+
+            // Two escalations spent: parked with a note, no session.
+            let task = new_task(&state, project);
+            std::fs::write(
+                &router_log,
+                [
+                    decision(task, "sonnet", "haiku", 1),
+                    outcome(task, "bounced", "a"),
+                    decision(task, "opus", "escalation", 2),
+                    outcome(task, "bounced", "b"),
+                    decision(task, "fable", "escalation", 3),
+                    outcome(task, "failed", "session c died; re-queued"),
+                ]
+                .join("\n")
+                    + "\n",
+            )
+            .unwrap();
+            let spawns = std::fs::read_to_string(&log_path).unwrap().lines().count();
+            queue_watcher_tick(&state);
+            assert_eq!(
+                std::fs::read_to_string(&log_path).unwrap().lines().count(),
+                spawns,
+                "a parked task starts no session"
+            );
+            let store = state.store.lock().unwrap();
+            assert_eq!(store.get_task(task).unwrap().status, Status::Backlog);
+            let notes = store.list_task_notes(task).unwrap();
+            assert!(
+                notes
+                    .iter()
+                    .any(|n| n.body.contains("parked") && n.body.contains("fable")),
+                "{notes:?}"
+            );
+            drop(store);
+            assert_eq!(model_router::read_log().last().unwrap()["kind"], "parked");
+
+            unsafe { std::env::remove_var("MESA_CLAUDE_BIN") };
         });
     }
 

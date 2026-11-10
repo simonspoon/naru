@@ -45,6 +45,12 @@ const LOG_INPUT_MAX: usize = 400;
 const REASON_MAX: usize = 300;
 /// The naru-live agent's name, as `~/.claude/agents/naru-live.md` spells it.
 pub const LIVE_AGENT_NAME: &str = "naru-live";
+/// The most retries one level up a task gets (naru task 2686), counted from its
+/// latest Haiku pick or park; the retry after that parks the task instead.
+pub const MAX_ESCALATIONS: usize = 2;
+/// The outcome `detail` the queue-watcher logs for a spawn that did not start:
+/// not a model problem, so it never escalates.
+pub const SPAWN_FAILED: &str = "spawn failed";
 
 /// The answer schema Naru owns. `reason` comes first so the model states its
 /// reasoning before it commits to a `model`.
@@ -61,6 +67,10 @@ pub struct Request<'a> {
     pub project_id: i64,
     /// The task's description, untrusted.
     pub text: &'a str,
+    /// The cost guard's relay: the same attempt goes on in a fresh session, so
+    /// it never escalates (naru task 2686). Every other dispatch takes the
+    /// task from the queue, which after an earlier routed session is a retry.
+    pub relay: bool,
 }
 
 /// Where a [`Decision`] came from.
@@ -72,8 +82,14 @@ pub enum Source {
     Fallback,
     /// The switch is off, or the template has no `{model}`; no call was made.
     Disabled,
-    /// An earlier Haiku decision for this task id was reused; no call was made.
+    /// An earlier routed decision for this task id was reused; no call was made.
     Reused,
+    /// The task came back after a routed session: one model level up (naru
+    /// task 2686); no call was made.
+    Escalation,
+    /// The task came back with [`MAX_ESCALATIONS`] retries spent: the caller
+    /// parks it instead of starting a session; no call was made.
+    Parked,
 }
 
 impl Source {
@@ -83,6 +99,8 @@ impl Source {
             Source::Fallback => "fallback",
             Source::Disabled => "disabled",
             Source::Reused => "reused",
+            Source::Escalation => "escalation",
+            Source::Parked => "parked",
         }
     }
 }
@@ -93,6 +111,8 @@ pub struct Decision {
     pub reason: String,
     pub source: Source,
     pub latency_ms: u64,
+    /// 1 for the task's first routed session, one more for each retry.
+    pub attempt: u64,
 }
 
 /// [`route`] declined to route this request.
@@ -169,7 +189,10 @@ fn route_with(req: &Request<'_>, deps: &Deps<'_>) -> Result<Decision, Refused> {
     refuse(req)?;
     let decision = decide(req, deps);
     if let Some(path) = &deps.log {
-        append_line(path, &decision_line(req, &decision));
+        // A park is logged by the caller once it holds ([`log_parked`]).
+        if decision.source != Source::Parked {
+            append_line(path, &decision_line(req, &decision));
+        }
     }
     Ok(decision)
 }
@@ -180,12 +203,14 @@ fn decide(req: &Request<'_>, deps: &Deps<'_>) -> Decision {
         reason: bounded(&reason, REASON_MAX),
         source: Source::Fallback,
         latency_ms: 0,
+        attempt: 1,
     };
     let disabled = |reason: &str| Decision {
         model: FALLBACK_MODEL.to_string(),
         reason: reason.to_string(),
         source: Source::Disabled,
         latency_ms: 0,
+        attempt: 1,
     };
     match &deps.enabled {
         Err(e) => return fallback(format!("the config is unreadable: {e}")),
@@ -200,14 +225,9 @@ fn decide(req: &Request<'_>, deps: &Deps<'_>) -> Decision {
         Ok(_) => {}
     }
     if let Some(path) = &deps.log
-        && let Some((model, reason)) = previous_haiku_decision(path, req.task_id)
+        && let Some(h) = history(path, req.task_id)
     {
-        return Decision {
-            model,
-            reason,
-            source: Source::Reused,
-            latency_ms: 0,
-        };
+        return after(req, h);
     }
     let started = Instant::now();
     let answer = (deps.call)(&prompt(req.text));
@@ -218,6 +238,7 @@ fn decide(req: &Request<'_>, deps: &Deps<'_>) -> Decision {
             reason,
             source: Source::Haiku,
             latency_ms,
+            attempt: 1,
         },
         Err(e) => Decision {
             latency_ms,
@@ -349,11 +370,36 @@ fn decision_line(req: &Request<'_>, d: &Decision) -> Value {
         "reason": d.reason,
         "source": d.source.as_str(),
         "latency_ms": d.latency_ms,
+        "attempt": d.attempt,
     });
     if d.model == "fable" {
         line["costly"] = json!(true);
     }
     line
+}
+
+/// Logs the line standing in for a decision when the retries are spent: the
+/// task was parked, no session started. A dispatch after it (a person
+/// re-queued the task) starts a fresh escalation budget on the same model.
+/// Called once the park holds, so a park that failed is retried as a park.
+pub fn log_parked(task_id: i64, d: &Decision) {
+    if let Some(path) = log_path() {
+        log_parked_in(&path, task_id, d);
+    }
+}
+
+fn log_parked_in(path: &Path, task_id: i64, d: &Decision) {
+    append_line(
+        path,
+        &json!({
+            "kind": "parked",
+            "time": now_ts(),
+            "task_id": task_id,
+            "model": d.model,
+            "attempt": d.attempt,
+            "reason": d.reason,
+        }),
+    );
 }
 
 /// Appends one JSON line; best effort, a failure is one stderr line.
@@ -392,16 +438,140 @@ fn is_task(line: &Value, kind: &str, task_id: i64) -> bool {
     line["kind"] == kind && line["task_id"].as_i64() == Some(task_id)
 }
 
-/// The latest logged `source: haiku` decision for `task_id`, if any.
-fn previous_haiku_decision(path: &Path, task_id: i64) -> Option<(String, String)> {
-    read_lines(path)
-        .iter()
-        .rev()
-        .find(|l| is_task(l, "decision", task_id) && l["source"] == "haiku")
-        .and_then(|l| {
-            let model = l["model"].as_str().filter(|m| MODELS.contains(m))?;
-            Some((model.to_string(), l["reason"].as_str()?.to_string()))
-        })
+/// What the log holds for a task's routed sessions (naru task 2686).
+struct History {
+    /// The latest routed (`haiku`, `reused` or `escalation`) decision's model,
+    /// reason and attempt.
+    model: String,
+    reason: String,
+    attempt: u64,
+    /// `escalation` decisions since the latest `haiku` pick or park.
+    escalations: usize,
+    last: Last,
+}
+
+/// The task's latest decision-or-park line, as far as a retry is concerned.
+enum Last {
+    /// A routed decision, with the outcome logged after it (if any).
+    Routed(Option<Value>),
+    /// A `fallback` or `disabled` decision: that session was not routed.
+    Unrouted,
+    /// The task was parked with its retries spent.
+    Parked,
+}
+
+/// The routed history of `task_id`, or `None` when it has no routed decision
+/// (so a Haiku call picks afresh; a `fallback` is never reused).
+fn history(path: &Path, task_id: i64) -> Option<History> {
+    let mut h: Option<History> = None;
+    let mut last = Last::Unrouted;
+    let mut escalations = 0;
+    for l in read_lines(path)
+        .into_iter()
+        .filter(|l| l["task_id"].as_i64() == Some(task_id))
+    {
+        match l["kind"].as_str() {
+            Some("decision") => {
+                let source = l["source"].as_str().unwrap_or_default();
+                let model = l["model"].as_str().filter(|m| MODELS.contains(m));
+                let reason = l["reason"].as_str();
+                match (source, model, reason) {
+                    ("haiku" | "reused" | "escalation", Some(model), Some(reason)) => {
+                        match source {
+                            "haiku" => escalations = 0,
+                            "escalation" => escalations += 1,
+                            _ => {}
+                        }
+                        h = Some(History {
+                            model: model.to_string(),
+                            reason: reason.to_string(),
+                            // A line from before attempts were logged is a first.
+                            attempt: l["attempt"].as_u64().unwrap_or(1),
+                            escalations: 0,
+                            last: Last::Unrouted,
+                        });
+                        last = Last::Routed(None);
+                    }
+                    _ => last = Last::Unrouted,
+                }
+            }
+            Some("outcome") => {
+                if let Last::Routed(o @ None) = &mut last {
+                    *o = Some(l);
+                }
+            }
+            Some("parked") => {
+                escalations = 0;
+                last = Last::Parked;
+            }
+            _ => {}
+        }
+    }
+    h.map(|h| History {
+        escalations,
+        last,
+        ..h
+    })
+}
+
+/// The model one level up the ladder haiku -> sonnet -> opus -> fable; `fable`
+/// stays `fable`.
+fn one_up(model: &str) -> &'static str {
+    let i = MODELS.iter().position(|m| *m == model).unwrap_or(2);
+    MODELS[(i + 1).min(MODELS.len() - 1)]
+}
+
+/// The decision for a task that already had a routed session: the same model
+/// for a relay, a spawn that never started, or a re-queued park; otherwise a
+/// retry, one level up, or parked once [`MAX_ESCALATIONS`] are spent.
+fn after(req: &Request<'_>, h: History) -> Decision {
+    let decision = |model: String, reason: String, source: Source, attempt: u64| Decision {
+        model,
+        reason: bounded(&reason, REASON_MAX),
+        source,
+        latency_ms: 0,
+        attempt,
+    };
+    let why = match (&h.last, req.relay) {
+        (_, true) | (Last::Unrouted, _) => {
+            return decision(h.model, h.reason, Source::Reused, h.attempt);
+        }
+        (Last::Parked, _) => {
+            return decision(h.model, h.reason, Source::Reused, h.attempt + 1);
+        }
+        (Last::Routed(Some(o)), _) if o["detail"] == SPAWN_FAILED => {
+            return decision(h.model, h.reason, Source::Reused, h.attempt);
+        }
+        (Last::Routed(Some(o)), _) => match o["outcome"].as_str() {
+            Some("done") => format!("the {} session's task was reopened", h.model),
+            Some(outcome) => format!("the {} session {outcome}", h.model),
+            None => format!("the {} session ended", h.model),
+        },
+        (Last::Routed(None), _) => format!(
+            "the task came back to the queue while the {} session was tracked",
+            h.model
+        ),
+    };
+    if h.escalations >= MAX_ESCALATIONS {
+        return decision(
+            h.model,
+            format!("{why}; {MAX_ESCALATIONS} retries one level up are spent, parked"),
+            Source::Parked,
+            h.attempt,
+        );
+    }
+    let up = one_up(&h.model);
+    let step = if up == h.model {
+        format!("stays on {up}, the top level")
+    } else {
+        format!("one level up to {up}")
+    };
+    decision(
+        up.to_string(),
+        format!("escalation: {why}; {step}"),
+        Source::Escalation,
+        h.attempt + 1,
+    )
 }
 
 /// How a routed task's session ended.
@@ -426,22 +596,38 @@ impl Outcome {
     }
 }
 
-/// Appends the outcome line for `task_id`, but only when the log holds a
-/// decision for it with no outcome after: one outcome per decision, and a task
-/// the router never saw logs nothing. Best effort.
-pub fn log_outcome(task_id: i64, outcome: Outcome, status: Option<&str>, detail: &str) {
+/// Appends the outcome line for `task_id`'s session started for `attempt`,
+/// but only when the log's latest line for the task is that attempt's
+/// decision: one outcome per decision, a task the router never saw logs
+/// nothing, and a session that ends after its task was dispatched again (the
+/// reaper and the queue-watcher run concurrently) never closes the newer
+/// attempt (naru task 2686). Best effort.
+pub fn log_outcome(
+    task_id: i64,
+    attempt: u64,
+    outcome: Outcome,
+    status: Option<&str>,
+    detail: &str,
+) {
     if let Some(path) = log_path() {
-        log_outcome_in(&path, task_id, outcome, status, detail);
+        log_outcome_in(&path, task_id, attempt, outcome, status, detail);
     }
 }
 
-fn log_outcome_in(path: &Path, task_id: i64, outcome: Outcome, status: Option<&str>, detail: &str) {
+fn log_outcome_in(
+    path: &Path,
+    task_id: i64,
+    attempt: u64,
+    outcome: Outcome,
+    status: Option<&str>,
+    detail: &str,
+) {
     let lines = read_lines(path);
     let open = lines
         .iter()
         .rev()
         .find(|l| is_task(l, "decision", task_id) || is_task(l, "outcome", task_id))
-        .is_some_and(|l| l["kind"] == "decision");
+        .is_some_and(|l| l["kind"] == "decision" && l["attempt"].as_u64().unwrap_or(1) == attempt);
     if !open {
         return;
     }
@@ -470,6 +656,14 @@ mod tests {
             task_id: 7,
             project_id: 2,
             text,
+            relay: false,
+        }
+    }
+
+    fn relay<'a>(text: &'a str) -> Request<'a> {
+        Request {
+            relay: true,
+            ..req(config::TODO_WATCHER, None, text)
         }
     }
 
@@ -673,7 +867,7 @@ mod tests {
     }
 
     #[test]
-    fn a_redispatch_reuses_the_logged_haiku_decision_only() {
+    fn a_relay_reuses_the_logged_haiku_decision_only() {
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("m.log");
         let first = ok_call("sonnet");
@@ -687,14 +881,10 @@ mod tests {
             calls.set(calls.get() + 1);
             Ok(json!({"model": "fable", "reason": "x"}))
         };
-        let again = route_with(
-            &req(config::TODO_WATCHER, None, "t"),
-            &deps(Some(log.clone()), &call),
-        )
-        .unwrap();
+        let again = route_with(&relay("t"), &deps(Some(log.clone()), &call)).unwrap();
         assert_eq!(
-            (again.model.as_str(), again.source),
-            ("sonnet", Source::Reused)
+            (again.model.as_str(), again.source, again.attempt),
+            ("sonnet", Source::Reused, 1)
         );
         assert_eq!(calls.get(), 0);
         assert_eq!(lines(&log).len(), 2, "a reused decision is logged too");
@@ -715,11 +905,215 @@ mod tests {
         assert_eq!(calls.get(), 1);
     }
 
+    /// Routes one queue-watcher dispatch of task 7 against `log`, with a call
+    /// that counts itself and would answer `fable`.
+    fn dispatch(log: &Path, calls: &Cell<u32>) -> Decision {
+        let call = |_: &str| {
+            calls.set(calls.get() + 1);
+            Ok(json!({"model": "fable", "reason": "Task: x"}))
+        };
+        route_with(
+            &req(config::TODO_WATCHER, None, "t"),
+            &deps(Some(log.to_path_buf()), &call),
+        )
+        .unwrap()
+    }
+
+    fn seed_haiku_pick(log: &Path, model: &'static str) -> Decision {
+        let call = ok_call(model);
+        route_with(
+            &req(config::TODO_WATCHER, None, "t"),
+            &deps(Some(log.to_path_buf()), &call),
+        )
+        .unwrap()
+    }
+
+    fn summary(d: &Decision) -> (&str, Source, u64) {
+        (d.model.as_str(), d.source, d.attempt)
+    }
+
+    #[test]
+    fn a_bounced_or_failed_session_retries_one_level_up_and_parks_at_the_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("m.log");
+        let calls = Cell::new(0);
+        assert_eq!(
+            summary(&seed_haiku_pick(&log, "haiku")),
+            ("haiku", Source::Haiku, 1)
+        );
+        log_outcome_in(
+            &log,
+            7,
+            1,
+            Outcome::Bounced,
+            Some("todo"),
+            "session a ended",
+        );
+        let second = dispatch(&log, &calls);
+        assert_eq!(summary(&second), ("sonnet", Source::Escalation, 2));
+        assert!(
+            second.reason.starts_with("escalation: "),
+            "{}",
+            second.reason
+        );
+        log_outcome_in(
+            &log,
+            7,
+            2,
+            Outcome::Failed,
+            Some("todo"),
+            "session b died; re-queued",
+        );
+        assert_eq!(
+            summary(&dispatch(&log, &calls)),
+            ("opus", Source::Escalation, 3)
+        );
+        log_outcome_in(
+            &log,
+            7,
+            3,
+            Outcome::Bounced,
+            Some("todo"),
+            "session c ended",
+        );
+        // Two escalations spent: the next retry parks instead of a fourth session.
+        let parked = dispatch(&log, &calls);
+        assert_eq!(summary(&parked), ("opus", Source::Parked, 3));
+        log_parked_in(&log, 7, &parked);
+        assert_eq!(calls.get(), 0, "no retry calls Haiku");
+        let l = lines(&log);
+        let decisions: Vec<&Value> = l.iter().filter(|l| l["kind"] == "decision").collect();
+        assert_eq!(
+            decisions
+                .iter()
+                .map(|d| (
+                    d["source"].as_str().unwrap(),
+                    d["attempt"].as_u64().unwrap()
+                ))
+                .collect::<Vec<_>>(),
+            vec![("haiku", 1), ("escalation", 2), ("escalation", 3)]
+        );
+        assert_eq!(l.last().unwrap()["kind"], "parked");
+        // Its outcome was logged, so the park opens no new outcome.
+        log_outcome_in(&log, 7, 3, Outcome::Bounced, Some("backlog"), "x");
+        assert_eq!(lines(&log).len(), l.len());
+        // A person re-queues the parked task: the same model, a new attempt
+        // and a fresh budget.
+        let requeued = dispatch(&log, &calls);
+        assert_eq!(summary(&requeued), ("opus", Source::Reused, 4));
+        log_outcome_in(
+            &log,
+            7,
+            4,
+            Outcome::Bounced,
+            Some("todo"),
+            "session d ended",
+        );
+        assert_eq!(
+            summary(&dispatch(&log, &calls)),
+            ("fable", Source::Escalation, 5)
+        );
+    }
+
+    #[test]
+    fn fable_retries_on_fable_and_a_reopened_task_counts_as_a_bounce() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("m.log");
+        let calls = Cell::new(0);
+        seed_haiku_pick(&log, "fable");
+        // A reviewer moved the finished task back to the queue.
+        log_outcome_in(&log, 7, 1, Outcome::Done, Some("done"), "session a ended");
+        let again = dispatch(&log, &calls);
+        assert_eq!(summary(&again), ("fable", Source::Escalation, 2));
+        assert!(again.reason.contains("reopened"), "{}", again.reason);
+        assert!(again.reason.contains("top level"), "{}", again.reason);
+        // The task came back while its session was still tracked (no outcome).
+        assert_eq!(
+            summary(&dispatch(&log, &calls)),
+            ("fable", Source::Escalation, 3)
+        );
+        assert_eq!(calls.get(), 0);
+    }
+
+    #[test]
+    fn a_failed_spawn_or_a_relay_does_not_escalate() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("m.log");
+        let calls = Cell::new(0);
+        seed_haiku_pick(&log, "sonnet");
+        log_outcome_in(&log, 7, 1, Outcome::Failed, Some("todo"), SPAWN_FAILED);
+        assert_eq!(
+            summary(&dispatch(&log, &calls)),
+            ("sonnet", Source::Reused, 1)
+        );
+        // A real bounce escalates; a failed spawn of that retry keeps its model.
+        log_outcome_in(
+            &log,
+            7,
+            1,
+            Outcome::Bounced,
+            Some("todo"),
+            "session a ended",
+        );
+        assert_eq!(
+            summary(&dispatch(&log, &calls)),
+            ("opus", Source::Escalation, 2)
+        );
+        log_outcome_in(&log, 7, 2, Outcome::Failed, Some("todo"), SPAWN_FAILED);
+        assert_eq!(
+            summary(&dispatch(&log, &calls)),
+            ("opus", Source::Reused, 2)
+        );
+        // The cost guard's relay carries the attempt on, whatever came before.
+        let call = ok_call("haiku");
+        let relayed = route_with(&relay("t"), &deps(Some(log.clone()), &call)).unwrap();
+        assert_eq!(summary(&relayed), ("opus", Source::Reused, 2));
+        assert_eq!(calls.get(), 0);
+    }
+
+    /// The reaper and the queue-watcher run concurrently: the old session's
+    /// outcome can land after the retry's decision. It must not close that
+    /// decision, or a failed spawn of the retry would read as a bounce.
+    #[test]
+    fn a_late_outcome_of_an_earlier_attempt_never_closes_the_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("m.log");
+        let calls = Cell::new(0);
+        seed_haiku_pick(&log, "haiku");
+        // The task came back while attempt 1 was still tracked.
+        assert_eq!(
+            summary(&dispatch(&log, &calls)),
+            ("sonnet", Source::Escalation, 2)
+        );
+        log_outcome_in(
+            &log,
+            7,
+            1,
+            Outcome::Failed,
+            Some("in_progress"),
+            "session a ended",
+        );
+        assert_eq!(lines(&log).len(), 2, "attempt 1's late outcome is dropped");
+        log_outcome_in(&log, 7, 2, Outcome::Failed, Some("todo"), SPAWN_FAILED);
+        assert_eq!(
+            summary(&dispatch(&log, &calls)),
+            ("sonnet", Source::Reused, 2)
+        );
+    }
+
+    #[test]
+    fn the_ladder_goes_up_one_level_and_stops_at_fable() {
+        assert_eq!(one_up("haiku"), "sonnet");
+        assert_eq!(one_up("sonnet"), "opus");
+        assert_eq!(one_up("opus"), "fable");
+        assert_eq!(one_up("fable"), "fable");
+    }
+
     #[test]
     fn an_outcome_is_logged_once_per_decision_and_only_for_routed_tasks() {
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("m.log");
-        log_outcome_in(&log, 7, Outcome::Done, Some("done"), "");
+        log_outcome_in(&log, 7, 1, Outcome::Done, Some("done"), "");
         assert!(!log.exists(), "an unrouted task logs nothing");
         let call = ok_call("opus");
         route_with(
@@ -727,10 +1121,10 @@ mod tests {
             &deps(Some(log.clone()), &call),
         )
         .unwrap();
-        log_outcome_in(&log, 8, Outcome::Done, None, "");
+        log_outcome_in(&log, 8, 1, Outcome::Done, None, "");
         assert_eq!(lines(&log).len(), 1, "another task's outcome is not logged");
-        log_outcome_in(&log, 7, Outcome::Bounced, Some("todo"), "went back");
-        log_outcome_in(&log, 7, Outcome::Failed, Some("todo"), "again");
+        log_outcome_in(&log, 7, 1, Outcome::Bounced, Some("todo"), "went back");
+        log_outcome_in(&log, 7, 1, Outcome::Failed, Some("todo"), "again");
         let l = lines(&log);
         assert_eq!(l.len(), 2);
         assert_eq!(l[1]["kind"], "outcome");
@@ -743,7 +1137,7 @@ mod tests {
             &deps(Some(log.clone()), &call),
         )
         .unwrap();
-        log_outcome_in(&log, 7, Outcome::Done, Some("done"), "");
+        log_outcome_in(&log, 7, 2, Outcome::Done, Some("done"), "");
         assert_eq!(lines(&log).len(), 4);
     }
 
@@ -763,11 +1157,19 @@ mod tests {
         log_outcome_in(
             &log,
             7,
+            1,
             Outcome::Failed,
             Some("todo"),
             "session x died; re-queued",
         );
-        log_outcome_in(&log, 7, Outcome::Bounced, Some("todo"), "session x ended");
+        log_outcome_in(
+            &log,
+            7,
+            1,
+            Outcome::Bounced,
+            Some("todo"),
+            "session x ended",
+        );
         let outcomes: Vec<Value> = lines(&log)
             .into_iter()
             .filter(|l| l["kind"] == "outcome")
