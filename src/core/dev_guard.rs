@@ -13,6 +13,7 @@ pub const DEV_GUARD_HOOK_NAME: &str = "dev-env-guard.sh";
 /// the cases below; every miss (no `jq`, garbage or empty stdin) allows.
 /// `scripts/dev-env-guard-check.sh` is its gate.
 pub const DEV_GUARD_HOOK: &str = r##"#!/usr/bin/env bash
+# naru-hook: PreToolUse Bash|Write|Edit
 # dev-env-guard.sh — a Claude Code PreToolUse hook (naru task 2094).
 # Installed with:
 #   naru library hook enable dev-env-guard.sh --event PreToolUse --matcher 'Bash|Write|Edit'

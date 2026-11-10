@@ -4288,6 +4288,12 @@ fn router(state: AppState) -> Router {
             post(fork_library_builtin),
         )
         .route(
+            "/api/library/builtins/{builtin_id}/hook",
+            get(builtin_hook_status)
+                .post(register_builtin_hook)
+                .delete(unregister_builtin_hook),
+        )
+        .route(
             "/api/library/sync",
             get(library_sync_status).post(library_sync_apply),
         )
@@ -9413,7 +9419,9 @@ async fn list_library_versions(
 
 #[derive(Deserialize)]
 struct LibraryHookBody {
-    event: String,
+    /// Absent: every registration the hook declares (naru task 2704).
+    #[serde(default)]
+    event: Option<String>,
     #[serde(default)]
     matcher: Option<String>,
 }
@@ -9437,8 +9445,8 @@ struct LibraryHookQuery {
 /// executes on every session.
 ///
 /// An unshadowed built-in has no numeric id, so it is not reachable on this
-/// route at all; editing it in the library forks it into a real row first,
-/// which is the same order the rest of this surface imposes.
+/// route; `/api/library/builtins/{builtin_id}/hook` answers for it instead
+/// (naru task 2704).
 async fn library_hook_status(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
@@ -9468,7 +9476,7 @@ async fn register_library_hook(
     Ok(Json(library::register_hook(
         &store,
         &item,
-        &body.event,
+        body.event.as_deref(),
         body.matcher.as_deref(),
     )?)
     .into_response())
@@ -9486,6 +9494,73 @@ async fn unregister_library_hook(
     require_agent_access(&state, &addr, &headers)?;
     let store = state.store.lock().unwrap();
     let item = store.get_library_item(id)?;
+    Ok(Json(library::unregister_hook(
+        &store,
+        &item,
+        q.event.as_deref(),
+        q.matcher.as_deref(),
+    )?)
+    .into_response())
+}
+
+/// The library item a built-in id names, for the `/builtins/{id}/hook`
+/// routes (naru task 2704): its fork when there is one, else the unshadowed
+/// built-in itself — so the page's on/off switch works on a stock hook
+/// without forking it. Unknown is `not_found`, exactly as the fork route.
+fn builtin_hook_item(store: &Store, builtin_id: &str) -> Result<crate::core::LibraryItem, Error> {
+    let builtin = library::builtin(builtin_id)
+        .ok_or_else(|| Error::NotFound(format!("no built-in library item {builtin_id:?}")))?;
+    library::effective_items(store, None)?
+        .into_iter()
+        .find(|i| i.builtin_id.as_deref() == Some(builtin.id))
+        .ok_or_else(|| Error::NotFound(format!("no built-in library item {builtin_id:?}")))
+}
+
+/// `library_hook_status` for a built-in id — same gate, same status object.
+async fn builtin_hook_status(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(builtin_id): Path<String>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let store = state.store.lock().unwrap();
+    let item = builtin_hook_item(&store, &builtin_id)?;
+    Ok(Json(library::hook_registrations(&store, &item)?).into_response())
+}
+
+/// `register_library_hook` for a built-in id.
+async fn register_builtin_hook(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(builtin_id): Path<String>,
+    body: Result<Json<LibraryHookBody>, JsonRejection>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let Json(body) = body?;
+    let store = state.store.lock().unwrap();
+    let item = builtin_hook_item(&store, &builtin_id)?;
+    Ok(Json(library::register_hook(
+        &store,
+        &item,
+        body.event.as_deref(),
+        body.matcher.as_deref(),
+    )?)
+    .into_response())
+}
+
+/// `unregister_library_hook` for a built-in id.
+async fn unregister_builtin_hook(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(builtin_id): Path<String>,
+    Query(q): Query<LibraryHookQuery>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let store = state.store.lock().unwrap();
+    let item = builtin_hook_item(&store, &builtin_id)?;
     Ok(Json(library::unregister_hook(
         &store,
         &item,

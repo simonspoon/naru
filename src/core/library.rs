@@ -23,10 +23,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::core::config;
 use crate::core::store::{Error, LibraryPatch, Result as StoreResult, Store};
 use crate::core::types::{
-    LibraryBundle, LibraryBundleItem, LibraryDiffKind, LibraryDiffLine, LibraryHookRegistration,
-    LibraryHookStatus, LibraryImportResult, LibraryImportRow, LibraryImportStatus, LibraryItem,
-    LibraryKind, LibraryOrphanHook, LibraryScope, LibrarySyncResult, LibrarySyncRow,
-    LibrarySyncStatus,
+    LibraryBundle, LibraryBundleItem, LibraryDiffKind, LibraryDiffLine, LibraryHookDefault,
+    LibraryHookRegistration, LibraryHookStatus, LibraryImportResult, LibraryImportRow,
+    LibraryImportStatus, LibraryItem, LibraryKind, LibraryOrphanHook, LibraryScope,
+    LibrarySyncResult, LibrarySyncRow, LibrarySyncStatus,
 };
 
 /// One built-in library entry — code, not a db row. `core::library::BUILTINS`
@@ -176,6 +176,7 @@ following on purpose.
         files: &[],
         body: "\
 #!/bin/sh
+# naru-hook: Stop
 # Runs when Claude Code stops responding. Replace with a real notifier
 # (terminal-notifier, osascript, a curl to your own webhook, ...).
 echo \"Claude Code stopped in $(pwd)\"
@@ -2440,6 +2441,47 @@ pub const DEFAULT_HOOK_MATCHER: &str = "*";
 /// written verbatim into the user's settings file.
 pub const HOOK_MATCHER_MAX: usize = 200;
 
+/// The header line a hook declares its own registration with (naru task
+/// 2704): `# naru-hook: <Event> [<matcher>]`, one line per registration.
+pub const HOOK_DEFAULT_PREFIX: &str = "# naru-hook:";
+
+/// The registrations a hook body declares for itself: every
+/// `# naru-hook: <Event> [<matcher>]` line in its **leading comment block**
+/// (the run of lines starting `#`, shebang included, before the first line
+/// that does not), so a string in the script's code can never read as one.
+/// The matcher is the rest of the line, trimmed, `*` when blank. Nothing is
+/// validated here: an unknown event is refused when the enable that uses it
+/// runs, through the same `validate_event` a typed `--event` goes through.
+pub fn hook_defaults(body: &str) -> Vec<LibraryHookDefault> {
+    let mut out = Vec::new();
+    for line in body.lines() {
+        let line = line.trim_end();
+        if !line.starts_with('#') {
+            break;
+        }
+        let Some(rest) = line.strip_prefix(HOOK_DEFAULT_PREFIX) else {
+            continue;
+        };
+        let rest = rest.trim();
+        let (event, matcher) = match rest.split_once(char::is_whitespace) {
+            Some((event, matcher)) => (event, matcher.trim()),
+            None => (rest, ""),
+        };
+        if event.is_empty() {
+            continue;
+        }
+        out.push(LibraryHookDefault {
+            event: event.to_string(),
+            matcher: if matcher.is_empty() {
+                DEFAULT_HOOK_MATCHER.to_string()
+            } else {
+                matcher.to_string()
+            },
+        });
+    }
+    out
+}
+
 /// Where a hook item's registration lives, and what it is registered *as*.
 struct HookTarget {
     /// The `.claude/settings.json` this item's scope registers into.
@@ -2653,6 +2695,7 @@ fn status_of(item: &LibraryItem, target: &HookTarget, settings: &Settings) -> Li
         registered: !registrations.is_empty(),
         executable: (!registrations.is_empty()).then(|| is_executable(Path::new(&target.absolute))),
         registrations,
+        defaults: hook_defaults(&item.body),
         events: HOOK_EVENTS.iter().map(|e| e.to_string()).collect(),
     }
 }
@@ -2765,27 +2808,56 @@ fn is_executable(path: &Path) -> bool {
     }
 }
 
-/// Registers a hook under one event, and answers its status afterwards.
+/// Registers a hook under one event — or, with no `event`, under every
+/// registration its body declares (`hook_defaults`, naru task 2704), a given
+/// `matcher` then overriding each declared one — and answers its status
+/// afterwards. No `event` and nothing declared is `validation` naming
+/// `--event`, today's rule for a hook that says nothing about itself.
 ///
 /// Idempotent: a group with the same `matcher` is appended into rather than
 /// duplicated, and a command already registered for that `(event, matcher)`
 /// leaves the file untouched — not even its mtime moves, since a write that
-/// would change nothing is skipped outright.
+/// would change nothing is skipped outright. Every pair is validated before
+/// anything is written, so a bad declared line writes nothing.
 pub fn register_hook(
     store: &Store,
     item: &LibraryItem,
-    event: &str,
+    event: Option<&str>,
     matcher: Option<&str>,
 ) -> StoreResult<LibraryHookStatus> {
     let target = hook_target(store, item)?;
-    let event = validate_event(event)?;
-    let matcher = validate_matcher(matcher)?;
+    let pairs = match event {
+        Some(event) => vec![(validate_event(event)?, validate_matcher(matcher)?)],
+        None => {
+            let defaults = hook_defaults(&item.body);
+            if defaults.is_empty() {
+                return Err(Error::Validation(format!(
+                    "{:?} declares no default event (no `{HOOK_DEFAULT_PREFIX} <Event> [<matcher>]` \
+                     line in its header); pass --event (and --matcher if it needs one)",
+                    item.name
+                )));
+            }
+            defaults
+                .iter()
+                .map(|d| {
+                    Ok((
+                        validate_event(&d.event)?,
+                        validate_matcher(Some(matcher.unwrap_or(&d.matcher)))?,
+                    ))
+                })
+                .collect::<StoreResult<Vec<_>>>()?
+        }
+    };
     seed_hook_file(&target, &item.body)?;
-    let settings = read_settings(&target.settings)?;
-    let spliced = splice_register(&settings.raw, &event, &matcher, &target.command, &|c| {
-        command_runs_hook(c, &target)
-    });
-    apply(item, &target, settings, spliced)
+    let mut status = None;
+    for (event, matcher) in &pairs {
+        let settings = read_settings(&target.settings)?;
+        let spliced = splice_register(&settings.raw, event, matcher, &target.command, &|c| {
+            command_runs_hook(c, &target)
+        });
+        status = Some(apply(item, &target, settings, spliced)?);
+    }
+    Ok(status.expect("at least one pair"))
 }
 
 /// Removes this hook's registrations — all of them, or only those under
@@ -7612,7 +7684,7 @@ mod tests {
             "{\"hooks\": {\"Stop\": 7}}",
         ] {
             fs::write(&settings, bad).unwrap();
-            let err = register_hook(&store, &item, "Stop", None).unwrap_err();
+            let err = register_hook(&store, &item, Some("Stop"), None).unwrap_err();
             assert!(
                 matches!(err, Error::Validation(ref m) if m.contains("settings.json")),
                 "{bad:?} produced {err:?}"
@@ -7626,6 +7698,110 @@ mod tests {
     }
 
     #[test]
+    fn every_builtin_hook_declares_a_valid_default_registration() {
+        for b in BUILTINS.iter().filter(|b| b.kind == LibraryKind::Hook) {
+            let defaults = hook_defaults(b.body);
+            assert!(
+                !defaults.is_empty(),
+                "built-in hook {} declares no default",
+                b.name
+            );
+            for d in &defaults {
+                validate_event(&d.event).unwrap_or_else(|e| panic!("{}: {e:?}", b.name));
+                validate_matcher(Some(&d.matcher)).unwrap();
+            }
+        }
+        let route = builtin(crate::core::agent_route::AGENT_ROUTE_HOOK_BUILTIN).unwrap();
+        assert_eq!(
+            hook_defaults(route.body),
+            vec![LibraryHookDefault {
+                event: "PreToolUse".into(),
+                matcher: "Agent|Task".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn hook_defaults_read_only_the_leading_comment_block() {
+        let body = "#!/bin/sh\n# naru-hook: Stop\n# naru-hook:  PreToolUse   Bash|Edit \n\necho '# naru-hook: SessionEnd'\n";
+        assert_eq!(
+            hook_defaults(body),
+            vec![
+                LibraryHookDefault {
+                    event: "Stop".into(),
+                    matcher: "*".into()
+                },
+                LibraryHookDefault {
+                    event: "PreToolUse".into(),
+                    matcher: "Bash|Edit".into()
+                },
+            ]
+        );
+        assert!(hook_defaults("echo hi\n# naru-hook: Stop\n").is_empty());
+        assert!(hook_defaults("").is_empty());
+    }
+
+    #[test]
+    fn enabling_with_no_event_uses_the_declared_defaults_and_flags_override_them() {
+        let (mut store, dir) = temp_store();
+        let base = dir.path().to_path_buf();
+        let pid = project_at(&mut store, &base);
+        let item = store
+            .create_library_item(
+                LibraryKind::Hook,
+                LibraryScope::Project,
+                Some(pid),
+                "both.sh",
+                "#!/bin/sh\n# naru-hook: PreToolUse Agent|Task\n# naru-hook: PostToolUse\necho hi\n",
+                None,
+                false,
+            )
+            .unwrap();
+        let status = register_hook(&store, &item, None, None).unwrap();
+        let mut got: Vec<_> = status
+            .registrations
+            .iter()
+            .map(|r| (r.event.as_str(), r.matcher.as_str()))
+            .collect();
+        got.sort();
+        assert_eq!(
+            got,
+            vec![("PostToolUse", "*"), ("PreToolUse", "Agent|Task")]
+        );
+        assert_eq!(status.defaults.len(), 2);
+        // Off again, then a matcher override applies to each declared event.
+        unregister_hook(&store, &item, None, None).unwrap();
+        let status = register_hook(&store, &item, None, Some("Bash")).unwrap();
+        let mut got: Vec<_> = status
+            .registrations
+            .iter()
+            .map(|r| (r.event.as_str(), r.matcher.as_str()))
+            .collect();
+        got.sort();
+        assert_eq!(got, vec![("PostToolUse", "Bash"), ("PreToolUse", "Bash")]);
+        // An explicit event overrides the declared list entirely.
+        unregister_hook(&store, &item, None, None).unwrap();
+        let status = register_hook(&store, &item, Some("Stop"), None).unwrap();
+        assert_eq!(status.registrations.len(), 1);
+        assert_eq!(status.registrations[0].event, "Stop");
+    }
+
+    #[test]
+    fn enabling_with_no_event_and_nothing_declared_names_the_flag_and_writes_nothing() {
+        let (mut store, dir) = temp_store();
+        let base = dir.path().to_path_buf();
+        let pid = project_at(&mut store, &base);
+        let item = hook_item(&mut store, pid, "plain.sh");
+        let err = register_hook(&store, &item, None, None).unwrap_err();
+        assert!(
+            matches!(err, Error::Validation(ref m) if m.contains("--event")),
+            "{err:?}"
+        );
+        assert!(!base.join(".claude/settings.json").exists());
+        assert!(!base.join(".claude/hooks/plain.sh").exists());
+    }
+
+    #[test]
     fn registering_is_idempotent_and_does_not_rewrite_the_file() {
         let (mut store, dir) = temp_store();
         let base = dir.path().to_path_buf();
@@ -7633,7 +7809,7 @@ mod tests {
         let item = hook_item(&mut store, pid, "stop-notify.sh");
         let settings = base.join(".claude/settings.json");
 
-        let status = register_hook(&store, &item, "Stop", None).unwrap();
+        let status = register_hook(&store, &item, Some("Stop"), None).unwrap();
         assert!(status.registered);
         assert_eq!(status.registrations.len(), 1);
         assert_eq!(status.registrations[0].event, "Stop");
@@ -7650,7 +7826,7 @@ mod tests {
         );
         let first = fs::read_to_string(&settings).unwrap();
 
-        let again = register_hook(&store, &item, "Stop", None).unwrap();
+        let again = register_hook(&store, &item, Some("Stop"), None).unwrap();
         assert_eq!(again.registrations.len(), 1, "no duplicate entry");
         assert_eq!(
             fs::read_to_string(&settings).unwrap(),
@@ -7715,7 +7891,7 @@ mod tests {
         fs::set_permissions(&script, fs::Permissions::from_mode(0o644)).unwrap();
 
         assert_eq!(hook_registrations(&store, &item).unwrap().executable, None);
-        let status = register_hook(&store, &item, "Stop", None).unwrap();
+        let status = register_hook(&store, &item, Some("Stop"), None).unwrap();
         assert_eq!(mode_of(&script), 0o755);
         assert_eq!(
             fs::read_to_string(&script).unwrap(),
@@ -7734,7 +7910,7 @@ mod tests {
         let base = dir.path().to_path_buf();
         let pid = project_at(&mut store, &base);
         let item = hook_item(&mut store, pid, "stop-notify.sh");
-        register_hook(&store, &item, "Stop", None).unwrap();
+        register_hook(&store, &item, Some("Stop"), None).unwrap();
         let script = base.join(".claude/hooks/stop-notify.sh");
         fs::set_permissions(&script, fs::Permissions::from_mode(0o644)).unwrap();
 
@@ -7765,7 +7941,7 @@ mod tests {
         )
         .unwrap();
 
-        register_hook(&store, &item, "Stop", None).unwrap();
+        register_hook(&store, &item, Some("Stop"), None).unwrap();
         let parsed: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&settings).unwrap()).unwrap();
         let groups = parsed["hooks"]["Stop"].as_array().unwrap();
@@ -7779,7 +7955,7 @@ mod tests {
         );
 
         // A different matcher IS a second group.
-        register_hook(&store, &item, "Stop", Some("Bash")).unwrap();
+        register_hook(&store, &item, Some("Stop"), Some("Bash")).unwrap();
         let parsed: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&settings).unwrap()).unwrap();
         assert_eq!(parsed["hooks"]["Stop"].as_array().unwrap().len(), 2);
@@ -7795,8 +7971,8 @@ mod tests {
         fs::create_dir_all(settings.parent().unwrap()).unwrap();
         fs::write(&settings, "{\n  \"model\": \"opus\"\n}\n").unwrap();
 
-        register_hook(&store, &item, "Stop", None).unwrap();
-        register_hook(&store, &item, "SessionStart", Some("startup")).unwrap();
+        register_hook(&store, &item, Some("Stop"), None).unwrap();
+        register_hook(&store, &item, Some("SessionStart"), Some("startup")).unwrap();
         assert_eq!(
             hook_registrations(&store, &item)
                 .unwrap()
@@ -7847,7 +8023,7 @@ mod tests {
         )
         .unwrap();
 
-        register_hook(&store, &item, "Stop", None).unwrap();
+        register_hook(&store, &item, Some("Stop"), None).unwrap();
         unregister_hook(&store, &item, None, None).unwrap();
         let parsed: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&settings).unwrap()).unwrap();
@@ -7865,7 +8041,7 @@ mod tests {
         let settings = base.join(".claude/settings.json");
 
         for bad in ["SessionStarted", "stop", ""] {
-            let err = register_hook(&store, &item, bad, None).unwrap_err();
+            let err = register_hook(&store, &item, Some(bad), None).unwrap_err();
             assert!(matches!(err, Error::Validation(_)), "{bad:?} -> {err:?}");
         }
         assert!(
@@ -7875,12 +8051,12 @@ mod tests {
 
         // A matcher with a newline, and an over-long one, are refused too.
         assert!(matches!(
-            register_hook(&store, &item, "Stop", Some("a\nb")).unwrap_err(),
+            register_hook(&store, &item, Some("Stop"), Some("a\nb")).unwrap_err(),
             Error::Validation(_)
         ));
         let long = "x".repeat(HOOK_MATCHER_MAX + 1);
         assert!(matches!(
-            register_hook(&store, &item, "Stop", Some(&long)).unwrap_err(),
+            register_hook(&store, &item, Some("Stop"), Some(&long)).unwrap_err(),
             Error::Validation(_)
         ));
         assert!(!settings.exists());
@@ -7904,7 +8080,7 @@ mod tests {
             .unwrap();
         for err in [
             hook_registrations(&store, &agent).unwrap_err(),
-            register_hook(&store, &agent, "Stop", None).unwrap_err(),
+            register_hook(&store, &agent, Some("Stop"), None).unwrap_err(),
             unregister_hook(&store, &agent, None, None).unwrap_err(),
         ] {
             assert!(
@@ -7989,7 +8165,7 @@ mod tests {
 
         // Which means enabling it again appends nothing, and disabling
         // removes the hand-written line.
-        register_hook(&store, &item, "Stop", None).unwrap();
+        register_hook(&store, &item, Some("Stop"), None).unwrap();
         assert_eq!(
             hook_registrations(&store, &item)
                 .unwrap()
@@ -8041,7 +8217,7 @@ mod tests {
         let script = base.join(".claude/hooks/stop-notify.sh");
         assert!(!script.exists());
 
-        register_hook(&store, &item, "Stop", None).unwrap();
+        register_hook(&store, &item, Some("Stop"), None).unwrap();
         assert_eq!(fs::read_to_string(&script).unwrap(), item.body);
         #[cfg(unix)]
         {
@@ -8054,7 +8230,7 @@ mod tests {
         // `ensure_agent_file`'s does.
         fs::write(&script, "#!/bin/sh\n# edited by hand\n").unwrap();
         unregister_hook(&store, &item, None, None).unwrap();
-        register_hook(&store, &item, "SessionEnd", None).unwrap();
+        register_hook(&store, &item, Some("SessionEnd"), None).unwrap();
         assert_eq!(
             fs::read_to_string(&script).unwrap(),
             "#!/bin/sh\n# edited by hand\n"
@@ -8088,7 +8264,7 @@ mod tests {
         // The same value on the way *in* is still refused: that rule is about
         // what mesa writes.
         assert!(matches!(
-            register_hook(&store, &item, "Stop", Some(&long)),
+            register_hook(&store, &item, Some("Stop"), Some(&long)),
             Err(Error::Validation(_))
         ));
     }

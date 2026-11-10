@@ -24,6 +24,7 @@ pub const ALARM_HOOK_NAME: &str = "alarm-disarm.sh";
 /// and **never wedges a session** — output discarded, always exit 0, a
 /// missing `naru` is fine. `scripts/alarm-check.sh` is its gate.
 pub const ALARM_HOOK: &str = r##"#!/usr/bin/env bash
+# naru-hook: SubagentStop
 # alarm-disarm.sh — a Claude Code SubagentStop hook (mesa task 1512).
 # Installed with:
 #   naru library hook enable alarm-disarm --event SubagentStop

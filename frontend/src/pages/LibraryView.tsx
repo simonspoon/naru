@@ -42,7 +42,10 @@ import {
   displayRegistrations,
   enableError,
   hookBadgeLabel,
-  hookIdsFor,
+  defaultsLabel,
+  hookRefFor,
+  hookRefsFor,
+  type HookRef,
   matcherPayload,
   matcherText,
   offersHooks,
@@ -663,15 +666,72 @@ function LibraryVersions({
  * `Map` serializes to the same `{}` — which would make a refetch after a write
  * invisible.
  */
-function loadHookStatuses(ids: number[]): Promise<LibraryHookStatus[]> {
+function loadHookStatuses(
+  refs: HookRef[],
+): Promise<{ ref: HookRef; status: LibraryHookStatus }[]> {
   return Promise.all(
-    ids.map((id) =>
-      getLibraryHook(id).then(
-        (status) => status,
+    refs.map((ref) =>
+      getLibraryHook(ref).then(
+        (status) => ({ ref, status }),
         () => null,
       ),
     ),
-  ).then((all) => all.filter((s): s is LibraryHookStatus => s !== null))
+  ).then((all) => all.filter((s) => s !== null))
+}
+
+/**
+ * A hook row's one-click on/off (naru task 2704): on registers every
+ * registration the hook's header declares, off removes every registration of
+ * it. Shown only for a hook that declares some; the switch reads its state
+ * off the list's refetch, never the response, like the panel.
+ */
+function LibraryHookSwitch({
+  hookRef,
+  name,
+  status,
+  onChanged,
+}: {
+  hookRef: HookRef
+  name: string
+  status: LibraryHookStatus
+  onChanged: () => void
+}) {
+  const [pending, setPending] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const declared = defaultsLabel(status)
+  if (declared === null) return null
+  const on = status.registered
+  function flip() {
+    setPending(true)
+    setError(null)
+    const write = on ? unregisterLibraryHook(hookRef) : registerLibraryHook(hookRef)
+    write.then(
+      () => {
+        setPending(false)
+        onChanged()
+      },
+      (err: unknown) => {
+        setPending(false)
+        setError(err instanceof Error ? err.message : String(err))
+      },
+    )
+  }
+  return (
+    <span className="library-hook-switch">
+      <button
+        type="button"
+        role="switch"
+        aria-checked={on}
+        aria-label={`${on ? 'Turn off' : 'Turn on'} ${name}`}
+        title={on ? `On: ${hookBadgeLabel(status)}` : `Off. Turning on registers ${declared}`}
+        className="gest-switch"
+        disabled={pending}
+        onClick={flip}
+      />
+      <span className="muted library-meta">{on ? 'on' : 'off'} · {declared}</span>
+      {error !== null && <span className="error">{error}</span>}
+    </span>
+  )
 }
 
 /**
@@ -1415,12 +1475,12 @@ function LibraryItemsTab({ onOpenPanel }: { onOpenPanel?: (itemKey: string, labe
   // single batch keyed on the ids, so the badge is on the row before anything
   // is opened. Refetched after every register/unregister: the page renders the
   // settings file's state, never the request's.
-  const hookIds = hookIdsFor(items)
+  const hookRefs = hookRefsFor(items)
   const { data: hookStatuses, refetch: refetchHooks } = useFetch(
-    () => loadHookStatuses(hookIds),
-    `library-hooks-${hookIds.join(',')}`,
+    () => loadHookStatuses(hookRefs),
+    `library-hooks-${hookRefs.join(',')}`,
   )
-  const hookStatusById = new Map((hookStatuses ?? []).map((h) => [h.item_id, h]))
+  const hookStatusByRef = new Map((hookStatuses ?? []).map((h) => [h.ref, h.status]))
   // Hook scripts wired from outside `.claude/hooks/` (mesa task 1128), read
   // per settings file the page knows of. Refetched after an adoption along
   // with the items and the registrations, since all three change at once.
@@ -1627,7 +1687,8 @@ function LibraryItemsTab({ onOpenPanel }: { onOpenPanel?: (itemKey: string, labe
               {g.items.map((item) => {
                 const key = itemKey(item)
                 const overridden = folded.overriddenBody.get(key)
-                const hookStatus = item.id !== null ? hookStatusById.get(item.id) : undefined
+                const hookRef = hookRefFor(item)
+                const hookStatus = hookRef !== null ? hookStatusByRef.get(hookRef) : undefined
                 const review = builtinReview(item)
                 const model = item.kind === 'agent' ? modelPill(item.body) : null
                 return (
@@ -1699,6 +1760,14 @@ function LibraryItemsTab({ onOpenPanel }: { onOpenPanel?: (itemKey: string, labe
                         )}
                         {overridden !== undefined && (
                           <span className="library-badge">overrides built-in</span>
+                        )}
+                        {hookStatus !== undefined && hookRef !== null && (
+                          <LibraryHookSwitch
+                            hookRef={hookRef}
+                            name={item.name}
+                            status={hookStatus}
+                            onChanged={refetchHooks}
+                          />
                         )}
                         {hookStatus !== undefined && (
                           <span

@@ -52,6 +52,7 @@ pub const STOP_GUARD_HOOK_NAME: &str = "task-stop-guard.sh";
 ///   `KillShell`/`TaskStop` tool call naming it, or a `[Subagent hand-back]`
 ///   `<agent-message from="<id>">`.
 pub const STOP_GUARD_HOOK: &str = r##"#!/usr/bin/env bash
+# naru-hook: Stop
 # task-stop-guard.sh — a Claude Code Stop hook for naru task agents
 # (naru task 1190). Installed with:
 #   naru library hook enable task-stop-guard --event Stop

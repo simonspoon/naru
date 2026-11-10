@@ -11228,6 +11228,31 @@ select.library-model-badge {
   font-size: 0.8rem;
 }
 
+/* A hook's one-click on/off (naru task 2704), reusing the gestures switch. */
+.library-hook-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-width: 0;
+  /* Gives way before the badges beside it, so they never wrap mid-word. */
+  flex-shrink: 100;
+}
+.library-hook-switch .gest-switch {
+  flex-shrink: 0;
+}
+/* Any shrink at all breaks `built-in` at its hyphen, so in a hook row the
+   short badges hold their width and the switch label truncates instead. */
+.library-item-head:has(.library-hook-switch) .library-badge:not(.library-hook-badge) {
+  flex-shrink: 0;
+}
+.library-hook-switch .library-meta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 24rem;
+}
+
 /* Hook registrations (mesa task 1115). The badge carries event names, so it
    is the one badge on this page that keeps its own casing — `Stop` and
    `PreToolUse` are Claude Code's spelling and uppercasing them would make

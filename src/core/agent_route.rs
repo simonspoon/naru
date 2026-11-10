@@ -18,6 +18,7 @@ pub const AGENT_ROUTE_HOOK_NAME: &str = "agent-route.sh";
 /// `naru` only as argv / stdin, never through `eval`. `scripts/agent-route-check.sh` is
 /// its gate.
 pub const AGENT_ROUTE_HOOK: &str = r##"#!/usr/bin/env bash
+# naru-hook: PreToolUse Agent|Task
 # agent-route.sh — a Claude Code PreToolUse hook (mesa task 1654, naru task 2684).
 # Installed with:
 #   naru library hook enable agent-route.sh --event PreToolUse --matcher 'Agent|Task'

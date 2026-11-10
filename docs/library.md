@@ -680,6 +680,41 @@ the file stays reachable however it got there. (The web UI's per-row disable
 button posts `reg.matcher` verbatim, straight from the file, so any other
 reading would make that button permanently broken for such a row.)
 
+### Hooks declare their own event and matcher
+
+naru task 2704. A hook names the registration it belongs to in its own
+header, one line per registration, in the **leading comment block** of its
+body (the run of `#` lines before the first other line, shebang included, so
+a string in the script's code never reads as one):
+
+```sh
+#!/usr/bin/env bash
+# naru-hook: PreToolUse Agent|Task
+```
+
+The first word is the event, the rest of the line (trimmed) the matcher, `*`
+when blank; `live-barge-in` carries two lines (`PreToolUse`, `PostToolUse`).
+`core::library::hook_defaults` parses them and `LibraryHookStatus.defaults`
+carries them. Because the declaration is the body, it travels with a fork, an
+export and a sync, and a user-written hook can declare one too. Every
+built-in hook declares one (a test pins it).
+
+- `naru library hook enable <name>` with **no `--event`** registers every
+  declared pair; `--matcher` alone overrides each declared matcher; an
+  explicit `--event` registers just that one, as before. Every pair is
+  validated before anything is written.
+- A hook that declares nothing still needs `--event`: with none it is
+  `validation` naming the flag, and nothing (settings or script) is written.
+- The web page shows, on every hook row that declares something, an on/off
+  switch beside the registration badge with the declared pairs: on
+  registers them (POST with no `event`), off removes every registration of
+  that hook (DELETE with no query). An unshadowed built-in is addressed by
+  `/api/library/builtins/{builtin_id}/hook`, so switching it does **not**
+  fork it. A hook declaring nothing has no switch and keeps the event form in
+  its `hooks` panel.
+- Nothing is ever registered on its own: a fresh install has every hook off
+  until the person switches it on.
+
 ### The write is a splice, not a round trip
 
 Naru does not own `.claude/settings.json` — the user's model, environment,
@@ -1182,8 +1217,9 @@ somewhere else.
 | `DELETE /api/library/{id}` | 200, destroyed record | `require_agent_access` |
 | `GET /api/library/{id}/versions` | 200, bare array | `require_agent_access` |
 | `GET /api/library/{id}/hook` | 200, the `LibraryHookStatus` | `require_agent_access` |
-| `POST /api/library/{id}/hook` (`{"event", "matcher"?}`) | 200, the status after the write | `require_agent_access` |
+| `POST /api/library/{id}/hook` (`{"event"?, "matcher"?}`; no `event` = the declared defaults) | 200, the status after the write | `require_agent_access` |
 | `DELETE /api/library/{id}/hook` (`?event=&matcher=`) | 200, the status after the write | `require_agent_access` |
+| `GET`/`POST`/`DELETE /api/library/builtins/{builtin_id}/hook` | the same three, for a built-in (its fork when it has one) | `require_agent_access` |
 | `POST /api/library/builtins/{builtin_id}/fork` | 201 | `require_agent_access` |
 | `POST /api/library/{id}/builtin` (`{"action", "body"?}`) | 200, the updated `LibraryItem` | `require_agent_access` |
 | `GET /api/library/sync` (`?project=<id>`) | 200, bare array | `require_agent_access` |
@@ -1317,13 +1353,15 @@ or a name — a built-in resolves by name too, since its name and its
   `--all-mesa`)/`--all-disk` (resolve every non-`in-sync` row toward one
   side at once) — the three are
   mutually exclusive — and prints the resulting `LibrarySyncResult[]`.
-- `hook status ITEM`, `hook enable ITEM --event EVENT [--matcher M]` and
+- `hook status ITEM`, `hook enable ITEM [--event EVENT] [--matcher M]` and
   `hook disable ITEM [--event EVENT] [--matcher M]` read and write the
   `.claude/settings.json` registration described above; all three print the
   same `LibraryHookStatus` object, so `enable`/`disable` report the file's
   state *after* their write. `ITEM` must be a `hook`; anything else is
-  `validation`. `disable` with no `--event` removes every registration of
-  that hook.
+  `validation`. `enable` with no `--event` registers the hook's declared
+  defaults ([Hooks declare their own event and
+  matcher](#hooks-declare-their-own-event-and-matcher)). `disable` with no
+  `--event` removes every registration of that hook.
 - `hook orphans [--scope user|project] [--project P]` lists the hook
   commands in that scope's settings.json whose script lives outside
   `.claude/hooks/` (a bare `LibraryOrphanHook[]`, "Hooks wired from outside

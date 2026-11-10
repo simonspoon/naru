@@ -2652,6 +2652,18 @@ pub struct LibraryHookRegistration {
     pub command: String,
 }
 
+/// One registration a `hook` declares for itself (naru task 2704): a
+/// `# naru-hook: <Event> [<matcher>]` line in the leading comment block of
+/// its body. `naru library hook enable <name>` with no `--event` registers
+/// every one of them, and the web page's switch does the same.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct LibraryHookDefault {
+    pub event: String,
+    /// `*` when the line names none.
+    pub matcher: String,
+}
+
 /// Where one `hook` library item stands in its scope's
 /// `.claude/settings.json`, and what mesa would write to register it. The
 /// same shape answers the read, the register and the unregister, so a caller
@@ -2675,6 +2687,10 @@ pub struct LibraryHookStatus {
     /// 126 on every event. Null when the hook is not registered.
     pub executable: Option<bool>,
     pub registrations: Vec<LibraryHookRegistration>,
+    /// The registrations the hook's body declares for itself (naru task
+    /// 2704), in the order it lists them; empty when it declares none, in
+    /// which case an enable must name its event.
+    pub defaults: Vec<LibraryHookDefault>,
     /// `core::library::HOOK_EVENTS`, carried so the editor's event list is
     /// the same list the server validates against and cannot drift from it.
     pub events: Vec<String>,

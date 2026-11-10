@@ -102,7 +102,8 @@
 #      refusals; and `POST /api/library/{id}/builtin` doing the same with its
 #      404/422/415 shapes; and a fork exported and imported into a fresh db
 #      arriving with no base, flagged. Both gate sweeps in section 8 now
-#      cover all eighteen library routes, the import preview included.
+#      cover all twenty-one library routes, the import preview and the
+#      built-in hook routes (naru task 2704) included.
 #  15. a skill carries its folder (mesa task 1604): a skill dir with five
 #      sibling files (one in a subdirectory, plus a dotfile and a symlink that
 #      are never read) adopted disk -> library, a sibling edit reading
@@ -963,6 +964,42 @@ raw POST "/api/library/$GATE_ID/builtin" -H "Host: evil.example" -H 'Content-Typ
 raw POST /api/library/import/preview -H "Host: evil.example" -H 'Content-Type: application/json' \
   -d '{"bundle":{"version":1,"exported_at":"x","items":[]}}'
 [ "$STATUS" = "403" ] || fail "default: POST /api/library/import/preview with a foreign Host must be 403"
+for M in GET POST DELETE; do
+  raw "$M" /api/library/builtins/agent-route/hook -H "Host: evil.example" \
+    -H 'Content-Type: application/json' -d '{}'
+  [ "$STATUS" = "403" ] || fail "default: $M /api/library/builtins/{id}/hook with a foreign Host must be 403"
+done
+
+# Hooks declare their own event and matcher (naru task 2704): the built-in
+# route reads and switches an unshadowed built-in without forking it, a POST
+# with no event registers the declared pair, and the CLI's flagless enable
+# does the same. The seeded script and settings file are removed again when
+# this block created them, so later sections see the sandbox as it was.
+HD_HOOK="$HOME/.claude/hooks/agent-route.sh"
+HD_SETTINGS="$HOME/.claude/settings.json"
+HD_HAD_HOOK=0; [ -e "$HD_HOOK" ] && HD_HAD_HOOK=1
+HD_HAD_SETTINGS=0; [ -e "$HD_SETTINGS" ] && HD_HAD_SETTINGS=1
+api 200 GET /api/library/builtins/agent-route/hook
+[ "$(jqb '.registered')" = "false" ] || fail "built-in hook route: a stock hook must start off, got $BODY"
+[ "$(jqb '.defaults | map("\(.event) \(.matcher)") | join(",")')" = "PreToolUse Agent|Task" ] ||
+  fail "built-in hook route: declared defaults, got $BODY"
+api 200 POST /api/library/builtins/agent-route/hook '{}'
+[ "$(jqb '.registrations | map("\(.event) \(.matcher)") | join(",")')" = "PreToolUse Agent|Task" ] ||
+  fail "POST with no event must register the declared pair, got $BODY"
+api 200 GET /api/library
+[ "$(jqb '[.[] | select(.builtin_id == "agent-route") | .id] | map(tostring) | join(",")')" = "null" ] ||
+  fail "switching a built-in hook on must not fork it, got $(jqb '[.[] | select(.builtin_id == "agent-route")]')"
+api 200 DELETE /api/library/builtins/agent-route/hook
+[ "$(jqb '.registered')" = "false" ] || fail "DELETE on the built-in route must turn it off, got $BODY"
+api 404 GET /api/library/builtins/no-such-builtin/hook
+[ "$(jqb .error.code)" = "not_found" ] || fail "unknown built-in hook: error.code"
+run 0 "$MESA" library hook enable agent-route.sh
+[ "$(jqs '.registrations | map("\(.event) \(.matcher)") | join(",")')" = "PreToolUse Agent|Task" ] ||
+  fail "CLI enable with no --event must register the declared pair, got $STDOUT"
+run 0 "$MESA" library hook disable agent-route.sh
+[ "$HD_HAD_HOOK" = 1 ] || rm -f "$HD_HOOK"
+[ "$HD_HAD_SETTINGS" = 1 ] || rm -f "$HD_SETTINGS"
+ok "built-in hook route + flagless enable: declared PreToolUse/Agent|Task registered without a fork, off again, 404 on an unknown id, foreign Host 403 on all three"
 api 200 GET "/api/library/$GATE_ID"
 [ "$(jqb .body)" = "x" ] || fail "default: a refused authoring request must write nothing"
 ok "default mode: every mutating route AND both sync routes reject a foreign Host, writing nothing"
@@ -1064,6 +1101,9 @@ for CASE in \
   "GET|/api/library/$GATE_ID/hook|" \
   "POST|/api/library/$GATE_ID/hook|{\"event\":\"Stop\"}" \
   "DELETE|/api/library/$GATE_ID/hook|{}" \
+  "GET|/api/library/builtins/agent-route/hook|" \
+  "POST|/api/library/builtins/agent-route/hook|{}" \
+  "DELETE|/api/library/builtins/agent-route/hook|{}" \
   "GET|/api/library/hooks/orphans?scope=user|" \
   "POST|/api/library/hooks/adopt|{\"scope\":\"user\",\"path\":\"/nope\"}" \
   "POST|/api/library/$GATE_ID/builtin|{\"action\":\"keep\"}" \
@@ -1077,7 +1117,7 @@ for CASE in \
   [ "$S" = "403" ] ||
     fail "--lan: $METHOD $PATH_ from a foreign Origin must be 403, got $S"
 done
-ok "--lan: all eighteen library routes (reads included) reject a DNS-name Host (rebinding) and a foreign Origin (cross-site)"
+ok "--lan: all twenty-one library routes (reads included) reject a DNS-name Host (rebinding) and a foreign Origin (cross-site)"
 
 api2() { # api2 <expected-status> <method> <path> [json-body] — against LAN_PORT, local Host
   local expected=$1 method=$2 path=$3 body=${4:-}

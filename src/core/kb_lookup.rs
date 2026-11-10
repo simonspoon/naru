@@ -50,6 +50,7 @@ const LONG_PROMPT_WORDS: usize = 40;
 /// The hook script. It **exits 0 always** and prints only what `naru kb hook`
 /// prints, which is nothing on any miss or failure.
 pub const KB_LOOKUP_HOOK: &str = r##"#!/usr/bin/env bash
+# naru-hook: UserPromptSubmit
 # kb-lookup.sh — a Claude Code UserPromptSubmit hook (naru task 2274).
 # Installed with:
 #   naru library hook enable kb-lookup.sh --event UserPromptSubmit

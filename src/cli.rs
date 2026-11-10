@@ -3169,18 +3169,26 @@ enum LibraryHookCmd {
         /// Library item id or name; must be a `hook`
         item: String,
     },
-    /// Register this hook under one event; idempotent
+    /// Register this hook under the event(s) it declares, or the one named;
+    /// idempotent
+    ///
+    /// With no `--event`, every `# naru-hook: <Event> [<matcher>]` line in the
+    /// hook's header is registered (`--matcher` then overrides each one's
+    /// matcher); a hook declaring none needs `--event`.
     #[command(after_help = "\
 EXAMPLES
+  mesa library hook enable agent-route.sh
   mesa library hook enable stop-notify.sh --event Stop
   mesa library hook enable poll-guard.py --event PreToolUse --matcher Bash")]
     Enable {
         /// Library item id or name; must be a `hook`
         item: String,
         /// PreToolUse|PostToolUse|Notification|UserPromptSubmit|Stop|SubagentStop|PreCompact|SessionStart|SessionEnd
+        /// (default: the hook's declared events)
         #[arg(long)]
-        event: String,
-        /// Tool/source pattern for this registration (default: `*`)
+        event: Option<String>,
+        /// Tool/source pattern for this registration (default: the declared
+        /// one, else `*`)
         #[arg(long)]
         matcher: Option<String>,
     },
@@ -10336,7 +10344,7 @@ fn run_library_hook_cmd(store: &mut Store, cmd: LibraryHookCmd) -> Result<()> {
             print_json(&library::register_hook(
                 store,
                 &item,
-                &event,
+                event.as_deref(),
                 matcher.as_deref(),
             )?);
         }

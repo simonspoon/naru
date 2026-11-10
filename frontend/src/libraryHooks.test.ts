@@ -5,7 +5,9 @@ import {
   displayRegistrations,
   enableError,
   hookBadgeLabel,
-  hookIdsFor,
+  defaultsLabel,
+  hookPath,
+  hookRefsFor,
   matcherError,
   matcherText,
   matcherPayload,
@@ -76,6 +78,7 @@ function status(registrations: LibraryHookRegistration[] = []): LibraryHookStatu
     registered: registrations.length > 0,
     executable: registrations.length > 0 ? true : null,
     registrations,
+    defaults: [],
     events: EVENTS,
   }
 }
@@ -98,14 +101,14 @@ describe('offersHooks', () => {
   })
 })
 
-describe('hookIdsFor', () => {
+describe('hookRefsFor', () => {
   it('is empty before the list has loaded', () => {
-    expect(hookIdsFor(null)).toEqual([])
+    expect(hookRefsFor(null)).toEqual([])
   })
 
-  it('keeps the stored hook rows and nothing else', () => {
+  it('keeps the hook rows and nothing else', () => {
     expect(
-      hookIdsFor([
+      hookRefsFor([
         item({ id: 1 }),
         item({ id: 2, kind: 'agent' }),
         item({ id: 3, kind: 'skill' }),
@@ -114,8 +117,33 @@ describe('hookIdsFor', () => {
     ).toEqual([1, 4])
   })
 
-  it('leaves out a built-in hook, which has no id to ask about yet', () => {
-    expect(hookIdsFor([item({ id: null, builtin: true, builtin_id: 'stop-notify' })])).toEqual([])
+  it('addresses an unshadowed built-in hook by its builtin id', () => {
+    expect(hookRefsFor([item({ id: null, builtin: true, builtin_id: 'stop-notify' })])).toEqual([
+      'stop-notify',
+    ])
+  })
+})
+
+describe('hookPath', () => {
+  it('routes a stored row by id and a built-in by its encoded builtin id', () => {
+    expect(hookPath(7)).toBe('/api/library/7/hook')
+    expect(hookPath('agent-route')).toBe('/api/library/builtins/agent-route/hook')
+    expect(hookPath('a b')).toBe('/api/library/builtins/a%20b/hook')
+  })
+})
+
+describe('defaultsLabel', () => {
+  it('lists the declared registrations, or null when there are none', () => {
+    expect(defaultsLabel(status([]))).toBeNull()
+    expect(
+      defaultsLabel({
+        ...status([]),
+        defaults: [
+          { event: 'PreToolUse', matcher: 'Agent|Task' },
+          { event: 'PostToolUse', matcher: '*' },
+        ],
+      }),
+    ).toBe('PreToolUse (Agent|Task), PostToolUse')
   })
 })
 

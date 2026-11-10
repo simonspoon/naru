@@ -51,19 +51,48 @@ export function offersHooks(item: LibraryItem): boolean {
 }
 
 /**
- * The ids the page reads registration status for: every **stored** hook row.
- *
- * A built-in that has not been forked yet is deliberately absent — it has no
- * id to ask about, so it carries no badge until the press that forks it. The
- * `null` case is the list before it has loaded, which is no ids rather than
- * an error.
+ * What one hook row's registration is addressed by: a stored row's numeric id
+ * on `/api/library/{id}/hook`, or an unshadowed built-in's `builtin_id` on
+ * `/api/library/builtins/{builtin_id}/hook` (naru task 2704) — so the on/off
+ * switch works on a stock hook without forking it.
  */
-export function hookIdsFor(items: LibraryItem[] | null): number[] {
-  const out: number[] = []
+export type HookRef = number | string
+
+/** The row's [`HookRef`], or `null` for anything that is not a hook. */
+export function hookRefFor(item: LibraryItem): HookRef | null {
+  if (!offersHooks(item)) return null
+  return item.id ?? item.builtin_id
+}
+
+/**
+ * The refs the page reads registration status for: every hook row, stored or
+ * built-in. The `null` case is the list before it has loaded, which is no
+ * refs rather than an error.
+ */
+export function hookRefsFor(items: LibraryItem[] | null): HookRef[] {
+  const out: HookRef[] = []
   for (const item of items ?? []) {
-    if (offersHooks(item) && item.id !== null) out.push(item.id)
+    const ref = hookRefFor(item)
+    if (ref !== null) out.push(ref)
   }
   return out
+}
+
+/** The registration route for one ref. */
+export function hookPath(ref: HookRef): string {
+  return typeof ref === 'number'
+    ? `/api/library/${ref}/hook`
+    : `/api/library/builtins/${encodeURIComponent(ref)}/hook`
+}
+
+/**
+ * What the row's switch says it does: the hook's declared registrations
+ * (`# naru-hook:` lines, `status.defaults`), or `null` when it declares none —
+ * that hook has no one-click switch and keeps the event form.
+ */
+export function defaultsLabel(status: LibraryHookStatus): string | null {
+  if (status.defaults.length === 0) return null
+  return status.defaults.map(registrationLabel).join(', ')
 }
 
 /**
@@ -79,7 +108,7 @@ export function matcherText(matcher: string): string | null {
 
 /** How one registration reads: the event alone, or the event and the matcher
  * that narrows it. */
-export function registrationLabel(reg: LibraryHookRegistration): string {
+export function registrationLabel(reg: Pick<LibraryHookRegistration, 'event' | 'matcher'>): string {
   const matcher = matcherText(reg.matcher)
   return matcher === null ? reg.event : `${reg.event} (${matcher})`
 }

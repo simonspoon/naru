@@ -6,7 +6,7 @@
 // rebuilt inline: the unregister query (which of the two fields narrow the
 // call, `libraryHooks.test.ts`) and the script-run stream's NDJSON line
 // cutting (`scriptRun.test.ts`).
-import { unregisterHookQuery } from './libraryHooks'
+import { hookPath, unregisterHookQuery, type HookRef } from './libraryHooks'
 import { scorecardQuery } from './ccScorecard'
 import type { RunJob, RunShown } from './runEvents'
 import { parseWatchLine, type FilesWatchEvent } from './filesWatch'
@@ -2453,22 +2453,23 @@ export function importLibrary(
 }
 
 /** Where one `hook` item stands in its scope's `.claude/settings.json`, and
- * what mesa would write to register it (mesa task 1115). Only a stored `hook`
- * row is reachable here — an unshadowed built-in has no numeric id. */
-export function getLibraryHook(id: number): Promise<LibraryHookStatus> {
-  return request(`/api/library/${id}/hook`)
+ * what mesa would write to register it (mesa task 1115). A stored row is
+ * addressed by id, an unshadowed built-in by its builtin id (`HookRef`). */
+export function getLibraryHook(ref: HookRef): Promise<LibraryHookStatus> {
+  return request(hookPath(ref))
 }
 
-/** Registers this hook under one event. Idempotent, and answers the same
- * status object the read does — so the page renders the file's new state
- * rather than assuming the write landed. An omitted `matcher` lets the server
- * apply its own default (`*`, every tool). */
+/** Registers this hook under one event — or, with `event` omitted, under
+ * every registration its header declares (naru task 2704). Idempotent, and
+ * answers the same status object the read does — so the page renders the
+ * file's new state rather than assuming the write landed. An omitted
+ * `matcher` lets the server apply its own default (`*`, every tool). */
 export function registerLibraryHook(
-  id: number,
-  event: string,
+  ref: HookRef,
+  event?: string,
   matcher?: string,
 ): Promise<LibraryHookStatus> {
-  return request(`/api/library/${id}/hook`, jsonInit('POST', { event, matcher }))
+  return request(hookPath(ref), jsonInit('POST', { event, matcher }))
 }
 
 /** Hook commands in one scope's `.claude/settings.json` whose script lives
@@ -2501,11 +2502,11 @@ export function adoptLibraryHook(
  * narrows to. The narrowing rides in the query string, not a body: mesa has
  * no DELETE-with-body route anywhere. Same status object back. */
 export function unregisterLibraryHook(
-  id: number,
+  ref: HookRef,
   event?: string,
   matcher?: string,
 ): Promise<LibraryHookStatus> {
-  return request(`/api/library/${id}/hook${unregisterHookQuery(event, matcher)}`, jsonDelete())
+  return request(`${hookPath(ref)}${unregisterHookQuery(event, matcher)}`, jsonDelete())
 }
 
 // ---- knowledge base (naru task 1928) ----
