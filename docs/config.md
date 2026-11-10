@@ -4,15 +4,15 @@
 > `agent-spawn` command were removed (naru task 2253). A saved `agent-spawn` key is
 > unknown to Naru: it is ignored on read and a `PUT` naming it is `validation`.
 
-Naru starts a coding agent from exactly nine places (the seventh is a workflow
+Naru starts a coding agent from exactly ten places (the seventh is a workflow
 `prompt` node, the eighth the detached run `runner`, the ninth the knowledge base's
-`kb` calls). Each one's command line
+`kb` calls, the tenth the model router's `model-router` call). Each one's command line
 is a **template** in `~/.mesa/config.json`, so the program, its flags, the
 persona and the slash command can all change without rebuilding Naru:
 
 | Key | Used by | Built-in default |
 | --- | --- | --- |
-| `queue-watcher` | `serve --watch-queue` dispatch (`docs/queue-watcher.md`) | `claude --bg --model opus --name {name} -- "/execute-naru-task {id}"` (naru task 2394, the `execute-naru-task` skill's slash command; `"execute naru task: {id}"` from naru task 2273, `--agent supervisor` before that) |
+| `queue-watcher` | `serve --watch-queue` dispatch (`docs/queue-watcher.md`) | `claude --bg --model {model} --name {name} -- "/execute-naru-task {id}"` (`{model}` is the router's pick, `opus` when routing is off or failed, naru task 2683; a saved template without `{model}` runs unchanged and is never routed, `docs/model-router.md`) (naru task 2394, the `execute-naru-task` skill's slash command; `"execute naru task: {id}"` from naru task 2273, `--agent supervisor` before that) |
 | `inbox-watcher` | `serve --watch-inbox` triage (`docs/inbox-watcher.md`): up to two synchronous, tool-less `claude -p --json-schema` calls (haiku decides, sonnet writes the task) per item, run in a detached `naru __job inbox-triage` whose verdict Naru validates and applies itself (naru task 1691). Offers `{id}`, `{name}`, `{prompt}`, `{schema}` and `{model}` | `claude -p --model {model} --name {name} --tools "" --strict-mcp-config --output-format json --json-schema {schema} -- {prompt}` |
 | `live-agent` | `mesa live start`, `POST /api/live`, `mesa live handoff` — the session that holds a spoken conversation (`docs/live.md`), since naru task 1886 a `naru run` job (`core::live::spawn_agent` → `core::runner`, `docs/runner.md`) rather than a `--bg` agent. Offers `{name}`, `{session_flag}` and `{session_id}` | `claude -p --input-format stream-json --output-format stream-json --verbose --agent naru-live --name {name} {session_flag} {session_id}` |
 | `live-summary` | `live stop`'s CLI handler and the API's stop route — the one synchronous, tool-less `claude -p --json-schema` call that writes a live conversation's memory once it ends, run in a detached `naru __job summary` whose answer Naru saves itself (mesa task 921, naru task 1690, `docs/live.md`). Offers `{id}`, `{name}`, `{prompt}` and `{schema}` | `claude -p --model sonnet --name {name} --tools "" --strict-mcp-config --output-format json --json-schema {schema} -- {prompt}` |
@@ -20,6 +20,7 @@ persona and the slash command can all change without rebuilding Naru:
 | `workflow-prompt` | A workflow's **`prompt` node** on an Anthropic model (mesa task 1607, `docs/workflows.md`): one synchronous `claude -p --output-format json` call resolved like every other spawn (`agents::workflow_prompt_script`), whose answer the engine reads from the result JSON on stdout (`core::llm`). `local:<name>` models never use it — those are an Ollama HTTP call. Offers `{model}`, `{thinking}`, `{name}` and `{prompt}` | `claude -p --model {model} --name {name} --tools "" --strict-mcp-config --output-format json --settings "{\"alwaysThinkingEnabled\":{thinking}}" -- {prompt}` |
 | `runner` | The detached `claude -p` that `naru run __runner` holds open on stream-json stdin/stdout (naru task 1686, `docs/runner.md`): launched by the runner process itself with piped stdin/stdout, in its own process group, so the agent outlives the Naru server. Print mode on purpose. Offers `{model}`, `{name}`, `{session_flag}` (`--session-id` on a run's first start, `--resume` after a restart) `{session_id}` (the run's uuid) and `{run_agent}` (the run's `--agent` name, empty when none; not `{agent}`, a retired placeholder). The default is two lines, emitting `--agent` only when `{run_agent}` is set. A saved template without `{run_agent}` silently ignores a run's `--agent` (still recorded in `job.json`) | `run_agent={run_agent}`<br>`claude -p --input-format stream-json --output-format stream-json --verbose ${run_agent:+--agent "$run_agent"} --model {model} --name {name} {session_flag} {session_id}` |
 | `kb` | The knowledge base's two kinds of call (naru task 1919, `docs/kb.md`): `naru kb ask` (synchronous) and the detached `naru __job kb-add` (one call per 12 KiB chunk of raw text). Always model `haiku`, tool-less structured `claude -p --output-format json --json-schema` calls, no API key; Naru validates and applies the answer itself. Offers `{id}` (always empty), `{name}` (`naru kb ask` / `naru kb add`), `{prompt}`, `{schema}` and `{model}`. A saved template that starts a `--bg` agent is ignored on read and refused on save | `claude -p --model {model} --name {name} --tools "" --strict-mcp-config --output-format json --json-schema {schema} -- {prompt}` |
+| `model-router` | The queue-watcher's model router (naru task 2683, `docs/model-router.md`): one synchronous, tool-less `claude -p --model haiku --json-schema` call per task dispatch that reads the task text and picks `haiku`/`sonnet`/`opus`/`fable` for the session; Naru validates the answer, and any failure falls back to `opus`. Offers `{id}` (always empty), `{name}` (`naru model-router`), `{prompt}`, `{schema}` and `{model}` (`haiku`). A saved `--bg` override is ignored on read and refused on save, like `kb` | `claude -p --model {model} --name {name} --tools "" --strict-mcp-config --output-format json --json-schema {schema} -- {prompt}` |
 | `retro` | `serve --watch-retro` every `watchers.retro-interval-hours`, and `mesa retro run` — the session retrospective that reviews finished task sessions for friction and files suggestions into the inbox, proposing only (mesa task 1158, `docs/retro.md`): per session one synchronous, tool-less `claude -p --json-schema` skim (haiku) and one roll-up (sonnet), run in a detached `naru __job retro` whose answer Naru records and files itself (naru task 1692). Offers `{id}`, `{name}`, `{prompt}`, `{schema}` and `{model}` | `claude -p --model {model} --name {name} --tools "" --strict-mcp-config --output-format json --json-schema {schema} -- {prompt}` |
 
 The defaults are **plain, editable command lines** (mesa task 1141): the
@@ -32,7 +33,7 @@ from the vocabulary (see *Retired placeholders* below).
 ```json
 {
   "commands": {
-    "queue-watcher":   "claude --bg --model opus --name {name} -- \"/execute-naru-task {id}\"",
+    "queue-watcher":   "claude --bg --model {model} --name {name} -- \"/execute-naru-task {id}\"",
     "inbox-watcher":  "claude -p --model {model} --name {name} --tools \"\" --strict-mcp-config --output-format json --json-schema {schema} -- {prompt}",
     "live-agent":     "claude -p --input-format stream-json --output-format stream-json --verbose --agent naru-live --name {name} {session_flag} {session_id}",
     "live-summary":   "claude -p --model sonnet --name {name} --tools \"\" --strict-mcp-config --output-format json --json-schema {schema} -- {prompt}",
@@ -241,7 +242,7 @@ knows about:
 | `{name}` | watchers, `retro`, `kb`, `live-agent`, `live-summary`, `live-dream`, `workflow-prompt` | the session name Naru derives — `workflow <workflow name> · <node title>` (`workflow-prompt`), `<project>: <task name>` (queue-watcher), `inbox <id>: <first body line>` (**untrusted text**), `naru retro <id>`, the live session's own name, or the literal `live memory dream` |
 | `{schema}` | `live-summary`, `live-dream`, `inbox-watcher`, `retro` | the JSON Schema Naru passes to `--json-schema` (`core::live::SUMMARY_SCHEMA`, `LIVE_DREAM_SCHEMA` or, for a project dream, `PROJECT_DREAM_SCHEMA`; `core::inbox_triage::TRIAGE_SCHEMA` or `SHARPEN_SCHEMA`) — Naru's own text, so a template edit cannot break the contract |
 | `{prompt}` | `live-summary`, `live-dream`, `inbox-watcher`, `retro`, `kb`, `workflow-prompt` | the summariser's, dream pass's or inbox triage's instruction block, always present / the workflow node's prompt, a blank line and its input (`workflow-prompt`) |
-| `{model}` | `workflow-prompt`, `inbox-watcher`, `retro`, `kb` | the node's `model`: `haiku`, `sonnet` or `opus` (`workflow-prompt`) / the pass's: `haiku` for the verdict, `sonnet` for the sharpened task (`inbox-watcher`) / `haiku` for a session skim, `sonnet` for the roll-up (`retro`) |
+| `{model}` | `queue-watcher`, `workflow-prompt`, `inbox-watcher`, `retro`, `kb`, `model-router` | the router's pick for the session, `haiku`/`sonnet`/`opus`/`fable`, `opus` when routing is off or failed (`queue-watcher`, `docs/model-router.md`) / the node's `model`: `haiku`, `sonnet` or `opus` (`workflow-prompt`) / the pass's: `haiku` for the verdict, `sonnet` for the sharpened task (`inbox-watcher`) / `haiku` for a session skim, `sonnet` for the roll-up (`retro`) |
 | `{thinking}` | `workflow-prompt` | `true` or `false`, the node's `thinking` flag |
 | `{session_flag}` | `runner`, `live-agent` | `--session-id` (first start) or `--resume` (after a restart) — a placeholder of its own because a value is one quoted word, so it is passed as `'--resume'`, still a flag to `claude` |
 | `{session_id}` | `runner`, `live-agent` | the run's v4 uuid |
@@ -708,7 +709,8 @@ queue-watcher's per-project concurrency limit (mesa task 777,
   "watchers": {
     "queue-concurrency": 3,
     "retro-interval-hours": 72,
-    "stall-minutes": 20
+    "stall-minutes": 20,
+    "model-router": "on"
   }
 }
 ```
@@ -747,6 +749,12 @@ queue-watcher's per-project concurrency limit (mesa task 777,
   out-of-range value is clamped on read; read every reaper pass. Body key
   `stall_minutes`, `ts(skip)`ped (no Settings UI). `MESA_WATCH_TODO_STALL_MS`
   overrides it for gate scripts.
+- `model-router` (naru task 2683) switches the queue-watcher's model router
+  (`docs/model-router.md`): `"on"` (the default when absent) or `"off"`. Off
+  means every task session runs `{model}` = `opus` with no Haiku call. `PUT`
+  body key `model_router`, `"on"`/`"off"`/`null` (anything else is `422
+  validation`), `ts(skip)`ped (no Settings UI). Read on every dispatch; an
+  unreadable file makes the router fall back to `opus`.
 
 ### Routes
 

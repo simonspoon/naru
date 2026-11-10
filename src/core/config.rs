@@ -266,11 +266,15 @@ pub const RUNNER: &str = "runner";
 /// raw material, both tool-less `claude -p --json-schema` calls whose answer
 /// Naru validates and applies itself.
 pub const KB: &str = "kb";
+/// The model router's haiku call (naru task 2683, `docs/model-router.md`): one
+/// tool-less `claude -p --json-schema` call per queued-task dispatch that
+/// picks the model the task's session runs on.
+pub const MODEL_ROUTER: &str = "model-router";
 
 /// Every configurable command, in the order the docs and the Settings page
 /// list them. The single source of truth for "which keys mesa configures" —
 /// [`default_command`] answers the same question one key at a time.
-pub const ACTIONS: [&str; 9] = [
+pub const ACTIONS: [&str; 10] = [
     TODO_WATCHER,
     INBOX_WATCHER,
     LIVE_AGENT,
@@ -280,6 +284,7 @@ pub const ACTIONS: [&str; 9] = [
     WORKFLOW_PROMPT,
     RUNNER,
     KB,
+    MODEL_ROUTER,
 ];
 
 /// Built-in default for [`TODO_WATCHER`] — the argv mesa shipped before the
@@ -309,8 +314,13 @@ pub const ACTIONS: [&str; 9] = [
 /// (`claude` takes it as a single positional), and tokenization is by
 /// whitespace. Unquoted, `/execute-naru-task {id}` would arrive as two
 /// arguments.
+///
+/// `{model}` is the model the router picked for the task (naru task 2683,
+/// `docs/model-router.md`); `opus` when routing is off or failed, which keeps
+/// the argv what it was before the router. A saved template without
+/// `{model}` runs unchanged and is never routed.
 pub const DEFAULT_TODO_WATCHER: &str =
-    r#"claude --bg --model opus --name {name} -- "/execute-naru-task {id}""#;
+    r#"claude --bg --model {model} --name {name} -- "/execute-naru-task {id}""#;
 /// Built-in default for [`INBOX_WATCHER`] (naru task 1691): [`DEFAULT_LIVE_SUMMARY`]'s
 /// shape — one synchronous tool-less `claude -p --output-format json
 /// --json-schema {schema}` call, run inside a detached `naru __job
@@ -366,6 +376,10 @@ pub const DEFAULT_RETRO: &str = DEFAULT_INBOX_WATCHER;
 /// `naru kb add`, `{model}` `haiku`, `{prompt}` what Naru built from the
 /// question or raw material and the notes, `{schema}` the answer schema.
 pub const DEFAULT_KB: &str = DEFAULT_INBOX_WATCHER;
+/// Built-in default for [`MODEL_ROUTER`] (naru task 2683) — the same shape:
+/// `{name}` is `naru model-router`, `{model}` `haiku`, `{prompt}` the rubric
+/// and the task text, `{schema}` the answer schema.
+pub const DEFAULT_MODEL_ROUTER: &str = DEFAULT_INBOX_WATCHER;
 /// Built-in default for [`WORKFLOW_PROMPT`] (mesa task 1607, naru task 1687):
 /// one print-mode call — `claude -p --output-format json` — that exits with a
 /// single result object on stdout (`result` holds the answer), not a background
@@ -415,6 +429,7 @@ pub fn default_command(action: &str) -> Option<&'static str> {
         WORKFLOW_PROMPT => Some(DEFAULT_WORKFLOW_PROMPT),
         RUNNER => Some(DEFAULT_RUNNER),
         KB => Some(DEFAULT_KB),
+        MODEL_ROUTER => Some(DEFAULT_MODEL_ROUTER),
         _ => None,
     }
 }
@@ -559,7 +574,7 @@ fn note_retired_once(action: &str) -> bool {
 }
 
 /// Whether `template` is a saved `live-summary`/`live-dream` (naru task 1690)
-/// or `inbox-watcher` (naru task 1691) or `retro` (naru task 1692) or `kb` (naru task 1919) override that still starts a `--bg`
+/// or `inbox-watcher` (naru task 1691) or `retro` (naru task 1692) or `kb` (naru task 1919) or `model-router` (naru task 2683) override that still starts a `--bg`
 /// agent. Those actions now run
 /// synchronously (`claude -p --output-format json`) and Naru applies the
 /// answer itself, so a `--bg` template — which prints a receipt, not result
@@ -572,6 +587,7 @@ pub fn retired_bg_override(action: &str, template: &str) -> bool {
         || action == INBOX_WATCHER
         || action == RETRO
         || action == KB
+        || action == MODEL_ROUTER
         || action == LIVE_AGENT)
         && template.split_whitespace().any(|w| w == "--bg")
 }
@@ -582,6 +598,7 @@ fn retired_task(action: &str) -> u32 {
     match action {
         LIVE_AGENT => 1886,
         KB => 1919,
+        MODEL_ROUTER => 2683,
         RETRO => 1692,
         INBOX_WATCHER => 1691,
         _ => 1690,
@@ -1778,7 +1795,11 @@ pub fn offered_placeholders(action: &str) -> &'static [&'static str] {
         // Plus the schema Naru owns (naru task 1690).
         LIVE_SUMMARY | LIVE_DREAM => &["{id}", "{name}", "{prompt}", "{schema}"],
         // Plus the pass's model (naru tasks 1691, 1692).
-        INBOX_WATCHER | RETRO | KB => &["{id}", "{name}", "{prompt}", "{schema}", "{model}"],
+        INBOX_WATCHER | RETRO | KB | MODEL_ROUTER => {
+            &["{id}", "{name}", "{prompt}", "{schema}", "{model}"]
+        }
+        // The router's pick (naru task 2683).
+        TODO_WATCHER => &["{id}", "{name}", "{model}"],
         WORKFLOW_PROMPT => &["{model}", "{thinking}", "{name}", "{prompt}"],
         RUNNER => &[
             "{model}",
@@ -2201,7 +2222,16 @@ pub const RETRO_INTERVAL_HOURS: &str = "retro-interval-hours";
 pub const STALL_MINUTES: &str = "stall-minutes";
 
 /// Every key the `watchers` section understands, for the unknown-key error.
-const WATCHER_KEYS: &[&str] = &[TODO_CONCURRENCY, RETRO_INTERVAL_HOURS, STALL_MINUTES];
+const WATCHER_KEYS: &[&str] = &[
+    TODO_CONCURRENCY,
+    RETRO_INTERVAL_HOURS,
+    STALL_MINUTES,
+    MODEL_ROUTER_SWITCH,
+];
+
+/// The config key switching the model router `"on"` (the default) or `"off"`
+/// (naru task 2683, `docs/model-router.md`).
+pub const MODEL_ROUTER_SWITCH: &str = "model-router";
 
 /// How long a dispatched agent may be silent with no config: twenty minutes.
 pub const DEFAULT_STALL_MINUTES: u32 = 20;
@@ -2253,6 +2283,10 @@ struct WatchersSection {
     stall_minutes: Option<u32>,
     #[serde(default, rename = "stale-claim-minutes")]
     stale_claim_minutes: Option<u32>,
+    /// `"on"` | `"off"`; kept as raw JSON so a hand-edited oddity cannot fail
+    /// the read every other watcher key shares.
+    #[serde(default, rename = "model-router")]
+    model_router: Option<serde_json::Value>,
 }
 
 fn read_watchers(path: &Path) -> Result<WatchersSection, String> {
@@ -2328,6 +2362,31 @@ fn stall_minutes_in(path: &Path) -> Result<u32, String> {
         .unwrap_or(DEFAULT_STALL_MINUTES))
 }
 
+/// Whether the model router is on (naru task 2683): `watchers.model-router`,
+/// absent is on, `"off"` (or `false`) is off, anything else is on. An
+/// unreadable file is `Err` — the router falls back to opus on it.
+pub fn model_router_enabled() -> Result<bool, String> {
+    model_router_enabled_in(&config_file())
+}
+
+fn model_router_enabled_in(path: &Path) -> Result<bool, String> {
+    Ok(match read_watchers(path)?.model_router {
+        Some(serde_json::Value::String(s)) => !s.trim().eq_ignore_ascii_case("off"),
+        Some(serde_json::Value::Bool(b)) => b,
+        _ => true,
+    })
+}
+
+/// The `queue-watcher` template that would run now — configured, else the
+/// built-in default (naru task 2683: the router only routes a template that
+/// has a `{model}` placeholder).
+pub fn queue_watcher_template() -> Result<String, String> {
+    Ok(match command_for(TODO_WATCHER)? {
+        Some(t) => t,
+        None => DEFAULT_TODO_WATCHER.to_string(),
+    })
+}
+
 /// How long a claimed `in_progress` task may have no live agent before the
 /// stale-claim sweep puts it back to `todo` (naru task 2033).
 pub const DEFAULT_STALE_CLAIM_MINUTES: u32 = 30;
@@ -2359,6 +2418,11 @@ fn watchers_in(path: &Path) -> Result<ConfigWatchers, String> {
         retro_interval_hours_default: DEFAULT_RETRO_INTERVAL_HOURS,
         stall_minutes: section.stall_minutes,
         stall_minutes_default: DEFAULT_STALL_MINUTES,
+        model_router: section
+            .model_router
+            .as_ref()
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
     })
 }
 
@@ -2407,6 +2471,17 @@ fn save_watchers_in(
             } else {
                 MAX_TODO_CONCURRENCY
             };
+            if key.as_str() == MODEL_ROUTER_SWITCH {
+                match value.as_str() {
+                    Some("on" | "off") => {}
+                    _ => {
+                        return Err(SaveError::Validation(format!(
+                            "{key} must be \"on\" or \"off\", got {value}"
+                        )));
+                    }
+                }
+                continue;
+            }
             validate_limit(key, value, max).map_err(SaveError::Validation)?;
         }
     }
@@ -5550,7 +5625,7 @@ mod tests {
         assert_eq!(settings[1].value, None);
         assert_eq!(settings[1].default, DEFAULT_INBOX_WATCHER);
         // The placeholder vocabulary is per-action, matching `check_key`.
-        assert_eq!(settings[0].placeholders, ["{id}", "{name}"]);
+        assert_eq!(settings[0].placeholders, ["{id}", "{name}", "{model}"]);
         assert_eq!(
             settings[1].placeholders,
             ["{id}", "{name}", "{prompt}", "{schema}", "{model}"]
@@ -5614,6 +5689,15 @@ mod tests {
             ["{id}", "{name}", "{prompt}", "{schema}", "{model}"]
         );
         assert!(retired_bg_override(KB, "claude --bg -- {prompt}"));
+        // The model router (naru task 2683) is the tenth: the same shape.
+        assert_eq!(settings[9].action, MODEL_ROUTER);
+        assert_eq!(settings[9].default, DEFAULT_MODEL_ROUTER);
+        assert_eq!(
+            settings[9].placeholders,
+            ["{id}", "{name}", "{prompt}", "{schema}", "{model}"]
+        );
+        assert!(retired_bg_override(MODEL_ROUTER, "claude --bg -- {prompt}"));
+        assert_eq!(retired_task(MODEL_ROUTER), 2683);
     }
 
     /// The runner default validates and quotes its values as single words,
@@ -6000,13 +6084,15 @@ mod tests {
         let vars = Vars {
             id: Some(731),
             name: Some("mesa: do the thing"),
+            // The router's pick; `opus` when routing is off or failed.
+            model: Some("opus"),
             ..Default::default()
         };
         assert_eq!(
             resolve(TODO_WATCHER, DEFAULT_TODO_WATCHER, &vars).unwrap(),
             // Plain Claude Code on Opus since naru task 2273 (mesa task 1075's
             // `--agent supervisor` retired from the default).
-            r#"claude --bg --model opus --name 'mesa: do the thing' -- "/execute-naru-task 731""#
+            r#"claude --bg --model 'opus' --name 'mesa: do the thing' -- "/execute-naru-task 731""#
         );
         // The live agent takes both halves: a named session id *and* the
         // prompt mesa supplies. The prompt is one argument however long or
@@ -6086,10 +6172,13 @@ mod tests {
         // No token is dropped and no flag goes with it: a placeholder with no
         // value on this call is `''` in a word position and nothing inside
         // quotes, so a promptless spawn hands its program an empty prompt.
-        let vars = Vars::default();
+        let vars = Vars {
+            model: Some("opus"),
+            ..Default::default()
+        };
         assert_eq!(
             resolve(TODO_WATCHER, DEFAULT_TODO_WATCHER, &vars).unwrap(),
-            r#"claude --bg --model opus --name '' -- "/execute-naru-task ""#
+            r#"claude --bg --model 'opus' --name '' -- "/execute-naru-task ""#
         );
         assert_eq!(
             argv_of(&resolve(TODO_WATCHER, DEFAULT_TODO_WATCHER, &vars).unwrap()),
@@ -6106,11 +6195,12 @@ mod tests {
         );
         let named = Vars {
             id: Some(7),
+            model: Some("opus"),
             ..Default::default()
         };
         assert_eq!(
             resolve(TODO_WATCHER, DEFAULT_TODO_WATCHER, &named).unwrap(),
-            r#"claude --bg --model opus --name '' -- "/execute-naru-task 7""#
+            r#"claude --bg --model 'opus' --name '' -- "/execute-naru-task 7""#
         );
         assert_eq!(resolved("t run \"{name}\" {id}", &named), "t run \"\" '7'");
     }
@@ -7332,6 +7422,49 @@ mod tests {
             );
             assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
         }
+    }
+
+    #[test]
+    fn model_router_switch_defaults_on_and_saves_on_or_off_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("absent.json");
+        assert!(model_router_enabled_in(&path).unwrap());
+        let path = write_config(dir.path(), r#"{"watchers": {"model-router": "off"}}"#);
+        assert!(!model_router_enabled_in(&path).unwrap());
+        let path = write_config(dir.path(), r#"{"watchers": {"model-router": "on"}}"#);
+        assert!(model_router_enabled_in(&path).unwrap());
+        let path = write_config(dir.path(), "{ not json");
+        assert!(model_router_enabled_in(&path).is_err());
+        // PUT: "on"/"off" are written; anything else is a validation error
+        // that leaves the file untouched.
+        let before = r#"{"watchers": {"stall-minutes": 5}}"#;
+        let path = write_config(dir.path(), before);
+        let save = |v: serde_json::Value| {
+            let mut m = HashMap::new();
+            m.insert(MODEL_ROUTER_SWITCH.to_string(), Some(v));
+            save_watchers_in(&path, &m)
+        };
+        for bad in [serde_json::json!("maybe"), serde_json::json!(3)] {
+            assert!(matches!(save(bad), Err(SaveError::Validation(_))));
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        }
+        save(serde_json::json!("off")).unwrap();
+        assert!(!model_router_enabled_in(&path).unwrap());
+        assert_eq!(stall_minutes_in(&path).unwrap(), 5);
+    }
+
+    #[test]
+    fn queue_watcher_default_offers_model_and_a_saved_template_without_it_still_resolves() {
+        let vars = Vars {
+            id: Some(7),
+            name: Some("p: t"),
+            model: Some("sonnet"),
+            ..Default::default()
+        };
+        let argv = argv_of(&resolve(TODO_WATCHER, DEFAULT_TODO_WATCHER, &vars).unwrap());
+        assert_eq!(&argv[..4], ["claude", "--bg", "--model", "sonnet"]);
+        let old = r#"claude --bg --model opus --name {name} -- "/execute-naru-task {id}""#;
+        assert!(resolve(TODO_WATCHER, old, &vars).is_ok());
     }
 
     #[test]

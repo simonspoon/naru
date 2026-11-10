@@ -28,6 +28,7 @@ pub mod llm;
 pub mod look;
 pub mod memory_job;
 pub mod migrate;
+pub mod model_router;
 pub mod notify;
 pub mod orbit;
 pub mod proc;

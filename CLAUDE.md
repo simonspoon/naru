@@ -172,6 +172,7 @@ Each doc is authoritative. The longer summaries that used to sit here are in
 | Keyboard (`keyboardScope.ts` is the suppression chokepoint) | `docs/keyboard.md` |
 | Mobile | `docs/mobile.md` |
 | Queue watcher | `docs/queue-watcher.md` |
+| Model router (picks the model of a queued task's session; never naru-live) | `docs/model-router.md` |
 | Run profile (restart a project's dev server after a landing) | `docs/run-profile.md` |
 | Inbox watcher | `docs/inbox-watcher.md` |
 | Cost guard | `docs/cost-guard.md` |

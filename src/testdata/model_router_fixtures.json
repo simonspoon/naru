@@ -1,0 +1,127 @@
+[
+  {
+    "text": "List every inbox item in the naru project that is still unarchived and older than 14 days, and print a one-line summary of each. Read-only: do not archive or edit anything.",
+    "expected": "haiku",
+    "ambiguous": false
+  },
+  {
+    "text": "Fix the typos in the comments of src/core/alarm.rs (\"recieve\", \"occured\", \"seperate\"). Comment-only edit, no code changes. Check: git diff shows only comment lines.",
+    "expected": "haiku",
+    "ambiguous": false
+  },
+  {
+    "text": "Tag every task in the \"frontend\" project whose description mentions mobile with the tag `mobile`. Use `naru task update --tags`; no code changes.",
+    "expected": "haiku",
+    "ambiguous": false
+  },
+  {
+    "text": "Rename the docs heading \"Quick start\" to \"Getting started\" in docs/dock.md and update the one link that points at the anchor. Docs only.",
+    "expected": "haiku",
+    "ambiguous": false
+  },
+  {
+    "text": "Read the last 200 lines of ~/.naru/logs/queue-reaper.log and summarize which tasks were re-queued and why. Just a summary in the task result, nothing to change.",
+    "expected": "haiku",
+    "ambiguous": false
+  },
+  {
+    "text": "Fix the off-by-one in `task_name` (src/core/types.rs) where a description of exactly 50 characters gets an ellipsis it should not. Add a unit test for the 50- and 51-character cases. Check: cargo test task_name passes.",
+    "expected": "sonnet",
+    "ambiguous": false
+  },
+  {
+    "text": "Add a `--quiet` unit test for `naru inbox archive` following the existing key-parity test pattern in src/cli.rs. Check: cargo test quiet passes.",
+    "expected": "sonnet",
+    "ambiguous": false
+  },
+  {
+    "text": "The Settings page shows `stall-minutes` with the label \"Stall minute\". Change the label to \"Stall minutes\" in frontend/src/components/Settings and update its vitest snapshot if any. Check: npm --prefix frontend run test.",
+    "expected": "sonnet",
+    "ambiguous": false
+  },
+  {
+    "text": "Add a `retro-interval-hours` row to the watchers section of docs/config.md example and a matching test in config.rs that the documented example parses, following the existing stall-minutes test. Check: cargo test config::tests.",
+    "expected": "sonnet",
+    "ambiguous": false
+  },
+  {
+    "text": "`naru project list` prints archived projects when `--archived` is omitted in one case: a child of an archived parent. Fix it in the single list function in src/core/store.rs following the existing ancestor-archived rule, and add one test. Check: cargo test archiv.",
+    "expected": "sonnet",
+    "ambiguous": false
+  },
+  {
+    "text": "Add a Files tab context-menu action \"Copy absolute path\" in the web UI: new item in the menu component, wired through the existing clipboard helper, plus the API route if one is needed. Needs live QA in the browser, including the mobile layout.",
+    "expected": "opus",
+    "ambiguous": false
+  },
+  {
+    "text": "Debug why the queue-watcher sometimes dispatches two sessions for one task after a server restart. Cause unknown; it only reproduces about one time in ten. Look at the todo_dispatched map, the reaper and the stale-claim sweep.",
+    "expected": "opus",
+    "ambiguous": false
+  },
+  {
+    "text": "Add a new migration that adds a `due_at` column to tasks, expose it in the CLI create/update commands, the HTTP API and the ts-rs types, and show it on the board card.",
+    "expected": "opus",
+    "ambiguous": false
+  },
+  {
+    "text": "The terminal pane drops output under heavy load: concurrent writes from the pty reader thread and the websocket flush race. Find the race and fix it without regressing the keyboard focus behavior.",
+    "expected": "opus",
+    "ambiguous": false
+  },
+  {
+    "text": "Harden the agent route against path traversal: the Host-header allowlist and require_agent_access are bypassable through an encoded dot segment in the files routes. Audit and fix, with tests for each bypass.",
+    "expected": "opus",
+    "ambiguous": false
+  },
+  {
+    "text": "Refactor the whole core::store module (about 9,000 lines) into per-entity submodules without changing behavior. This is a large refactor touching every caller across the crate; plan it in stages and orchestrate several subagents, verifying each stage.",
+    "expected": "fable",
+    "ambiguous": false
+  },
+  {
+    "text": "Design the architecture for syncing a Naru database between two machines: conflict resolution for edits, task id allocation, attachment transfer and offline operation. Produce a design document with trade-offs and a staged rollout plan.",
+    "expected": "fable",
+    "ambiguous": false
+  },
+  {
+    "text": "Migrate the frontend from the current hand-rolled router and state store to a different state management approach across all pages. High risk: every page and keyboard scope is affected. Long unattended run expected; must keep the app shippable at each step.",
+    "expected": "fable",
+    "ambiguous": false
+  },
+  {
+    "text": "Deep research: compare how five existing local-first task managers handle merge conflicts, schema migrations and CRDT use, and recommend what Naru should adopt. Needs reading many sources and writing a long analysis.",
+    "expected": "fable",
+    "ambiguous": false
+  },
+  {
+    "text": "Rewrite the workflow engine's scheduler to support distributed execution across multiple Naru servers. This is a large, high-risk change to core concurrency; split into subagents per subsystem and run unattended overnight.",
+    "expected": "fable",
+    "ambiguous": false
+  },
+  {
+    "text": "Rename the `stall-minutes` setting to `stall-after-minutes` everywhere. It is just a rename, but it is persisted in users' config files, so old files must keep working.",
+    "expected": "opus",
+    "ambiguous": true
+  },
+  {
+    "text": "Quick fix: make the watcher faster. It feels slow.",
+    "expected": "opus",
+    "ambiguous": true
+  },
+  {
+    "text": "Update the docs for the new retry behavior.",
+    "expected": "opus",
+    "ambiguous": true
+  },
+  {
+    "text": "Small tweak: change the default of `watchers.queue-concurrency` from 1 to 3. Docs and one constant, but this decides how many agents run at once on the user's machine, so think about concurrency and cost.",
+    "expected": "opus",
+    "ambiguous": true
+  },
+  {
+    "text": "Just format the spawn code, then also restructure the whole queue-watcher spawn machinery into a new module: this is a big and risky change to how every session starts, but start with the formatting.",
+    "expected": "fable",
+    "ambiguous": true
+  }
+]

@@ -187,8 +187,8 @@ write_config <<EOF
 EOF
 api GET /api/config
 [ "$CODE" = "200" ] || fail "GET /api/config: expected 200, got $CODE: $STDOUT"
-[ "$(jq -r 'map(.action) | join(",")' <<<"$STDOUT")" = "queue-watcher,inbox-watcher,live-agent,live-summary,live-dream,retro,workflow-prompt,runner,kb" ] ||
-  fail "GET /api/config must list all nine actions in order: $STDOUT"
+[ "$(jq -r 'map(.action) | join(",")' <<<"$STDOUT")" = "queue-watcher,inbox-watcher,live-agent,live-summary,live-dream,retro,workflow-prompt,runner,kb,model-router" ] ||
+  fail "GET /api/config must list all ten actions in order: $STDOUT"
 [ "$(jq -r '.[0].value' <<<"$STDOUT")" = "$STUB_DIR/mytool dispatch {id}" ] ||
   fail "GET /api/config: configured value wrong: $STDOUT"
 [ "$(jq -r '.[1].value' <<<"$STDOUT")" = "null" ] ||
@@ -1557,14 +1557,26 @@ B=$(jqs .id)
 run 0 "$MESA" project update "$B" --path "$DIR_B"
 run 0 "$MESA" task create "$B" "task b"
 TASK_B=$(jqs .id)
-wait_lines "$CLAUDE_LOG" 1
+# The model router's haiku call (naru task 2683) runs first and also lands in
+# CLAUDE_LOG; the stub gives it no answer, so the spawn falls back to opus and
+# the `--bg` argv is byte-for-byte what it was. Its prompt spans many lines, so
+# wait for the `--bg` line itself, not a count.
+for _ in $(seq 1 100); do
+  grep -qx "$DIR_B|--model|opus|--name|B: task b|--|/execute-naru-task $TASK_B" "$CLAUDE_LOG" && break
+  sleep 0.1
+done
 grep -qx "$DIR_B|--model|opus|--name|B: task b|--|/execute-naru-task $TASK_B" "$CLAUDE_LOG" ||
   fail "the built-in queue-watcher argv changed: $(cat "$CLAUDE_LOG")"
+grep -Fq "$WORKSPACE|-p|--model|haiku|--name|naru model-router|--tools||" "$CLAUDE_LOG" ||
+  fail "the model router's haiku call is missing or changed: $(cat "$CLAUDE_LOG")"
 ok "the unconfigured queue-watcher keeps its built-in \`--model opus --name <project>: <name> -- '/execute-naru-task <id>'\` argv"
 
 run 0 "$MESA" inbox add --task "$TASK_B" --kind change-request "loki: find exits 0 on no match"
 ITEM_2=$(jqs .id)
-wait_lines "$CLAUDE_LOG" 2
+for _ in $(seq 1 100); do
+  grep -Fq "$WORKSPACE|-p|--model|haiku|--name|inbox $ITEM_2: loki" "$CLAUDE_LOG" && break
+  sleep 0.1
+done
 grep -Fq "$WORKSPACE|-p|--model|haiku|--name|inbox $ITEM_2: loki: find exits 0 on no match|--tools||--strict-mcp-config|--output-format|json|--json-schema|" "$CLAUDE_LOG" ||
   fail "the built-in inbox-watcher argv changed: $(cat "$CLAUDE_LOG")"
 ok "the unconfigured inbox-watcher runs its built-in \`claude -p --model haiku --name inbox <id>: <body> --tools \"\" --strict-mcp-config --output-format json --json-schema <schema> -- <prompt>\` call (naru task 1691)"

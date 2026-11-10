@@ -47,7 +47,9 @@ because someone ran `mesa serve`.
   as its `{id}`/`{name}`. **The command line itself — including the prompt
   that runs the task — is user-configurable** in `~/.mesa/config.json`
   (`docs/config.md`); its default is
-  `claude --bg --model opus --name {name} -- "/execute-naru-task {id}"`
+  `claude --bg --model {model} --name {name} -- "/execute-naru-task {id}"`
+  (`{model}` is picked per task by the model router, naru task 2683, see
+  *Model router* below; `opus` when it is off or fails)
   (naru task 2394; `"execute naru task: {id}"` until then),
   so by default the name reaches `claude --bg` as `-n/--name` and the
   auto-dispatched session shows up identifiably (prompt box, `/resume` picker,
@@ -489,3 +491,13 @@ A reaper pass that finds a dispatched task `done`, in a project with a run
 profile, and a commit citing the task, restarts the project's dev server once
 and reports the health check as a task note and a live result. Everything
 about it is in `docs/run-profile.md`.
+
+## Model router (naru task 2683)
+
+Before `dispatch_task_session` spawns a task's session, a tool-less Haiku call
+picks the model (`haiku`/`sonnet`/`opus`/`fable`) from the task text and fills
+the template's `{model}`; any failure, the switch `watchers.model-router: off`,
+or a saved template without `{model}` means `opus` and no call. A re-dispatch
+or a cost-guard relay reuses the logged decision. `forget_dispatch` and a failed
+spawn log each decision's outcome. The live voice agent is never routed. Full
+rules, the rubric and the log format: `docs/model-router.md`.

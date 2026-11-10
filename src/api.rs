@@ -52,8 +52,8 @@ use crate::core::{
     Store, SystemInfo, Task, TaskNote, TaskPatch, TaskSummary, WorkflowEdgeKind,
     WorkflowGateStatus, WorkflowNodeKind, WorkflowNodeNew, WorkflowNodePatch, WorkflowPatch,
     WorkflowTrigger, WorkflowType, agents, attachments, audio, board, claude_trust, config, files,
-    git, guard, hooks, inbox_triage, kb, library, listen, live, memory_job, notify, orbit,
-    project_memory, receipt, runner, script_runs, scripts, speech, supervisor, system,
+    git, guard, hooks, inbox_triage, kb, library, listen, live, memory_job, model_router, notify,
+    orbit, project_memory, receipt, runner, script_runs, scripts, speech, supervisor, system,
     validate_live_client, version, workflow,
 };
 
@@ -1432,6 +1432,30 @@ fn dispatch_task_session(
     // gate, so it is marked trusted first (naru task 2570), and a spawn that is
     // refused anyway is trusted again and retried once.
     trust_project_folder(task_id, local_path);
+    // The model router (naru task 2683) picks the session's model from the
+    // task's text. The task is read under its own short lock, which is dropped
+    // before the router runs: the Haiku call may take up to its 15 s timeout.
+    // Every failure inside it is an `opus` decision, so it never fails the spawn.
+    let task = {
+        let store = state.store.lock().unwrap();
+        store.get_task(task_id).ok()
+    };
+    let model = match task {
+        Some(task) => model_router::route(
+            &model_router::Request {
+                action: config::TODO_WATCHER,
+                agent: None,
+                task_id,
+                project_id: task.project_id,
+                text: &task.description,
+            },
+            &prompts,
+            &config::workspace_dir().to_string_lossy(),
+        )
+        .map(|d| d.model)
+        .unwrap_or_else(|_| model_router::FALLBACK_MODEL.to_string()),
+        None => model_router::FALLBACK_MODEL.to_string(),
+    };
     let spawn = || {
         agents::spawn_bg(
             config::TODO_WATCHER,
@@ -1439,6 +1463,7 @@ fn dispatch_task_session(
             Some(task_id),
             Some(session_name),
             None,
+            Some(&model),
             &prompts,
         )
     };
@@ -1908,6 +1933,12 @@ fn queue_watcher_tick(state: &AppState) {
             }
             Err(e) => {
                 eprintln!("queue-watcher: spawn failed for task {task_id}: {e}");
+                model_router::log_outcome(
+                    task_id,
+                    model_router::Outcome::Failed,
+                    Some("todo"),
+                    "spawn failed",
+                );
                 // The alert body and the dedup key: escapes stripped (the real
                 // `claude` colours its output) and the length bounded, since
                 // the body may be spoken.
@@ -2794,6 +2825,15 @@ fn todo_reaper_tick(state: &AppState) {
             ReapVerdict::AlertAbandoned => {
                 match requeue_abandoned(state, task_id, &job_id) {
                     Abandoned::Requeued(n) => {
+                        // The session died with the task in_progress: a
+                        // failure, logged before `forget_dispatch` reads the
+                        // requeued status (which would read as bounced).
+                        model_router::log_outcome(
+                            task_id,
+                            model_router::Outcome::Failed,
+                            Some("todo"),
+                            &format!("session {job_id} died; re-queued"),
+                        );
                         log_reaper_requeue(
                             task_id,
                             &job_id,
@@ -2807,6 +2847,12 @@ fn todo_reaper_tick(state: &AppState) {
                         continue;
                     }
                     Abandoned::Parked(deaths) => {
+                        model_router::log_outcome(
+                            task_id,
+                            model_router::Outcome::Failed,
+                            Some("backlog"),
+                            &format!("session {job_id} died; parked"),
+                        );
                         log_reaper_requeue(
                             task_id,
                             &job_id,
@@ -3270,12 +3316,47 @@ fn unsupersede_dispatch(state: &AppState, jobs: &[String]) {
 
 /// Drops one job from `todo_dispatched` — the reaper is done with it, either
 /// because it stopped the session or because there was nothing to stop.
+///
+/// This is also where a routed task's outcome is logged (naru task 2683): the
+/// task's status as it reads now says whether the session ended `done`, put
+/// the task back (`bounced`) or left it `failed`. A session that was
+/// superseded (re-dispatched or relayed) ends nothing — the task goes on — so
+/// it logs no outcome. The map lock is released before the store is read.
 fn forget_dispatch(state: &AppState, job_id: &str) {
-    let mut map = match state.todo_dispatched.lock() {
-        Ok(d) => d,
-        Err(e) => e.into_inner(),
+    let removed = {
+        let mut map = match state.todo_dispatched.lock() {
+            Ok(d) => d,
+            Err(e) => e.into_inner(),
+        };
+        map.remove(job_id)
     };
-    map.remove(job_id);
+    let Some(DispatchedSession {
+        target: DispatchTarget::Task(task_id),
+        superseded: false,
+        ..
+    }) = removed
+    else {
+        return;
+    };
+    let status = {
+        let store = match state.store.lock() {
+            Ok(s) => s,
+            Err(e) => e.into_inner(),
+        };
+        store.get_task(task_id).ok().map(|t| t.status)
+    };
+    let outcome = match status {
+        Some(Status::Done) => model_router::Outcome::Done,
+        Some(Status::Todo | Status::Backlog) => model_router::Outcome::Bounced,
+        Some(Status::Cancelled | Status::InProgress) | None => model_router::Outcome::Failed,
+    };
+    let status = status.map(Status::as_str);
+    model_router::log_outcome(
+        task_id,
+        outcome,
+        status.or(Some("deleted")),
+        &format!("session {job_id} ended"),
+    );
 }
 
 /// The `naru serve` flags exactly as given on the command line (mesa task
@@ -12031,6 +12112,9 @@ struct WatchersUpdate {
     /// The stall watchdog's threshold in minutes (naru task 1953), same rule.
     #[serde(default, deserialize_with = "deserialize_some")]
     stall_minutes: Option<Option<serde_json::Value>>,
+    /// The model router's switch, `"on"` | `"off"` (naru task 2683), same rule.
+    #[serde(default, deserialize_with = "deserialize_some")]
+    model_router: Option<Option<serde_json::Value>>,
 }
 
 /// Distinguishes an absent key from an explicit `null` — the difference
@@ -12064,6 +12148,9 @@ async fn update_config_watchers(
     }
     if let Some(value) = body.stall_minutes {
         updates.insert(config::STALL_MINUTES.to_string(), value);
+    }
+    if let Some(value) = body.model_router {
+        updates.insert(config::MODEL_ROUTER_SWITCH.to_string(), value);
     }
 
     config::save_watchers(&updates).map_err(|e| match e {
@@ -17020,6 +17107,7 @@ mod tests {
                             queue_concurrency: None,
                             retro_interval_hours: None,
                             stall_minutes: None,
+                            model_router: None,
                         }),
                     )
                     .await

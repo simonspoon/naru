@@ -935,6 +935,10 @@ pub struct ConfigWatchers {
     /// The built-in threshold (20).
     #[ts(skip)]
     pub stall_minutes_default: u32,
+    /// The model router's switch (naru task 2683), `"on"` | `"off"`, or `null`
+    /// for the default (`"on"`). `ts(skip)` like the keys above.
+    #[ts(skip)]
+    pub model_router: Option<String>,
 }
 
 /// The speech settings as the Settings page sees them (`core::config`,

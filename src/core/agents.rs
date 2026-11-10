@@ -879,6 +879,7 @@ fn spawn_for(
     id: Option<i64>,
     name: Option<&str>,
     prompt: Option<&str>,
+    model: Option<&str>,
     prompts: &config::Prompts,
 ) -> Result<String, String> {
     spawn_for_vars(
@@ -887,6 +888,7 @@ fn spawn_for(
             id,
             name,
             prompt,
+            model,
             prompts: Some(prompts),
             ..Default::default()
         },
@@ -934,7 +936,8 @@ fn with_default_bin(script: String, bin: &str) -> String {
 /// running the script [`spawn_for`] resolves for `action` — by default
 /// `claude --bg …`, or whatever `~/.mesa/config.json` puts there.
 ///
-/// `id`/`name` (the watchers) and `prompt` (the Agents surface) are the values
+/// `id`/`name` (the watchers), `prompt` (the Agents surface) and `model` (the
+/// queue-watcher's routed model, naru task 2683) are the values
 /// that action's placeholders may use; what the command *does* with them —
 /// which slash command, whether to name the session at all — belongs to the
 /// template, not to this function.
@@ -961,9 +964,10 @@ pub fn spawn_bg(
     id: Option<i64>,
     name: Option<&str>,
     prompt: Option<&str>,
+    model: Option<&str>,
     prompts: &config::Prompts,
 ) -> Result<Option<String>, String> {
-    run_script(&spawn_for(action, id, name, prompt, prompts)?, dir)
+    run_script(&spawn_for(action, id, name, prompt, model, prompts)?, dir)
 }
 
 /// What [`capture`] read off a finished process.
@@ -2274,7 +2278,7 @@ JSON"#,
         name: Option<&str>,
         prompt: Option<&str>,
     ) -> Result<String, String> {
-        spawn_for(action, id, name, prompt, &config::Prompts::default())
+        spawn_for(action, id, name, prompt, None, &config::Prompts::default())
     }
 
     /// Resolves one action's *default* template the way `spawn_bg` would, with
@@ -2294,6 +2298,9 @@ JSON"#,
                 id,
                 name,
                 prompt,
+                // The queue-watcher default carries the router's pick, which
+                // is `opus` when routing is off or failed.
+                model: (action == config::TODO_WATCHER).then_some("opus"),
                 ..Default::default()
             },
         )
@@ -2399,6 +2406,7 @@ echo "backgrounded · 5we00000 · n""#,
             dir.path().to_str().unwrap(),
             Some(42),
             Some("mesa: a name with spaces"),
+            None,
             None,
             &config::Prompts::default(),
         );
@@ -2599,6 +2607,7 @@ echo "backgrounded · cf0c3945 · proj: do the thing""#,
             dir.path().to_str().unwrap(),
             Some(1),
             Some("look at the tests"),
+            None,
             None,
             &config::Prompts::default(),
         );
