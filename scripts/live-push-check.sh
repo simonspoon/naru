@@ -176,6 +176,14 @@ kill "$LISTEN_PID" 2>/dev/null || true
 wait "$LISTEN_PID" 2>/dev/null || true
 ok "working_since ends once the run is idle"
 
+# (i) a lease-carrying listen of a pushed run agent has nothing to wait for
+# (naru task 2682): it says `pushed` at once; push off, or no lease, is unchanged
+LEASE=$(jq -r .lease "$TMP/start.json")
+PUSHED=$("$NARU" live listen --lease "$LEASE" --wait 20)
+[ "$(jq -r .kind <<<"$PUSHED")" = pushed ] || fail "leased listen of a run agent must print the pushed record: $PUSHED"
+[ "$(NARU_LIVE_PUSH=off "$NARU" live listen --lease "$LEASE" --wait 1)" = null ] || fail "push off: a leased listen still polls"
+ok "a leased listen of a pushed run agent returns the pushed record at once"
+
 # (e) the totals
 sleep 1
 LOST=0; DUP=0

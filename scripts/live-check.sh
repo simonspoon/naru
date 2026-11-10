@@ -4321,7 +4321,7 @@ git -C "$LREPO" -c user.email=t@t -c user.name=t commit -q -m "task $LT2: add f"
 LSHA=$(git -C "$LREPO" log -1 --format=%h)
 run 0 env -u CLAUDE_CODE_SESSION_ID "$MESA" task update "$LT2" --status done --result "f.txt added; checked by hand"
 run 0 "$MESA" live listen --lease 1 --wait 0
-grep -q "Commit/artifact: $LSHA\. Code: commit $LSHA\. Verification: f.txt added; checked by hand$" <<<"$(jqs .text)" ||
+grep -q "^Task $LT2 done: a real landing\. Code: commit $LSHA\. Verification: f.txt added; checked by hand$" <<<"$(jqs .text)" ||
   fail "a committed landing names the commit and the close's result (got $STDOUT)"
 ok "landing result: first sentence unchanged, then the code state (commit, or no code change) and a verification digest"
 
@@ -5148,31 +5148,6 @@ kill "$SERVER_PID" 2>/dev/null || true
 wait "$SERVER_PID" 2>/dev/null || true
 SERVER_PID=
 
-# Keep-warm (naru task 2015): a live session nobody is attached to, idle for an
-# hour, gets one `cache-warm` user-role notice from the always-on tick, which
-# `live listen` hands the agent exactly once.
-if command -v sqlite3 >/dev/null; then
-  sqlite3 "$MESA_DB" \
-    "UPDATE live_sessions SET speaker_seen_at = NULL, working_since = NULL WHERE status = 'live';
-     UPDATE live_turns SET created_at = datetime('now','-61 minutes')
-       WHERE session_id = (SELECT id FROM live_sessions WHERE status = 'live');"
-  MESA_WATCH_LIVE_WARM_TICK_MS=500 "$MESA" serve --port "$PORT" >"$TMP/serve16.log" 2>&1 &
-  SERVER_PID=$!
-  for _ in $(seq 1 50); do
-    curl -fs "http://127.0.0.1:$PORT/api/version" >/dev/null 2>&1 && break
-    sleep 0.1
-  done
-  run 0 "$MESA" live listen --wait 10
-  [ "$(jqs .notice)" = "cache-warm" ] || fail "keep-warm: listen must hand out the cache-warm notice: $STDOUT"
-  [ "$(jqs .role)" = "user" ] || fail "keep-warm: role"
-  run 0 "$MESA" live listen --wait 2
-  [ "$STDOUT" = "null" ] || fail "keep-warm: exactly once: $STDOUT"
-  kill "$SERVER_PID" 2>/dev/null || true
-  wait "$SERVER_PID" 2>/dev/null || true
-  SERVER_PID=
-  ok "keep-warm: an idle unattended session gets one cache-warm turn, handed to listen once"
-fi
-
 # Recycle (naru task 2402): an always-on serve tick hands the conversation off
 # itself once the idle agent's context reaches live::recycle_tokens (a fifth
 # over live.handoff-tokens, 180000 by default), with a recovery-style note.
@@ -5224,6 +5199,110 @@ SERVER_PID=
 "$MESA" live stop >/dev/null 2>&1 || true
 rm -rf "$HOME/.claude/projects/-live-gate" "$STUB_DIR/recovery-out.json"
 ok "recycle: an idle agent at the ceiling is handed off once with a note (lease bumped, old run stopped); one token under is left alone"
+
+# Idle handoff and keep-warm (naru task 2682): a quiet conversation whose agent
+# holds a big context is handed off by the same tick (30 minutes quiet, 70000
+# tokens), with a note saying why; a big agent that is not handed off (here:
+# the threshold pushed out of reach, standing in for blocked delegates) gets one
+# `cache-warm` turn once its transcript and the turns are 45 minutes old, and a
+# small agent gets neither.
+if command -v sqlite3 >/dev/null; then
+  "$MESA" live stop >/dev/null 2>&1 || true
+  run 0 "$MESA" live start "live gate project"
+  IH_OLD=$(jqs .agent_id)
+  IH_LEASE=$(jqs .lease)
+  use_agent "$IH_OLD"
+  wait_for "the idle-handoff run to go idle" bash -c "[ \"\$(jq -r .status '$RUNS/$(run_id "$IH_OLD")/job.json')\" = idle ]"
+  RY_TX="$HOME/.claude/projects/-live-gate/$(run_session "$IH_OLD").jsonl"
+  mkdir -p "$(dirname "$RY_TX")"
+  age_session() { # <minutes> — the conversation and the transcript went quiet that long ago
+    sqlite3 "$MESA_DB" \
+      "UPDATE live_sessions SET speaker_seen_at = NULL, working_since = NULL, started_at = datetime('now','-$1 minutes') WHERE status = 'live';
+       UPDATE live_turns SET created_at = datetime('now','-$1 minutes')
+         WHERE session_id = (SELECT id FROM live_sessions WHERE status = 'live');"
+    touch -t "$(date -v-"$1"M +%Y%m%d%H%M)" "$RY_TX"
+  }
+  warms() { sqlite3 "$MESA_DB" "SELECT count(*) FROM live_turns WHERE notice = 'cache-warm'"; }
+  printf '%s' '{"note":"IDLE-NOTE-MARKER: waiting for the next topic."}' > "$STUB_DIR/recovery-out.json"
+
+  # Small agent, long quiet: neither a handoff nor a warm turn.
+  ry_context 40000
+  age_session 120
+  PORT=$(free_port)
+  MESA_WATCH_LIVE_RECYCLE_TICK_MS=300 "$MESA" serve --port "$PORT" >"$TMP/serve-idle.log" 2>&1 &
+  SERVER_PID=$!
+  for _ in $(seq 1 50); do
+    curl -fs "http://127.0.0.1:$PORT/api/version" >/dev/null 2>&1 && break
+    sleep 0.1
+  done
+  sleep 2
+  run 0 "$MESA" live status
+  [ "$(jqs .agent_id)" = "$IH_OLD" ] || fail "idle handoff: a small agent must not be handed off"
+  [ "$(warms)" = 0 ] || fail "keep-warm: a small agent is never warmed"
+  kill "$SERVER_PID" 2>/dev/null || true
+  wait "$SERVER_PID" 2>/dev/null || true
+  SERVER_PID=
+
+  # Big agent, quiet for 31 minutes: handed off, no warm turn.
+  ry_context 100000
+  age_session 31
+  IH_RC=$(p_base recovery)
+  PORT=$(free_port)
+  MESA_WATCH_LIVE_RECYCLE_TICK_MS=300 "$MESA" serve --port "$PORT" >"$TMP/serve-idle.log" 2>&1 &
+  SERVER_PID=$!
+  for _ in $(seq 1 50); do
+    curl -fs "http://127.0.0.1:$PORT/api/version" >/dev/null 2>&1 && break
+    sleep 0.1
+  done
+  # Not before the person has said something to this agent: a successor
+  # nobody spoke to is never handed off on its predecessor's quiet.
+  sleep 2
+  run 0 "$MESA" live status
+  [ "$(jqs .agent_id)" = "$IH_OLD" ] || fail "idle handoff: an agent nobody spoke to must not be handed off"
+  sqlite3 "$MESA_DB" \
+    "INSERT INTO live_turns (session_id, role, text, agent_id, created_at, delivered_at)
+       SELECT id, 'user', 'hello there', agent_id, datetime('now','-31 minutes'), datetime('now','-31 minutes')
+       FROM live_sessions WHERE status = 'live';"
+  wait_for "the idle handoff" bash -c "[ \"\$('$MESA' live status | jq -r .agent_id)\" != '$IH_OLD' ]"
+  run 0 "$MESA" live status
+  IH_NEW=$(jqs .agent_id)
+  [ "$(jqs .lease)" = "$((IH_LEASE + 1))" ] || fail "idle handoff: the lease is bumped"
+  [ "$(pc recovery)" = "$((IH_RC + 1))" ] || fail "idle handoff: exactly one note call"
+  grep -q 'conversation went quiet' "$STUB_DIR/p-recovery-prompt" || fail "idle handoff: the note prompt says why"
+  use_agent "$IH_NEW"
+  grep -q 'IDLE-NOTE-MARKER' "$STUB_DIR/last-prompt" || fail "idle handoff: the successor's prompt carries the note"
+  grep -q "live-recycle: session .* handed off at 100000 context tokens (quiet for 3[0-9] min)" "$TMP/serve-idle.log" ||
+    fail "idle handoff: the serve log names the reason ($(cat "$TMP/serve-idle.log"))"
+  [ "$(warms)" = 0 ] || fail "idle handoff: a handed-off agent is not warmed"
+  kill "$SERVER_PID" 2>/dev/null || true
+  wait "$SERVER_PID" 2>/dev/null || true
+  SERVER_PID=
+
+  # Big agent, handoff out of reach: one warm turn once 46 minutes old.
+  wait_for "the successor run to go idle" bash -c "[ \"\$(jq -r .status '$RUNS/$(run_id "$IH_NEW")/job.json')\" = idle ]"
+  RY_TX="$HOME/.claude/projects/-live-gate/$(run_session "$IH_NEW").jsonl"
+  ry_context 100000
+  age_session 30
+  PORT=$(free_port)
+  NARU_LIVE_IDLE_HANDOFF_SECS=999999 MESA_WATCH_LIVE_RECYCLE_TICK_MS=300 "$MESA" serve --port "$PORT" >"$TMP/serve-warm.log" 2>&1 &
+  SERVER_PID=$!
+  for _ in $(seq 1 50); do
+    curl -fs "http://127.0.0.1:$PORT/api/version" >/dev/null 2>&1 && break
+    sleep 0.1
+  done
+  sleep 1.5
+  [ "$(warms)" = 0 ] || fail "keep-warm: 30 minutes quiet is not due"
+  age_session 46
+  wait_for "the keep-warm turn" bash -c "[ \"\$(sqlite3 '$MESA_DB' \"SELECT count(*) FROM live_turns WHERE notice = 'cache-warm'\")\" = 1 ]"
+  sleep 1.5
+  [ "$(warms)" = 1 ] || fail "keep-warm: exactly one, the ping's own turn stops a repeat"
+  kill "$SERVER_PID" 2>/dev/null || true
+  wait "$SERVER_PID" 2>/dev/null || true
+  SERVER_PID=
+  "$MESA" live stop >/dev/null 2>&1 || true
+  rm -rf "$HOME/.claude/projects/-live-gate" "$STUB_DIR/recovery-out.json"
+  ok "idle handoff: a big quiet agent is handed off once with a note; a small one is left alone; a big one kept is warmed once after 45 minutes"
+fi
 
 # One listener per lease (naru task 2072): a second lease-carrying listen
 # supersedes the first, which delivers nothing; the newest gets the result.

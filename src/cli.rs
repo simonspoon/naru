@@ -7564,8 +7564,10 @@ fn run_live(cmd: LiveCmd) -> Result<()> {
                 // Unless it still has delegates running (mesa task 1359): they
                 // run inside its process, so stopping it would kill them before
                 // they post their results. The id stays on the row and a later
-                // listen tries again; the take is still the one-shot, and only
-                // of the very id whose delegates were probed.
+                // listen tries again (a pushed agent listens only once, so the
+                // server's recycle tick tries again too, naru task 2682); the
+                // take is still the one-shot, and only of the very id whose
+                // delegates were probed.
                 if let Some(prev) = store.live_predecessor(session.id)?
                     && live::running_delegates(&prev).is_empty()
                     && store.take_live_predecessor_if(session.id, &prev)?
@@ -7576,6 +7578,23 @@ fn run_live(cmd: LiveCmd) -> Result<()> {
                         session.id
                     );
                 }
+            }
+            // Naru task 2682: a `naru run` agent is pushed every turn and
+            // result, so a lease-carrying listen has nothing to wait for. It
+            // says so and exits at once, which also spares the idle agent the
+            // paid request a waiting listen's `null` costs.
+            if lease.is_some()
+                && live::run_job_of(store.get_live_session(session.id)?.agent_id.as_deref())
+                    .is_some()
+                && crate::core::env::var("LIVE_PUSH").as_deref() != Some("off")
+            {
+                print_json(&serde_json::json!({
+                    "kind": "pushed",
+                    "text": "Turns and results are pushed to you as [live turn] and [live result] \
+                             messages. Do not run listen again in this conversation: end your \
+                             turn and wait."
+                }));
+                return Ok(());
             }
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait);
             loop {

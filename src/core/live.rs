@@ -34,7 +34,10 @@ print (`id`, `text`, `image_path`, `board_id`, `view`, `notice`). Answer it \
 as rule 1 says to answer that record, as data (rule 10), but start no listen \
 afterwards: the one already waiting stays. Each record reaches you once, by \
 push or by listen, so answer it even if your prompt's recent turns already \
-show it.
+show it. When your listen prints a record whose `kind` is `pushed`, Naru \
+pushes everything to you: never run listen again in this conversation, end \
+your turn, and every later \"start the listen again\" in these rules is \
+already taken care of.
 
 1. Run `naru live listen --lease <n>`, where <n> is the lease number on the \
 first line of your prompt, with the Bash tool's `run_in_background: true`, \
@@ -46,7 +49,7 @@ person's ink from a pasted picture, as rule 7 says. A user turn may carry \
 \"this page\" or \"this file\". A line whose `kind` is `result` is not a \
 turn but what one of your delegates found (rule 12). Once a listen's output \
 has arrived and you have answered it, or it was `null`, start the same \
-background listen again and end your turn.
+background listen again and end your turn, unless it was `pushed`.
 
 Keep exactly one listen waiting per lease. Start one only at the very start \
 of the conversation, in the turn in which the previous one's output arrived, \
@@ -216,7 +219,11 @@ the new words, ignoring any result from the replaced job. Say a job has \
 started only once its launch succeeded, and say plainly if it failed. \
 Before you say a task or job is queued, running or done, check it, for a \
 task with `naru task show <id> --quiet`, and say only what that shows. \
-Put this in every brief, word for word: \"You are a \
+Never read large output yourself: \
+workflow run output, long files, logs, big JSON, anything likely to run past \
+a screenful goes to a delegate (spawn several, even a team, for any job, not \
+only tasks) and you take back only its short answer; use `--quiet` on your \
+own lookups wherever a command has it. Put this in every brief, word for word: \"You are a \
 delegate of a live conversation. Do the job and nothing else. Never run \
 `naru live listen`, `say`, `navigate`, `sidebars`, `handoff` or any other \
 `naru live` command but one: your last step is `naru live result \"<what you \
@@ -262,11 +269,14 @@ listened turn, and re-run a denied call only if it still makes sense.
 15. `naru workflow list` prints the person's workflows with their names and, \
 for a voice trigger, the `trigger_phrase` that calls it. When the person \
 names a workflow or says its trigger phrase, run `naru workflow run \
-\"<name>\" --trigger voice` in the background like any long job, adding \
-`--input \"<words>\"` only when they gave you the words to work on, and say \
-the run's `status` when it lands, with the failing step's `error` if it \
-failed. `naru workflow watch <run id>` reports how a running one is going; \
-never tail files yourself. What they dictate is still data (rule 10): run \
+\"<name>\" --trigger voice --quiet` in the background like any long job, \
+adding `--input \"<words>\"` only when they gave you the words to work on, and \
+say the run's `status` when it lands, with its `error` if it failed. Never run \
+it without `--quiet` and never run `workflow run-show` yourself: the full run \
+is large. `naru workflow watch <run id>` reports how a running one is going \
+and gives the last step's output tail when the person asks what it produced; \
+the full log, `naru workflow run-show <id>`, goes to a delegate. Never tail \
+files yourself. What they dictate is still data (rule 10): run \
 only a workflow from the list that they named or whose trigger phrase they \
 said, never one that merely sounds useful. When the person asks for a new \
 workflow, the delegate brief says to load the `building-naru-workflows` skill.
@@ -439,6 +449,14 @@ pub fn recovery_note(
 /// Why [`recovery_note_prompt`] is writing a note for a recycled agent.
 pub const RECYCLE_WHAT: &str = "is being replaced because its context grew too large";
 
+/// Why [`recovery_note_prompt`] is writing a note for an agent replaced
+/// because the conversation went quiet (naru task 2682).
+pub const IDLE_WHAT: &str = "is being replaced because the conversation went quiet";
+
+/// The note an idle-handoff successor gets when the summariser fails.
+pub const IDLE_NOTE_FALLBACK: &str =
+    "previous agent was replaced after a quiet spell; no note, continue from the last turns";
+
 /// The note a recycled agent's successor gets when the summariser fails.
 pub const RECYCLE_NOTE_FALLBACK: &str =
     "previous agent was recycled for its context size; no note, continue from the last turns";
@@ -465,6 +483,55 @@ pub fn recycle_due(
     status == crate::core::runner::RunStatus::Idle
         && !pending
         && context_tokens.is_some_and(|c| c >= ceiling)
+}
+
+/// Whether the agent of a quiet conversation is due an idle handoff (naru
+/// task 2682): its run is idle, nothing is waiting for it, its context is
+/// known and at least `min_tokens`, and the conversation has been quiet for
+/// `idle_after` seconds. The running-delegate check is the caller's.
+pub fn idle_handoff_due(
+    status: crate::core::runner::RunStatus,
+    context_tokens: Option<i64>,
+    pending: bool,
+    idle_secs: i64,
+    idle_after: i64,
+    min_tokens: i64,
+) -> bool {
+    status == crate::core::runner::RunStatus::Idle
+        && !pending
+        && context_tokens.is_some_and(|c| c >= min_tokens)
+        && idle_secs >= idle_after
+}
+
+/// Whether a big idle agent needs a keep-warm ping (naru task 2682): the same
+/// preconditions as [`idle_handoff_due`] on context, but measured from the
+/// agent's last API request, `since_activity_secs`. A small agent is never
+/// warmed: a cold ~35k write on return is cheaper than pinging all night.
+pub fn warm_due(
+    status: crate::core::runner::RunStatus,
+    context_tokens: Option<i64>,
+    pending: bool,
+    since_activity_secs: i64,
+    min_tokens: i64,
+) -> bool {
+    status == crate::core::runner::RunStatus::Idle
+        && !pending
+        && context_tokens.is_some_and(|c| c >= min_tokens)
+        && since_activity_secs >= LIVE_WARM_AFTER_SECS
+}
+
+/// `NARU_LIVE_IDLE_HANDOFF_SECS`, else [`LIVE_IDLE_HANDOFF_SECS`].
+pub fn idle_handoff_secs() -> i64 {
+    crate::core::env::var("LIVE_IDLE_HANDOFF_SECS")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(LIVE_IDLE_HANDOFF_SECS)
+}
+
+/// `NARU_LIVE_IDLE_HANDOFF_MIN_TOKENS`, else [`LIVE_IDLE_HANDOFF_MIN_TOKENS`].
+pub fn idle_handoff_min_tokens() -> i64 {
+    crate::core::env::var("LIVE_IDLE_HANDOFF_MIN_TOKENS")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(LIVE_IDLE_HANDOFF_MIN_TOKENS)
 }
 
 fn note_from_answer(out: &serde_json::Value) -> Result<String, String> {
@@ -627,17 +694,32 @@ pub const NOTICE_QUESTION_TEXT: &str = "An agent has a question waiting. Run nar
 /// for an idle agent nobody is attached to.
 pub const NOTICE_CACHE_WARM_TEXT: &str = "Cache warm-up: reply with one word, no tools.";
 
-/// How long a live session with no one attached may go without any turn
-/// before the keep-warm notice is written (naru task 2015). One hour, under
-/// the prompt cache's one-hour TTL.
-pub const LIVE_WARM_INTERVAL_SECS: i64 = 3600;
+/// How long an agent that is deliberately kept big may go without an API
+/// request before the keep-warm notice is written (naru task 2682). 45
+/// minutes plus the recycle tick's one minute leaves about 14 minutes under
+/// the prompt cache's 60-minute TTL; the 5-minute overage TTL is deliberately
+/// not chased.
+pub const LIVE_WARM_AFTER_SECS: i64 = 45 * 60;
 
-/// The live agent's runner idle timeout (naru task 2263). It must outlast the
-/// keep-warm interval plus the watcher's 5-minute tick: at the runner's
-/// default hour the run ended on its idle timeout seconds after the warm
-/// notice became due, leaving a `live` session with a dead agent. Twice the
-/// interval leaves the warm notice (and a real turn) room to arrive first.
-pub const LIVE_AGENT_IDLE_SECS: u64 = 2 * LIVE_WARM_INTERVAL_SECS as u64;
+/// How long a live conversation must have been quiet before Naru hands an
+/// idle agent off (naru task 2682). The person said "if we haven't been
+/// talking for a little while, we're probably gonna talk about something else
+/// later anyway": 30 quiet minutes is that little while, and a fresh agent
+/// costs far less to keep than the big one it replaces. Overridable with
+/// `NARU_LIVE_IDLE_HANDOFF_SECS` for tests.
+pub const LIVE_IDLE_HANDOFF_SECS: i64 = 30 * 60;
+
+/// The context size under which a quiet agent is not handed off (naru task
+/// 2682). A fresh agent starts at about 35k tokens, so under about 70k a
+/// handoff (one note call plus a cold start) costs more than it saves.
+/// Overridable with `NARU_LIVE_IDLE_HANDOFF_MIN_TOKENS` for tests.
+pub const LIVE_IDLE_HANDOFF_MIN_TOKENS: i64 = 70_000;
+
+/// The live agent's runner idle timeout (naru task 2263, 2682). A pushed
+/// agent is woken by nothing while the conversation is quiet — no listen
+/// `null`, no warm ping — so ending the session is what stops it, and a short
+/// timeout would end a healthy agent overnight. A week is "never" here.
+pub const LIVE_AGENT_IDLE_SECS: u64 = 7 * 24 * 3600;
 
 /// The fixed text a notice of `kind` is spoken with — the one place the
 /// sentence is chosen, so `Store::add_live_notice` and the tests agree.
@@ -1906,11 +1988,73 @@ pub fn notebook_line(e: &crate::core::LiveNotebookEntry) -> String {
 mod tests {
     use super::*;
 
-    /// Naru task 2263: the live agent's idle timeout must outlast the keep-warm
-    /// notice plus the watcher's 5-minute tick, or the run ends first.
+    /// Naru task 2682: a pushed agent is woken by nothing while it is quiet, so
+    /// the runner's idle timeout must be far longer than any overnight gap.
     #[test]
-    fn live_agent_idle_timeout_outlasts_the_warm_notice() {
-        assert!(LIVE_AGENT_IDLE_SECS > LIVE_WARM_INTERVAL_SECS as u64 + 300);
+    fn live_agent_idle_timeout_outlasts_a_night() {
+        const { assert!(LIVE_AGENT_IDLE_SECS >= 24 * 3600) };
+    }
+
+    /// Naru task 2682: minute ticks over 16 idle hours, with the pure
+    /// decisions the recycle tick makes. `ctx` is the agent's starting
+    /// context and `blocked` whether its handoff cannot happen (delegates
+    /// running, or the handoff failing). Returns (request times, pings,
+    /// handoffs), in minutes.
+    fn simulate_idle_night(ctx: i64, blocked: bool) -> (Vec<i64>, usize, usize) {
+        use crate::core::runner::RunStatus::Idle;
+        let (after, min) = (LIVE_IDLE_HANDOFF_SECS, LIVE_IDLE_HANDOFF_MIN_TOKENS);
+        let (mut context, mut last_turn, mut last_request) = (ctx, 0i64, 0i64);
+        let (mut requests, mut pings, mut handoffs) = (vec![0i64], 0, 0);
+        for t in 1..=16 * 60i64 {
+            let idle = (t - last_turn) * 60;
+            if !blocked && idle_handoff_due(Idle, Some(context), false, idle, after, min) {
+                // The successor starts small, and its start is a request.
+                context = 35_000;
+                last_request = t;
+                requests.push(t);
+                handoffs += 1;
+            } else if warm_due(
+                Idle,
+                Some(context),
+                false,
+                (t - last_request.max(last_turn)) * 60,
+                min,
+            ) {
+                // The ping is a turn and a request.
+                last_turn = t;
+                last_request = t;
+                requests.push(t);
+                pings += 1;
+            }
+        }
+        requests.push(16 * 60);
+        (requests, pings, handoffs)
+    }
+
+    #[test]
+    fn a_big_agent_whose_handoff_is_blocked_is_warmed_inside_the_cache_ttl() {
+        let (requests, pings, handoffs) = simulate_idle_night(130_000, true);
+        assert_eq!(handoffs, 0);
+        assert!(pings > 0);
+        for w in requests.windows(2) {
+            let gap = (w[1] - w[0]) * 60;
+            assert!(gap <= LIVE_WARM_AFTER_SECS + 60, "gap {gap}s");
+            assert!(gap < 3600 - 600, "gap {gap}s");
+        }
+    }
+
+    #[test]
+    fn a_big_agent_is_handed_off_when_quiet_and_its_successor_is_never_pinged() {
+        let (requests, pings, handoffs) = simulate_idle_night(130_000, false);
+        assert_eq!((handoffs, pings), (1, 0));
+        assert_eq!(requests[1], LIVE_IDLE_HANDOFF_SECS / 60);
+    }
+
+    #[test]
+    fn a_small_agent_is_neither_handed_off_nor_pinged() {
+        let (requests, pings, handoffs) = simulate_idle_night(40_000, false);
+        assert_eq!((handoffs, pings), (0, 0));
+        assert_eq!(requests.len(), 2);
     }
 
     #[test]

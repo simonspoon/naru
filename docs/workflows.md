@@ -901,9 +901,13 @@ interval's run.
 `naru-live`'s agent loop gets **rule 15** (appended, nothing renumbered): when
 the person asks to run a workflow **by its name**, or says its trigger phrase,
 the agent finds it with `naru workflow list` and runs
-`naru workflow run "<name>" --trigger voice` in the background — the way it runs
-any long job — and says the result when it lands (the printed run has `status`,
-`error` and every step's `output`). A run is the person's own request, but
+`naru workflow run "<name>" --trigger voice --quiet` in the background — the way
+it runs any long job — and says the result when it lands. `--quiet` prints the
+run without `steps` and `input`, so the agent's context gets `status` and
+`error` (which names the failing step, `<step title>: <message>`) and not
+every step's `output` (naru task 2682); `naru workflow watch <run id>` gives the
+last step's output tail when the person asks what it produced, and the full
+log (`workflow run-show`) goes to a delegate. A run is the person's own request, but
 dictation is still **data** (rule 10): it runs only a workflow they named or
 whose phrase they said, never one that merely sounds useful, and never a spoken
 sentence passed as a name it has not found in the list.

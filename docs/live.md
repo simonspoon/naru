@@ -111,7 +111,8 @@ A live session is a loop the **agent** runs, not one Naru drives. Since naru
 task 1886 the agent is a `claude -p --input-format stream-json` session held
 open by `core::runner` (a `naru run` job, `docs/runner.md`), started through the
 `live-agent` template — no longer a `claude --bg` agent — and it still pulls
-with `listen` exactly as below:
+with `listen` exactly as below, except that a `run:<job>` agent is pushed
+everything and runs `listen` once at most (naru task 2682, "Push delivery"):
 
 1. `mesa live listen --lease <n>` — the agent asks for the next thing the
    person said, and since mesa task 1156 it runs the command **in the
@@ -419,8 +420,10 @@ from the web`) through `live::handoff_session`, the same core function as
 `naru live handoff`. 404 `not_found` with no live session, 409 `conflict` while the agent
 has not ended, 503 `unavailable` and an untouched session when the successor cannot start.
 The live agent's run is started with `idle_timeout_secs` =
-`live::LIVE_AGENT_IDLE_SECS` (7200), above the hourly keep-warm interval plus
-the watcher's tick, so its own idle timeout no longer wins that race.
+`live::LIVE_AGENT_IDLE_SECS` (seven days). Nothing wakes an idle pushed agent
+any more (no `listen` `null`, no warm ping), so ending the session is what
+stops it, and a two-hour timeout would end a healthy agent overnight
+(naru task 2682; it was 7200, above the old hourly keep-warm interval, task 2263).
 
 `state: "blocked"` alone is **not** the signal (mesa task 1293). Upstream it
 is one `requires_action` bucket covering five distinct reasons, of which only
@@ -469,15 +472,26 @@ merged from that same poll, never the `turns` state a later render sets:
   span, the same rule. A page that loads with the run already over sees that
   as the edge once; the server's dedupe covers any repeat. Its fixed sentence
   tells the person to end the conversation and start a new one.
-- **`cache-warm`** (naru task 2015) is written by the *server*, not a page:
-  an always-on tick (5 min, `MESA_WATCH_LIVE_WARM_TICK_MS`) calls
-  `Store::add_live_warm_if_due` on the live session. It writes one notice turn
-  when no client holds the speaker claim (null after 10 s), the agent is idle
-  (`working_since` null) and the newest turn of any kind is an hour old, so the
-  prompt cache stays warm while nobody is attached. It is a `user`-role turn
-  with `notice: cache-warm` (only those reach the agent's `listen`), stamped
-  `played_at` on insert; the agent answers with a one-word `say` (rule 17),
-  which `add_live_turn` also stamps played so no later browser speaks it. Its own turn counts as the newest, so it repeats hourly at most.
+- **`cache-warm`** (naru task 2015, reworked by 2682) is written by the
+  *server*, not a page, and only as a fallback for a big agent that is
+  deliberately kept: the recycle tick (below, every minute) calls
+  `Store::add_live_warm` when `live::warm_due` holds. That is: the run is
+  idle, nothing is waiting for it, its context is at least
+  `live::LIVE_IDLE_HANDOFF_MIN_TOKENS` (70000) and **45 minutes**
+  (`live::LIVE_WARM_AFTER_SECS`, ~14 minutes under the 60-minute prompt-cache
+  TTL with the tick) have passed since the later of the agent transcript's last
+  write (`cc::transcript_modified`, its last API request) and the newest turn,
+  in wall-clock seconds. It only fires when the idle handoff is due but
+  blocked (delegates running inside the agent, or the handoff failing): an
+  agent under 70000 tokens is **never** warmed, since a cold ~35k write on
+  return (~$0.72) is cheaper than pinging all night, and pings cannot be kept
+  on time while the Mac sleeps anyway. `add_live_warm` keeps the session
+  guards: status `live`, no client holds the speaker claim (null after 10 s),
+  `working_since` null. It is a `user`-role turn with `notice: cache-warm`,
+  stamped `played_at` on insert; the agent answers with a one-word `say`
+  (rule 17), which `add_live_turn` also stamps played so no later browser
+  speaks it. The ping's own turn and the agent's reply move both clocks, so it
+  repeats at most every 45 minutes.
 
 - **`permission`** is posted on the **rising edge** of `blocked` — this poll
   non-null where the previous one was null — and no `permission` notice
@@ -681,9 +695,9 @@ measured for this task ran to 267k, 210k and 160k context tokens over 17.5,
 handoff has a backstop that runs whether or not the agent wants it.
 
 `live_recycle_tick` in `src/api.rs` runs every minute in every `serve`, with
-no flag, like the keep-warm tick (`NARU_WATCH_LIVE_RECYCLE_TICK_MS` is the
-test seam). It does nothing unless **all** of these hold for the current
-session (`live::recycle_due`, pure, plus a delegate probe):
+no flag (`NARU_WATCH_LIVE_RECYCLE_TICK_MS` is the test seam). It does nothing
+unless **all** of these hold for the current session (`live::recycle_due` and
+`live::idle_handoff_due`, pure, plus a delegate probe):
 
 - the agent is a `run:<job>` receipt whose run is `idle` with nothing queued
   in its inbox (`runner::busy_in`): between turns, not in the middle of one;
@@ -693,7 +707,29 @@ session (`live::recycle_due`, pure, plus a delegate probe):
 - its occupied context (`cc::session_pulse`, the figure `live context`
   reports) has reached **`live::recycle_tokens`**, a fifth above
   `live.handoff-tokens`: 180000 by default. The margin gives the agent's own
-  handoff, which has a better note, the first chance.
+  handoff, which has a better note, the first chance. **Or**, the idle
+  handoff (naru task 2682): the conversation has been quiet for
+  **`live::LIVE_IDLE_HANDOFF_SECS`** (30 minutes, wall clock from the newest
+  turn of any kind, or the session start, in stored timestamps, so a sleeping
+  Mac counts) and the context is at least
+  **`live::LIVE_IDLE_HANDOFF_MIN_TOKENS`** (70000). The person's own words
+  were "if we haven't been talking for a little while, we're probably gonna
+  talk about something else later anyway". A fresh agent is about 35k tokens,
+  so under about 70k a handoff costs more than it saves. The cost reasoning
+  (real session: 17 hours, $30, $18.6 of it idle overnight): a 130k context
+  kept warm costs about $0.39 per 50 minutes, one handoff about $0.8 and then
+  nothing, because the small successor is never warmed. The note prompt says
+  `live::IDLE_WHAT` ("the conversation went quiet", fallback
+  `live::IDLE_NOTE_FALLBACK`) and the `live-recycle:` log line names the
+  reason (`ceiling N` or `quiet for N min`). The quiet clock is the later of
+  the newest turn and the agent transcript's last write, and the agent must
+  have been spoken to (`Store::live_agent_heard`: a non-notice user turn
+  stamped with it), so a successor is never handed off again on its
+  predecessor's quiet. An open page does not hold it back: an attached but
+  silent client is still a quiet conversation. A legacy (non-`run:`) agent
+  gets neither the idle handoff nor, any more, the warm ping; its waiting
+  `listen` wakes it inside the hour as before. The seams are
+  `NARU_LIVE_IDLE_HANDOFF_SECS` and `NARU_LIVE_IDLE_HANDOFF_MIN_TOKENS`.
 
 When they all hold, Naru writes the note the agent did not write. It uses the
 crash-recovery summariser (`live::recovery_note_prompt` with
@@ -713,6 +749,14 @@ turns and its page, so the person loses nothing. The successor starts small,
 so it is not recycled again until it has grown past the ceiling too. There is
 no inbox item: a live conversation has no task to file one against, and the
 person is the one talking to it.
+
+The same tick does two more small things (naru task 2682). When no handoff
+happened this pass, it writes the `cache-warm` notice if `live::warm_due`
+holds (the bullet under the notices above). And if the session still names a
+predecessor whose delegates have all finished, it takes it
+(`take_live_predecessor_if`) and stops it, the same one-shot the
+lease-carrying `listen` does: a pushed agent runs `listen` only once, so
+"a later listen tries again" no longer happens.
 
 ### What the person sees
 
@@ -2884,7 +2928,7 @@ flag is an unknown argument, exit 2, exactly as on `turns`.
 | `live start [PROJECT]` | `--project P` (id **or** name), `--no-agent` to skip the spawn | the started `LiveSession` |
 | `live stop` | — | the ended `LiveSession` |
 | `live status` (alias `get`, `show`) | — | the live `LiveSession` (with `ambient`, the host's last report, and `ambient_request`, the pending ask), or `null` |
-| `live listen` | `--wait <SECONDS>` (default 3000, `0` = poll once), `--lease <N>` (a stale lease is `conflict`; a matching one also stops the predecessor, once) | the next undelivered user `LiveTurn`, or `null` |
+| `live listen` | `--wait <SECONDS>` (default 3000, `0` = poll once), `--lease <N>` (a stale lease is `conflict`; a matching one also stops the predecessor, once; for a pushed `run:` agent it prints `{"kind":"pushed",...}` and exits at once, naru task 2682) | the next undelivered user `LiveTurn`, or `null` |
 | `live say <TEXT>…` | trailing var arg, like `inbox add` — put every flag **before** the message; `--lease <N>` | the `LiveTurn` |
 | `live navigate <ROUTE>` | `--say <TEXT>`; without it the turn is a pure action and says nothing; `--lease <N>` | the `LiveTurn` |
 | `live sidebars <collapse\|expand>` | `--say <TEXT>`, same rule; takes no route; `--lease <N>` | the `LiveTurn` |
@@ -4435,6 +4479,15 @@ Exactly-once: the message is queued under a name derived from the record id
 finds the name already queued or in `inbox/delivered/`, skips the write and
 stamps it. Nothing is lost (the db queue is durable) and nothing is sent twice.
 Only a `run:<job>` agent is pushed to; a legacy bare job id keeps `listen`.
+Since naru task 2682 a pushed agent does not even keep one: its lease-carrying
+`naru live listen` (the prompt still starts one) prints
+`{"kind":"pushed","text":"..."}` and exits 0 at once, after the usual entry
+side effects (listener claim, rest wait, lease check, predecessor stop), and
+the prompt tells the agent to never listen again and to end its turn. A
+`listen` without a lease, for a legacy agent, or with `NARU_LIVE_PUSH=off` polls
+as before. This is what removes the idle cost: a waiting listen's `null` every
+50 minutes was a paid request on the whole context, and the Bash tool's
+two-hour background limit killed and restarted it.
 `listen` and the barge-in hook remain, claiming through their own
 one-statement stamps: if one of them wins a turn in the instant after a push
 queued it, the still-queued message is removed — but if the runner had already moved it to `delivered/`, that one turn reaches the agent twice (a window of milliseconds, only when a fallback `listen` runs beside push). Each pass also closes the working span once the run is idle (naru task 2165, "Whether the agent is working" above). Check: `scripts/live-push-check.sh`.

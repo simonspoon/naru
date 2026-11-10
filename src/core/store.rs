@@ -9263,15 +9263,43 @@ impl Store {
         Ok((self.get_live_turn(id)?, true))
     }
 
-    /// Writes the hourly keep-warm notice (naru task 2015) when it is due:
-    /// the session is `live`, no client holds the speaker claim (the claim is
-    /// derived and reads `NULL` ten seconds after the last refresh, so this
-    /// means nobody is attached), the agent is idle (`working_since` null) and
-    /// the newest turn of any kind — this notice included, which is what
-    /// stops it repeating — is at least `LIVE_WARM_INTERVAL_SECS` old on
-    /// SQLite's clock. Returns the turn, or `None` when nothing was due. The
-    /// turn is stamped played at once: nobody is there to hear it.
-    pub fn add_live_warm_if_due(&mut self, session_id: i64) -> Result<Option<LiveTurn>> {
+    /// Wall-clock seconds since the newest turn of any kind of the session,
+    /// or since it started when it has none (naru task 2682), on SQLite's
+    /// clock — stored timestamps, so a sleeping Mac still counts.
+    pub fn live_quiet_secs(&self, session_id: i64) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT CAST(strftime('%s', 'now') AS INTEGER) - \
+                    CAST(COALESCE(MAX(strftime('%s', created_at)), strftime('%s', \
+                    (SELECT started_at FROM live_sessions WHERE id = ?1))) AS INTEGER) \
+             FROM live_turns WHERE session_id = ?1",
+            [session_id],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Whether the person has said anything to `agent_id` in this session:
+    /// a user turn that is not a notice, stamped with that agent (naru task
+    /// 2682). An idle handoff needs it, so a successor nobody has spoken to
+    /// is never handed off again however large it started.
+    pub fn live_agent_heard(&self, session_id: i64, agent_id: &str) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM live_turns WHERE session_id = ?1 AND agent_id = ?2 \
+                    AND role = 'user' AND notice IS NULL)",
+            (session_id, agent_id),
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Writes the keep-warm notice (naru task 2015, 2682) when the session
+    /// can take it: it is `live`, no client holds the speaker claim (the claim
+    /// is derived and reads `NULL` ten seconds after the last refresh, so this
+    /// means nobody is attached) and the agent is idle (`working_since`
+    /// null). Whether a ping is *due* is the caller's call
+    /// (`live::warm_due`); the notice itself, being a turn, is what stops the
+    /// next pass repeating it. Returns the turn, or `None` when the session
+    /// cannot take it. The turn is stamped played at once: nobody is there to
+    /// hear it.
+    pub fn add_live_warm(&mut self, session_id: i64) -> Result<Option<LiveTurn>> {
         let session = match self
             .conn
             .query_row(
@@ -9288,17 +9316,6 @@ impl Store {
             || session.speaker.is_some()
             || session.working_since.is_some()
         {
-            return Ok(None);
-        }
-        let due: bool = self.conn.query_row(
-            "SELECT CAST(COALESCE(MAX(strftime('%s', created_at)), strftime('%s', \
-                    (SELECT started_at FROM live_sessions WHERE id = ?1))) AS INTEGER) \
-                    <= CAST(strftime('%s', 'now') AS INTEGER) - ?2 \
-             FROM live_turns WHERE session_id = ?1",
-            (session_id, live::LIVE_WARM_INTERVAL_SECS),
-            |r| r.get(0),
-        )?;
-        if !due {
             return Ok(None);
         }
         self.conn.execute(
@@ -20522,27 +20539,13 @@ mod tests {
     }
 
     #[test]
-    fn add_live_warm_if_due_writes_one_hourly_turn_only_when_idle_and_unattended() {
+    fn add_live_warm_writes_a_played_turn_only_when_idle_and_unattended() {
         let (mut store, _dir) = temp_store();
         let session = store.start_live_session(None).unwrap();
         let id = session.id;
-        let backdate = |store: &Store, mins: i64| {
-            store
-                .conn
-                .execute_batch(&format!(
-                    "UPDATE live_turns SET created_at = datetime('now', '-{mins} minutes'); \
-                     UPDATE live_sessions SET started_at = datetime('now', '-{mins} minutes')"
-                ))
-                .unwrap();
-        };
-        // Fresh session: nothing.
-        assert!(store.add_live_warm_if_due(id).unwrap().is_none());
-        backdate(&store, 30);
-        assert!(store.add_live_warm_if_due(id).unwrap().is_none());
-        backdate(&store, 61);
         // Attached: nothing.
         store.claim_live_speaker(id, "c1").unwrap();
-        assert!(store.add_live_warm_if_due(id).unwrap().is_none());
+        assert!(store.add_live_warm(id).unwrap().is_none());
         store.release_live_speaker(id, "c1").unwrap();
         // Working: nothing.
         store
@@ -20552,7 +20555,7 @@ mod tests {
                 [id],
             )
             .unwrap();
-        assert!(store.add_live_warm_if_due(id).unwrap().is_none());
+        assert!(store.add_live_warm(id).unwrap().is_none());
         store
             .conn
             .execute(
@@ -20560,12 +20563,11 @@ mod tests {
                 [id],
             )
             .unwrap();
-        // Due: exactly one, already played; a second call writes nothing.
-        let turn = store.add_live_warm_if_due(id).unwrap().unwrap();
+        // Idle and unattended: a played turn the agent's `listen` is handed,
+        // and its reply is born played.
+        let turn = store.add_live_warm(id).unwrap().unwrap();
         assert_eq!(turn.notice, Some(LiveNotice::CacheWarm));
         assert!(turn.played_at.is_some());
-        assert!(store.add_live_warm_if_due(id).unwrap().is_none());
-        // The agent's `listen` is handed it, and its reply is born played.
         let heard = store.next_user_turn(id).unwrap().unwrap();
         assert_eq!(heard.id, turn.id);
         let reply = store
@@ -20573,9 +20575,52 @@ mod tests {
             .unwrap();
         assert!(reply.played_at.is_some());
         // Ended: nothing.
-        backdate(&store, 61);
         store.end_live_session(id).unwrap();
-        assert!(store.add_live_warm_if_due(id).unwrap().is_none());
+        assert!(store.add_live_warm(id).unwrap().is_none());
+    }
+
+    #[test]
+    fn live_quiet_secs_counts_from_the_newest_turn_or_the_start() {
+        let (mut store, _dir) = temp_store();
+        let id = store.start_live_session(None).unwrap().id;
+        store
+            .conn
+            .execute_batch("UPDATE live_sessions SET started_at = datetime('now', '-50 minutes')")
+            .unwrap();
+        let q = store.live_quiet_secs(id).unwrap();
+        assert!((3000..3010).contains(&q), "{q}");
+        store
+            .add_live_turn(id, LiveRole::User, "hi", None, None)
+            .unwrap();
+        store
+            .conn
+            .execute_batch("UPDATE live_turns SET created_at = datetime('now', '-10 minutes')")
+            .unwrap();
+        let q = store.live_quiet_secs(id).unwrap();
+        assert!((600..610).contains(&q), "{q}");
+    }
+
+    /// Naru task 2682: only a turn the person said to *this* agent counts, so
+    /// a handoff's successor starts unheard and a notice never counts.
+    #[test]
+    fn live_agent_heard_needs_a_person_turn_stamped_with_that_agent() {
+        let (mut store, _dir) = temp_store();
+        let id = store.start_live_session(None).unwrap().id;
+        store
+            .conn
+            .execute(
+                "UPDATE live_sessions SET agent_id = 'run:a' WHERE id = ?1",
+                [id],
+            )
+            .unwrap();
+        assert!(!store.live_agent_heard(id, "run:a").unwrap());
+        store.add_live_warm(id).unwrap().unwrap();
+        assert!(!store.live_agent_heard(id, "run:a").unwrap());
+        store
+            .add_live_turn(id, LiveRole::User, "hi", None, None)
+            .unwrap();
+        assert!(store.live_agent_heard(id, "run:a").unwrap());
+        assert!(!store.live_agent_heard(id, "run:b").unwrap());
     }
 
     /// With the agent waiting (`working_since` null) the span is the whole

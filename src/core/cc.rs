@@ -5303,6 +5303,16 @@ pub(crate) fn find_transcript(session_id: &str) -> Option<PathBuf> {
     None
 }
 
+/// The last write to `session_id`'s transcript, which is the agent's last API
+/// request (naru task 2682). `None` when the transcript is not found or has no
+/// readable mtime.
+pub fn transcript_modified(session_id: &str) -> Option<std::time::SystemTime> {
+    fs::metadata(find_transcript(session_id)?)
+        .ok()?
+        .modified()
+        .ok()
+}
+
 /// The last `window` bytes of `path` as text, plus whether the window
 /// actually cut anything. A cut lands mid-line, so the first (partial) line is
 /// dropped — losing at most one turn that a caller was told is truncated
