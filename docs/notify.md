@@ -20,6 +20,17 @@ Naru=<url>"] -- <message>`. The `--` means a message starting with `-` is
 still the message. `MESA_VOX_BIN` / `NARU_VOX_BIN` name a different binary
 (the test seam, as `MESA_LOKI_BIN` is for `live look`).
 
+## Dev and sandbox runs never notify
+
+When `NARU_HOME` (or `MESA_HOME`) is set to anything but the account's real
+`~/.naru` / `~/.mesa` — the dev environment (`docs/dev-env.md`), a throwaway
+`serve`, a temp home — `notify::send` (so `naru notify`, workflow `notify` nodes
+and approval gates, the agent-stalled ping) does **not** call `vox`: it logs
+`naru: notification skipped …` to stderr and returns `{"sent": false,
+"skipped": true, …}`. Setting `NARU_VOX_BIN` (a stub or a real binary) opts back
+in so QA can exercise the path on purpose. The real install is unchanged.
+(naru task 2696)
+
 ## `--open` and the `/open` page
 
 Telegram only accepts `http`, `https` and `tg` URLs in a button, so a button

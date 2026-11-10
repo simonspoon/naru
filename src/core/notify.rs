@@ -34,6 +34,22 @@ fn vox_bin() -> String {
     crate::core::env::var("VOX_BIN").unwrap_or_else(|| "vox".to_string())
 }
 
+/// Whether `NARU_HOME` (or `MESA_HOME`) is set to somewhere other than the
+/// account's real naru home (`~/.naru`, `~/.mesa`): a dev environment, a
+/// sandbox or a temp home. Unset means the real install.
+fn sandboxed_home() -> bool {
+    let Some(dir) = crate::core::env::var("HOME").filter(|d| !d.is_empty()) else {
+        return false;
+    };
+    let Some(base) = directories::BaseDirs::new() else {
+        return true;
+    };
+    let canon = |p: &std::path::Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let dir = canon(std::path::Path::new(&dir));
+    let home = canon(base.home_dir());
+    dir != home.join(".naru") && dir != home.join(".mesa")
+}
+
 /// The one route rule for `--open` and `GET /open/<route>`: non-empty, at
 /// most [`ROUTE_MAX`] characters, and only `[A-Za-z0-9/_-]`, so a route can
 /// neither inject HTML nor smuggle a different URL scheme.
@@ -127,6 +143,21 @@ pub fn send(
         }
     };
 
+    // A dev environment, sandbox or temp home must never reach the person's
+    // phone either (naru task 2696); an explicit `VOX_BIN` opts back in.
+    if sandboxed_home() && crate::core::env::var("VOX_BIN").is_none() {
+        eprintln!(
+            "naru: notification skipped (NARU_HOME is not the real home; set NARU_VOX_BIN to send): {message}"
+        );
+        return Ok(json!({
+            "sent": false,
+            "skipped": true,
+            "message_id": Value::Null,
+            "chat_id": Value::Null,
+            "open_url": open_url,
+        }));
+    }
+
     // Unit tests must never reach the person's phone: without an explicit
     // vox override (a stub), `cargo test` sends nothing (naru task 2097).
     #[cfg(test)]
@@ -201,12 +232,84 @@ mod tests {
 
     #[test]
     fn send_is_stubbed_under_test_without_a_vox_override() {
+        let _lock = crate::core::attachments::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if crate::core::env::var("VOX_BIN").is_some() {
             return;
+        }
+        let home = (std::env::var("NARU_HOME"), std::env::var("MESA_HOME"));
+        // SAFETY: ENV_LOCK gives this test exclusive access to the env vars.
+        unsafe {
+            std::env::remove_var("NARU_HOME");
+            std::env::remove_var("MESA_HOME");
         }
         let v = send("x", None, None, None).unwrap();
         assert_eq!(v["sent"], false);
         assert_eq!(v["stubbed"], true);
+        unsafe {
+            if let Ok(h) = home.0 {
+                std::env::set_var("NARU_HOME", h);
+            }
+            if let Ok(h) = home.1 {
+                std::env::set_var("MESA_HOME", h);
+            }
+        }
+    }
+
+    #[test]
+    fn sandboxed_home_skips_vox_but_an_override_sends() {
+        use crate::core::attachments::ENV_LOCK;
+        use std::os::unix::fs::PermissionsExt;
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("naru-notify-2696-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("calls.log");
+        let stub = dir.join("vox");
+        std::fs::write(
+            &stub,
+            format!(
+                "#!/bin/sh\necho call >> {}\necho '{{\"message_id\":1,\"chat_id\":2}}'\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let old_path = std::env::var("PATH").unwrap_or_default();
+        let real = directories::BaseDirs::new()
+            .unwrap()
+            .home_dir()
+            .join(".naru");
+        // SAFETY: ENV_LOCK gives this test exclusive access to the env vars.
+        unsafe {
+            std::env::set_var("PATH", format!("{}:{old_path}", dir.display()));
+            std::env::remove_var("NARU_VOX_BIN");
+            std::env::remove_var("MESA_VOX_BIN");
+            std::env::remove_var("MESA_HOME");
+            std::env::set_var("NARU_HOME", &dir);
+        }
+        // Sandbox home: skipped, the stub on PATH is never invoked.
+        let v = send("hello", None, None, None).unwrap();
+        assert_eq!(v["skipped"], true);
+        assert_eq!(v["sent"], false);
+        assert!(!log.exists());
+        // Explicit opt-in: the stub is called.
+        unsafe { std::env::set_var("NARU_VOX_BIN", &stub) };
+        let v = send("hello", None, None, None).unwrap();
+        assert_eq!(v["sent"], true);
+        assert!(log.exists());
+        // The real home is not a sandbox.
+        unsafe {
+            std::env::remove_var("NARU_VOX_BIN");
+            std::env::set_var("NARU_HOME", &real);
+        }
+        assert!(!sandboxed_home());
+        unsafe { std::env::set_var("NARU_HOME", "") };
+        assert!(!sandboxed_home());
+        unsafe { std::env::remove_var("NARU_HOME") };
+        assert!(!sandboxed_home());
+        unsafe { std::env::set_var("PATH", old_path) };
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

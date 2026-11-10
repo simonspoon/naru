@@ -36,6 +36,10 @@ binaries too) all re-sign it ad-hoc with that identifier and the designated requ
 `identifier "com.naru.cli"`, so macOS TCC grants (e.g. ~/Documents access) survive
 updates. Homebrew installs the release file unchanged (naru task 2584).
 
+Dev and sandbox runs (any `NARU_HOME` other than the real `~/.naru`/`~/.mesa`)
+never notify the phone: `notify::send` skips `vox` and logs instead, unless
+`NARU_VOX_BIN` is set on purpose (`docs/notify.md`, naru task 2696).
+
 ## The guard hook (naru task 2094)
 
 `dev-env-guard` is a library built-in `PreToolUse` hook (`core::dev_guard`)
