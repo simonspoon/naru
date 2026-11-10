@@ -3903,6 +3903,241 @@ fn frontmatter_model_effort(body: &str) -> Option<(Option<String>, Option<String
     None
 }
 
+/// How long after a router decision its session may start and still be
+/// joined to it (naru task 2687): the spawn runs right after the decision is
+/// logged, and a `claude --bg` session's first transcript line follows within
+/// seconds.
+pub const ROUTER_JOIN_WINDOW_SECS: i64 = 600;
+/// Clock slack before a decision: a session starting this many seconds
+/// earlier still joins (both clocks are whole seconds).
+const ROUTER_JOIN_SLACK_SECS: i64 = 5;
+
+/// `naru cc router` (naru task 2687): one row per model-router decision.
+#[derive(Debug, Clone, Serialize)]
+pub struct RouterReport {
+    pub rows: Vec<RouterRow>,
+    /// Decisions in the window (= rows).
+    pub decisions: usize,
+    /// Rows joined to a cc session.
+    pub joined: usize,
+    pub since: Option<String>,
+    pub until: Option<String>,
+}
+
+/// One routed dispatch: the decision, its logged outcome, and (when joined)
+/// the session it started and how its task went. Session fields are `null`
+/// when no session joined. `review_rounds` and `verifier_verdict` are always
+/// `null`: no structured verdict is stored anywhere (`docs/model-router.md`
+/// "Telemetry").
+#[derive(Debug, Clone, Serialize)]
+pub struct RouterRow {
+    pub task_id: i64,
+    pub project_id: Option<i64>,
+    pub decided_at: String,
+    pub model: Option<String>,
+    pub reason: Option<String>,
+    pub source: Option<String>,
+    pub router_latency_ms: Option<i64>,
+    pub costly: bool,
+    /// 1 for the task's first logged decision, 2 for its first re-dispatch...
+    pub attempt: usize,
+    /// The log's outcome line for this decision (`done`|`bounced`|`failed`).
+    pub outcome: Option<String>,
+    pub outcome_status: Option<String>,
+    pub outcome_detail: Option<String>,
+    pub session_id: Option<String>,
+    pub start: Option<String>,
+    pub end: Option<String>,
+    pub duration_minutes: Option<f64>,
+    pub tokens: Option<CcTokens>,
+    pub total_tokens: Option<i64>,
+    pub est_cost_usd: Option<f64>,
+    pub models_used: Option<Vec<String>>,
+    pub agent_runs: Option<i64>,
+    /// The scorecard's two task facts for this session ([`Store::cc_task_links`]).
+    pub task_done: Option<bool>,
+    pub task_requeued: Option<bool>,
+    /// Re-queues (`in_progress` -> `todo`/`backlog`) at or after the start
+    /// and before the task's next decision.
+    pub requeues: Option<i64>,
+    /// `attempt == 1`, the task is done and nothing re-queued it.
+    pub landed_first_try: Option<bool>,
+    /// Moved out of `done` after the session ended.
+    pub reopened: Option<bool>,
+    /// Later tasks that say they follow this one up ([`Store::cc_follow_up_tasks`]).
+    pub follow_up_tasks: Option<Vec<i64>>,
+    pub review_rounds: Option<i64>,
+    pub verifier_verdict: Option<String>,
+}
+
+/// The routed-session outcome record (naru task 2687), derived on every read
+/// from the model-router log's `lines` and the cc tables; nothing is stored.
+/// A decision for task T at time t joins the earliest unused session whose
+/// first prompt links to T ([`Store::cc_task_links`]) and that starts in
+/// `[t - 5 s, t + ROUTER_JOIN_WINDOW_SECS)` and before T's next decision; its
+/// outcome is T's first outcome line in the same span. `since`/`until` bound
+/// the decision time, as the scorecard's bound a run's start.
+pub fn router(
+    store: &Store,
+    lines: &[serde_json::Value],
+    since: Option<&str>,
+    until: Option<&str>,
+) -> Result<RouterReport> {
+    let since_ts = since
+        .map(|s| parse_scorecard_bound("since", s))
+        .transpose()?;
+    let until_ts = until
+        .map(|s| parse_scorecard_bound("until", s))
+        .transpose()?;
+    let line_at = |l: &serde_json::Value| l["time"].as_str().and_then(parse_ts);
+
+    // Decisions in log order, each with its attempt and the time of the same
+    // task's next decision.
+    struct Dec<'a> {
+        line: &'a serde_json::Value,
+        task_id: i64,
+        at: i64,
+        attempt: usize,
+        next_at: Option<i64>,
+    }
+    let mut decisions: Vec<Dec> = Vec::new();
+    let mut last_of_task: HashMap<i64, usize> = HashMap::new();
+    for line in lines.iter().filter(|l| l["kind"] == "decision") {
+        let (Some(task_id), Some(at)) = (line["task_id"].as_i64(), line_at(line)) else {
+            continue;
+        };
+        let attempt = match last_of_task.get(&task_id) {
+            Some(&i) => {
+                decisions[i].next_at = Some(at);
+                decisions[i].attempt + 1
+            }
+            None => 1,
+        };
+        last_of_task.insert(task_id, decisions.len());
+        decisions.push(Dec {
+            line,
+            task_id,
+            at,
+            attempt,
+            next_at: None,
+        });
+    }
+
+    // Candidate sessions per routed task, oldest start first.
+    struct Cand {
+        start: i64,
+        sid: String,
+        link: CcTaskLink,
+        end_ts: Option<i64>,
+    }
+    let mut sessions: HashMap<i64, Vec<Cand>> = HashMap::new();
+    for (sid, link) in store.cc_task_links()? {
+        if !last_of_task.contains_key(&link.task_id) {
+            continue;
+        }
+        if let Some(s) = store.cc_session(&sid)?
+            && let Some(start) = s.start_ts
+        {
+            sessions.entry(link.task_id).or_default().push(Cand {
+                start,
+                sid,
+                link,
+                end_ts: s.end_ts,
+            });
+        }
+    }
+    for v in sessions.values_mut() {
+        v.sort_by(|a, b| (a.start, &a.sid).cmp(&(b.start, &b.sid)));
+    }
+
+    let mut used: HashSet<String> = HashSet::new();
+    let mut rows = Vec::new();
+    for d in &decisions {
+        let end = (d.at + ROUTER_JOIN_WINDOW_SECS).min(d.next_at.unwrap_or(i64::MAX));
+        let joined = sessions.get(&d.task_id).and_then(|v| {
+            v.iter().find(|c| {
+                c.start >= d.at - ROUTER_JOIN_SLACK_SECS && c.start < end && !used.contains(&c.sid)
+            })
+        });
+        if let Some(c) = joined {
+            used.insert(c.sid.clone());
+        }
+        if since_ts.is_some_and(|s| d.at < s) || until_ts.is_some_and(|u| d.at >= u) {
+            continue;
+        }
+        let outcome = lines.iter().find(|l| {
+            l["kind"] == "outcome"
+                && l["task_id"].as_i64() == Some(d.task_id)
+                && line_at(l).is_some_and(|t| t >= d.at && d.next_at.is_none_or(|n| t < n))
+        });
+        let text = |l: Option<&serde_json::Value>, k: &str| {
+            l.and_then(|l| l[k].as_str()).map(str::to_string)
+        };
+        let mut row = RouterRow {
+            task_id: d.task_id,
+            project_id: d.line["project_id"].as_i64(),
+            decided_at: fmt_store_ts(d.at),
+            model: text(Some(d.line), "model"),
+            reason: text(Some(d.line), "reason"),
+            source: text(Some(d.line), "source"),
+            router_latency_ms: d.line["latency_ms"].as_i64(),
+            costly: d.line["costly"] == true,
+            attempt: d.attempt,
+            outcome: text(outcome, "outcome"),
+            outcome_status: text(outcome, "status"),
+            outcome_detail: text(outcome, "detail"),
+            session_id: None,
+            start: None,
+            end: None,
+            duration_minutes: None,
+            tokens: None,
+            total_tokens: None,
+            est_cost_usd: None,
+            models_used: None,
+            agent_runs: None,
+            task_done: None,
+            task_requeued: None,
+            requeues: None,
+            landed_first_try: None,
+            reopened: None,
+            follow_up_tasks: None,
+            review_rounds: None,
+            verifier_verdict: None,
+        };
+        if let Some(c) = joined {
+            // `naru cc session <id>`'s own figures, so they match it exactly.
+            if let Some(detail) = session_detail(store, &c.sid)? {
+                let (requeues, reopened) =
+                    store.cc_router_task_facts(d.task_id, c.start, d.next_at, c.end_ts)?;
+                row.session_id = Some(c.sid.clone());
+                row.start = detail.start;
+                row.end = detail.end;
+                row.duration_minutes = Some(detail.duration_minutes);
+                row.tokens = Some(detail.tokens);
+                row.total_tokens = Some(detail.total_tokens);
+                row.est_cost_usd = Some(detail.est_cost_usd);
+                row.models_used = Some(detail.models.into_iter().map(|m| m.model).collect());
+                row.agent_runs = Some(detail.agent_runs);
+                row.task_done = Some(c.link.done);
+                row.task_requeued = Some(c.link.requeued);
+                row.requeues = Some(requeues);
+                row.landed_first_try = Some(d.attempt == 1 && c.link.done && requeues == 0);
+                row.reopened = Some(reopened);
+                row.follow_up_tasks = Some(store.cc_follow_up_tasks(d.task_id, c.start)?);
+            }
+        }
+        rows.push(row);
+    }
+    let joined = rows.iter().filter(|r| r.session_id.is_some()).count();
+    Ok(RouterReport {
+        decisions: rows.len(),
+        joined,
+        rows,
+        since: since.map(str::to_string),
+        until: until.map(str::to_string),
+    })
+}
+
 /// The model scorecard (mesa task 1514): every subagent run with an
 /// attributed agent, plus every session launched as a top-level agent
 /// (`cc_sessions.main_agent`, naru task 1773) counted as one run of it, costed and timed from its own messages, grouped by
@@ -8078,6 +8313,175 @@ mod tests {
         assert_eq!(haiku.first_run, "2026-09-01 00:00:10");
         assert_eq!(sc.rows[1].model, "claude-sonnet-4-6");
         assert_eq!(sc.rows[1].runs, 1);
+    }
+
+    #[test]
+    fn router_joins_each_decision_to_its_session_and_task_outcome() {
+        use crate::core::store::TaskPatch;
+        use crate::core::types::{Priority, Status};
+        use serde_json::json;
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&tmp.path().join("naru.db")).unwrap();
+        let p = store.create_project("p", None, None, None, None).unwrap();
+        let mk = |s: &mut Store, d: &str| {
+            s.create_task(p.id, d, Priority::Medium, &[], None, None, None, None)
+                .unwrap()
+                .id
+        };
+        let a = mk(&mut store, "routed task a");
+        let b = mk(&mut store, "routed task b, spawn failed");
+        let follow = mk(
+            &mut store,
+            &format!("Fix the gap\n\nFollow-up to naru task {a}."),
+        );
+        let _cites = mk(
+            &mut store,
+            &format!("Unrelated\n\nBackground: see task {a}."),
+        );
+        let set = |store: &mut Store, status| {
+            store
+                .update_task(
+                    a,
+                    &TaskPatch {
+                        description: None,
+                        status: Some(status),
+                        priority: None,
+                        tags: None,
+                        parent_id: None,
+                        acceptance: None,
+                        artifact: None,
+                        result: None,
+                        sort_order: None,
+                        append: false,
+                    },
+                )
+                .unwrap();
+        };
+        // Bounced once, landed, reopened, landed again. The events are stamped
+        // "now", so the timeline is anchored on it: they fall inside the first
+        // attempt (t0+3 .. t0+1000) and after its session ended (t0+123).
+        for s in [
+            Status::InProgress,
+            Status::Todo,
+            Status::InProgress,
+            Status::Done,
+            Status::Todo,
+            Status::Done,
+        ] {
+            set(&mut store, s);
+        }
+        let t0 = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+            - 600;
+        let ingest = |store: &mut Store, sess: &str, start: i64, prompt: &str| {
+            store
+                .cc_ingest_file(
+                    &format!("/t/{sess}.jsonl"),
+                    &CcFileCursor {
+                        mtime: 1,
+                        size: 1,
+                        byte_offset: 1,
+                    },
+                    &CcFileBatch {
+                        sessions: vec![CcSessionUpsert {
+                            session_id: sess.into(),
+                            cwd: None,
+                            git_branch: None,
+                            entrypoint: None,
+                            used_subagent: false,
+                            start_ts: Some(start),
+                            end_ts: Some(start + 120),
+                            main_agent: None,
+                        }],
+                        agent_runs: Vec::new(),
+                        messages: vec![CcMessageRow {
+                            message_id: Some(format!("m-{sess}")),
+                            cost_micro_usd: None,
+                            uuid: format!("u-{sess}"),
+                            session_id: sess.into(),
+                            agent_id: None,
+                            ts: start + 120,
+                            model: "claude-sonnet-4-6".into(),
+                            input_tokens: 1000,
+                            output_tokens: 500,
+                            cache_read_tokens: 0,
+                            cache_creation_tokens: 0,
+                            cache_creation_1h_tokens: None,
+                            skill: None,
+                            agent: None,
+                            preview: None,
+                        }],
+                        tool_calls: Vec::new(),
+                        tool_errors: Vec::new(),
+                        prompts: vec![CcPromptRow {
+                            uuid: format!("p-{sess}"),
+                            session_id: sess.into(),
+                            ts: start,
+                            preview: prompt.into(),
+                        }],
+                        node_files: Vec::new(),
+                    },
+                )
+                .unwrap();
+        };
+        let prompt = format!("/execute-naru-task {a}");
+        ingest(&mut store, "sa1", t0 + 3, &prompt);
+        ingest(&mut store, "sa2", t0 + 1003, &prompt);
+        // A later hand-started session on the same task is not routed.
+        ingest(&mut store, "sa-manual", t0 + 5000, &prompt);
+        let at = |d: i64| fmt_store_ts(t0 + d);
+        let lines = vec![
+            json!({"kind":"decision","time":at(0),"task_id":a,"project_id":p.id,"model":"sonnet","reason":"Task: one file","source":"haiku","latency_ms":2100}),
+            json!({"kind":"decision","time":at(1),"task_id":b,"project_id":p.id,"model":"fable","reason":"Task: large","source":"haiku","latency_ms":3000,"costly":true}),
+            json!({"kind":"outcome","time":at(2),"task_id":b,"outcome":"failed","status":"todo","detail":"spawn failed"}),
+            json!({"kind":"outcome","time":at(500),"task_id":a,"outcome":"bounced","status":"todo","detail":"session sa1 ended"}),
+            json!({"kind":"decision","time":at(1000),"task_id":a,"project_id":p.id,"model":"sonnet","reason":"Task: one file","source":"reused","latency_ms":0}),
+            json!({"kind":"outcome","time":at(1500),"task_id":a,"outcome":"done","status":"done","detail":"session sa2 ended"}),
+            json!("not an object"),
+        ];
+        let r = router(&store, &lines, None, None).unwrap();
+        assert_eq!((r.decisions, r.joined), (3, 2));
+        let (a1, b1, a2) = (&r.rows[0], &r.rows[1], &r.rows[2]);
+
+        assert_eq!(a1.session_id.as_deref(), Some("sa1"));
+        assert_eq!((a1.attempt, a1.outcome.as_deref()), (1, Some("bounced")));
+        let detail = session_detail(&store, "sa1").unwrap().unwrap();
+        assert_eq!(a1.est_cost_usd, Some(detail.est_cost_usd));
+        assert_eq!(a1.duration_minutes, Some(detail.duration_minutes));
+        assert_eq!(a1.total_tokens, Some(1500));
+        assert_eq!(a1.models_used, Some(vec!["claude-sonnet-4-6".to_string()]));
+        assert_eq!(a1.task_done, Some(true));
+        assert_eq!(a1.task_requeued, Some(true));
+        assert_eq!(a1.requeues, Some(1));
+        assert_eq!(a1.landed_first_try, Some(false));
+        assert_eq!(a1.reopened, Some(true));
+        assert_eq!(a1.follow_up_tasks, Some(vec![follow]));
+        assert_eq!(
+            (a1.review_rounds, a1.verifier_verdict.clone()),
+            (None, None)
+        );
+
+        // No session: decision and outcome only, session fields null.
+        assert_eq!((b1.task_id, b1.costly), (b, true));
+        assert_eq!(b1.outcome.as_deref(), Some("failed"));
+        assert!(b1.session_id.is_none() && b1.est_cost_usd.is_none() && b1.requeues.is_none());
+
+        // The re-dispatch joins its own session, not the manual one.
+        assert_eq!(a2.session_id.as_deref(), Some("sa2"));
+        assert_eq!((a2.attempt, a2.source.as_deref()), (2, Some("reused")));
+        assert_eq!(a2.outcome.as_deref(), Some("done"));
+        // The first attempt's bounce is not this attempt's requeue.
+        assert_eq!(a2.requeues, Some(0));
+        assert_eq!(a2.landed_first_try, Some(false));
+
+        // `since` bounds the decision time and does not shift the join.
+        let since = format!("{}Z", at(900).replace(' ', "T"));
+        let r = router(&store, &lines, Some(&since), None).unwrap();
+        assert_eq!((r.decisions, r.joined), (1, 1));
+        assert_eq!(r.rows[0].session_id.as_deref(), Some("sa2"));
+        assert!(router(&store, &lines, Some("2026-09-01T00:00:00+01:00"), None).is_err());
     }
 
     #[test]

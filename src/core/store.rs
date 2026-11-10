@@ -2133,6 +2133,7 @@ fn parse_live_session_prompt(text: &str) -> Option<i64> {
 /// to execute.
 #[derive(Debug, Clone, Copy)]
 pub struct CcTaskLink {
+    pub task_id: i64,
     pub done: bool,
     pub requeued: bool,
 }
@@ -11464,10 +11465,76 @@ impl Store {
                 })
                 .optional()?;
             if let Some((done, requeued)) = found {
-                map.insert(session_id, CcTaskLink { done, requeued });
+                map.insert(
+                    session_id,
+                    CcTaskLink {
+                        task_id,
+                        done,
+                        requeued,
+                    },
+                );
             }
         }
         Ok(map)
+    }
+
+    /// How a routed session's task went after it (naru task 2687, `naru cc
+    /// router`): the number of `task_events` moves `in_progress` ->
+    /// `todo`/`backlog` at or after `start_ts` and before `until_ts` (the
+    /// task's next routed dispatch, when there is one), and whether the task
+    /// was moved out of `done` to `todo`, `in_progress` or `backlog` after
+    /// `end_ts` (a reopen). No end means no reopen.
+    pub fn cc_router_task_facts(
+        &self,
+        task_id: i64,
+        start_ts: i64,
+        until_ts: Option<i64>,
+        end_ts: Option<i64>,
+    ) -> Result<(i64, bool)> {
+        Ok(self.conn.query_row(
+            "SELECT \
+               (SELECT COUNT(*) FROM task_events WHERE task_id = ?1 \
+                  AND from_status = 'in_progress' AND to_status IN ('todo', 'backlog') \
+                  AND at >= datetime(?2, 'unixepoch') \
+                  AND (?3 IS NULL OR at < datetime(?3, 'unixepoch'))), \
+               EXISTS (SELECT 1 FROM task_events WHERE task_id = ?1 \
+                  AND from_status = 'done' AND to_status IN ('todo', 'in_progress', 'backlog') \
+                  AND ?4 IS NOT NULL AND at > datetime(?4, 'unixepoch'))",
+            rusqlite::params![task_id, start_ts, until_ts, end_ts],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?)
+    }
+
+    /// Tasks in `task_id`'s project, created at or after `since_ts`, whose
+    /// description says it follows up `task_id` (naru task 2687): `follow-up
+    /// to|of|from|on`, `regression from|in|of|by`, `broken by` or `fix for|to|of`,
+    /// then an optional `the`, `naru`/`mesa`, then `task [#]<id>`. Measured on
+    /// the real db (2026-11-10): no false follow-ups in a 20-pair sample, but
+    /// only about a quarter of them are fixes, the rest extensions, so this is
+    /// a follow-up list, not a fix count. Ascending ids.
+    pub fn cc_follow_up_tasks(&self, task_id: i64, since_ts: i64) -> Result<Vec<i64>> {
+        let re = regex::Regex::new(&format!(
+            r"(?i)\b(follow-?up (to|of|from|on)|regress\w* (from|in|of|by)|broken by|fix(es)? (for|to|of))\s+(the\s+)?((naru|mesa) )?task\s+#?{task_id}\b"
+        ))
+        .expect("follow-up pattern");
+        let mut stmt = self.conn.prepare(
+            "SELECT id, description FROM tasks \
+             WHERE project_id = (SELECT project_id FROM tasks WHERE id = ?1) \
+               AND id <> ?1 AND created_at >= datetime(?2, 'unixepoch') \
+               AND instr(description, ?1) > 0 \
+             ORDER BY id",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![task_id, since_ts], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, description) = row?;
+            if re.is_match(&description) {
+                out.push(id);
+            }
+        }
+        Ok(out)
     }
 
     /// [`Store::cc_live_session_links`]'s single-session twin, for

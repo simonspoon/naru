@@ -4983,6 +4983,28 @@ EXAMPLES
         #[arg(long, value_name = "NAME")]
         agent: Option<String>,
     },
+    /// Print one row per model-router decision, joined to the session it started
+    ///
+    /// One JSON object `{rows, decisions, joined, since, until}`. Each row is a
+    /// decision from the model-router log (model, reason, source, latency,
+    /// attempt, logged outcome) joined to the cc session it spawned (cost,
+    /// tokens, duration and models exactly as `naru cc session <id>` prints
+    /// them) and how its task went (done, re-queues, first-try landing,
+    /// reopen, follow-up tasks). Session fields are null when no session
+    /// joined; `review_rounds` and `verifier_verdict` are always null. See
+    /// docs/model-router.md "Telemetry".
+    #[command(after_help = "\
+EXAMPLES
+  naru cc router
+  naru cc router --since 2026-11-10")]
+    Router {
+        /// Only decisions made on/after this (YYYY-MM-DD or a full timestamp, UTC)
+        #[arg(long, value_name = "DATE")]
+        since: Option<String>,
+        /// Only decisions made before this (YYYY-MM-DD or a full timestamp, UTC)
+        #[arg(long, value_name = "DATE")]
+        until: Option<String>,
+    },
     /// Ingest new transcript lines into the mesa store and print a report
     ///
     /// Walks Claude Code's transcripts and incrementally ingests anything new
@@ -7155,6 +7177,16 @@ fn run_cc(cmd: CcCmd) -> Result<()> {
                 since.as_deref(),
                 until.as_deref(),
                 agent.as_deref(),
+            )?)
+        }
+        CcCmd::Router { since, until } => {
+            let mut store = Store::open_default()?;
+            crate::core::cc::sync(&mut store, false)?;
+            print_json(&crate::core::cc::router(
+                &store,
+                &crate::core::model_router::read_log(),
+                since.as_deref(),
+                until.as_deref(),
             )?)
         }
         CcCmd::Sync { rebuild } => {

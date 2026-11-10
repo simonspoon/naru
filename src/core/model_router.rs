@@ -374,6 +374,12 @@ fn append_line(path: &Path, line: &Value) {
     }
 }
 
+/// Every parseable line of the log (`naru cc router`, naru task 2687); an
+/// absent log is no lines.
+pub fn read_log() -> Vec<Value> {
+    log_path().map(|p| read_lines(&p)).unwrap_or_default()
+}
+
 fn read_lines(path: &Path) -> Vec<Value> {
     std::fs::read_to_string(path)
         .unwrap_or_default()

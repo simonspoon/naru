@@ -183,6 +183,57 @@ reads a JSON array of `{"prompt": ...}` and writes the picks, in order, to
 the picks: the models past sessions ran on are not ground truth, so the rubric
 is never tuned to reproduce them.
 
+## Telemetry (naru task 2687)
+
+`naru cc router [--since D] [--until D]` prints one row per decision line in
+the log, joined to the session it started and to how its task went, so
+quality, cost and time per model can be watched over time. Derived on every
+read from the log and the cc tables (`core::cc::router`), nothing stored, no
+migration, no route (CLI only). Output `{rows, decisions, joined, since,
+until}`; `joined / decisions` is the join coverage. `since`/`until` bound the
+**decision** time and parse exactly as `cc scorecard`'s.
+
+- **The join.** A decision line carries no session id: it is logged before
+  the spawn, and Claude Code does not store the `--name`. So a decision for
+  task T at time t joins the earliest session whose first prompt links to T
+  (`Store::cc_task_links`, the scorecard's link) that starts in
+  `[t - 5 s, t + 10 min)` and before T's next decision, each session used
+  once. The log format is unchanged. A session started by hand on a routed
+  task outside that span is not a routed session and has no row; a decision
+  whose spawn failed or whose transcript is not ingested yet is a row with
+  every session field `null`.
+- **From the log:** `task_id`, `project_id`, `decided_at`, `model`, `reason`,
+  `source`, `router_latency_ms`, `costly`, and `outcome` / `outcome_status` /
+  `outcome_detail` (the task's first outcome line between this decision and
+  its next; `null` while the session runs). `attempt` is 1 for a task's first
+  decision, 2 for its first re-dispatch, and so on: a re-dispatch or a
+  cost-guard relay logs its own `reused` decision, so each session has its own
+  row and several rows can share one Haiku pick.
+- **From the session** (`core::cc::session_detail`, so exactly what `naru cc
+  session <id>` prints): `session_id`, `start`, `end`, `duration_minutes`,
+  `tokens`, `total_tokens`, `est_cost_usd`, `models_used`, `agent_runs`.
+- **From the task:** `task_done` and `task_requeued` are the scorecard's own
+  two facts for that session (`CcTaskLink`), so they match `cc scorecard`;
+  `requeues` counts `in_progress` -> `todo`/`backlog` moves at or after the
+  session start and before the task's next decision (this attempt's own); `landed_first_try` = `attempt` 1, done, no requeue;
+  `reopened` = moved out of `done` (to `todo`, `in_progress` or `backlog`)
+  after the session ended; `follow_up_tasks` = later tasks in the same
+  project, created at or after the session start, whose description says
+  `follow-up to|of|from|on`, `regression from|in|of|by`, `broken by` or
+  `fix for|to|of` `[the] [naru|mesa] task [#]N`. Measured on the real db
+  (2026-11-10): a bare `task N` citation with a fix word matched 342 pairs and
+  about three in four were not fixes; the phrase rule matched 20, none a false
+  follow-up, but only about a quarter are fixes, the rest extensions. It is a
+  follow-up list, not a fix count. A retry one level up (task 2686) will show
+  as a higher `attempt` with its own `model`.
+- **Always `null`:** `review_rounds` and `verifier_verdict`. No structured
+  verdict is stored anywhere: subagent replies are a 200-char prose preview,
+  no task note uses a `verifier: PASS|FAIL` line, and `result` mentions PASS
+  only in free prose. A final-note convention would make it derivable; that is
+  a separate task.
+- **Control group.** `fallback` and `disabled` decisions are rows too, flagged
+  by `source`.
+
 ## Known limits
 
 - A queued task's text that itself opens with a role declaration is read as a

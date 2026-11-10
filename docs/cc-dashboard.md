@@ -1244,6 +1244,13 @@ model", from the db alone (mesa task 1514). No migration: it reads
 The grouping and formatting logic of the page lives in
 `frontend/src/ccScorecard.ts` (vitest: `ccScorecard.test.ts`).
 
+## Router telemetry
+
+`naru cc router` (naru task 2687) joins each model-router decision line
+(`<naru home>/logs/model-router.log`) to the session it started, with that
+session's `cc session` figures and the scorecard's task facts. It reads that
+one log file besides the db. Full text: `docs/model-router.md` "Telemetry".
+
 ## Headless calls (the usage ledger)
 
 A `claude -p --no-session-persistence` call writes no transcript, so
