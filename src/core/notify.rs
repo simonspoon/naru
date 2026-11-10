@@ -417,6 +417,130 @@ fn send_with(
     }))
 }
 
+/// What a bounded vox call got back: success, stdout, and a stderr excerpt.
+struct Bounded {
+    success: bool,
+    stdout: Vec<u8>,
+    stderr: String,
+}
+
+/// Runs `bin args` and kills it when it has not exited within `limit`, so a
+/// hung vox cannot hold the caller (naru task 2700). Both pipes are drained on
+/// their own threads so a chatty child never blocks on a full pipe.
+fn run_bounded(bin: &str, args: &[String], limit: std::time::Duration) -> Result<Bounded> {
+    use std::io::Read;
+    let mut child = Command::new(bin)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| Error::Unavailable(format!("could not run `{bin}`: {e}")))?;
+    // Each drain reports over a channel, so a pipe a grandchild still holds
+    // open after the child exits cannot hold the caller either.
+    let drain = |pipe: Option<Box<dyn Read + Send>>| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut p) = pipe {
+                let _ = p.read_to_end(&mut buf);
+            }
+            let _ = tx.send(buf);
+        });
+        rx
+    };
+    let collect = |rx: std::sync::mpsc::Receiver<Vec<u8>>| {
+        rx.recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap_or_default()
+    };
+    let out = drain(child.stdout.take().map(|p| Box::new(p) as _));
+    let err = drain(child.stderr.take().map(|p| Box::new(p) as _));
+    let deadline = std::time::Instant::now() + limit;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            Err(e) => {
+                return Err(Error::Unavailable(format!(
+                    "could not wait for `{bin}`: {e}"
+                )));
+            }
+        }
+    };
+    let Some(status) = status else {
+        return Err(Error::Unavailable(format!(
+            "`{bin}` did not answer within {}s",
+            limit.as_secs()
+        )));
+    };
+    Ok(Bounded {
+        success: status.success(),
+        stdout: collect(out),
+        stderr: excerpt(&collect(err)),
+    })
+}
+
+/// [`events_supported`], giving up (`false`) after `limit`.
+pub fn events_supported_within(bin: &str, limit: std::time::Duration) -> bool {
+    run_bounded(bin, &["events".into(), "--help".into()], limit).is_ok_and(|b| b.success)
+}
+
+/// Sends `message` with choice buttons through `bin`, bounded by `limit`, and
+/// returns the Telegram message id. Unlike [`send_choices`] this does not
+/// decide whether the phone may be reached: the caller passes the vox it got
+/// from [`reader_bin`].
+pub fn send_bounded(
+    bin: &str,
+    message: &str,
+    title: &str,
+    choices: &[(String, String)],
+    limit: std::time::Duration,
+) -> Result<i64> {
+    let mut args: Vec<String> = vec!["notify".into(), "--json".into(), format!("--title={title}")];
+    for (label, data) in choices {
+        args.push("--choice".into());
+        args.push(format!("{label}={data}"));
+    }
+    args.push("--".into());
+    args.push(message.to_string());
+    let out = run_bounded(bin, &args, limit)?;
+    if !out.success {
+        return Err(Error::Unavailable(format!("vox failed: {}", out.stderr)));
+    }
+    let reply: Value = serde_json::from_slice(&out.stdout)
+        .map_err(|e| Error::Unavailable(format!("vox printed output that is not JSON ({e})")))?;
+    reply
+        .get("message_id")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| Error::Unavailable("vox returned no message id".into()))
+}
+
+/// [`edit_message`] through `bin`, bounded by `limit`.
+pub fn edit_bounded(
+    bin: &str,
+    message_id: i64,
+    text: &str,
+    limit: std::time::Duration,
+) -> Result<()> {
+    let args = [
+        "progress".to_string(),
+        message_id.to_string(),
+        "--".into(),
+        text.into(),
+    ];
+    let out = run_bounded(bin, &args, limit)?;
+    if out.success {
+        Ok(())
+    } else {
+        Err(Error::Unavailable(format!("vox failed: {}", out.stderr)))
+    }
+}
+
 /// A trimmed, bounded piece of vox's stderr, for an error message.
 fn excerpt(stderr: &[u8]) -> String {
     let text = String::from_utf8_lossy(stderr);
@@ -432,6 +556,25 @@ fn excerpt(stderr: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hung_vox_is_killed_at_the_deadline() {
+        let started = std::time::Instant::now();
+        let err = run_bounded(
+            "sleep",
+            &["30".into()],
+            std::time::Duration::from_millis(200),
+        );
+        assert!(matches!(err, Err(Error::Unavailable(m)) if m.contains("did not answer")));
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        let ok = run_bounded("echo", &["hi".into()], std::time::Duration::from_secs(5)).unwrap();
+        assert!(ok.success && ok.stdout == b"hi\n");
+        assert!(!events_supported_within(
+            "false",
+            std::time::Duration::from_secs(5)
+        ));
+    }
 
     #[test]
     fn serve_port_follows_config_else_default() {

@@ -285,7 +285,10 @@ workflow, the delegate brief says to load the `building-naru-workflows` skill.
 ask`. When a `question` notice arrives, run `naru ask list --status open`; \
 answer one you can settle from what the person has told you with `naru ask \
 answer <id> \"<answer>\"`, and put the rest to the person in your own words, \
-answering with what they say. Completion reports come with no notice: after \
+answering with what they say. A question reaches the person's phone only \
+when you send it there: run `naru ask escalate <id>` only when the person is \
+really needed and is not here to answer (away, or not responding), never \
+merely because a question was asked. Completion reports come with no notice: after \
 you finish something for the person, run `naru ask list --kind notice \
 --unread --mark-read` and, if any came back, mention them in one short line, \
 such as \"three task updates\", never one by one unless asked. A question's \

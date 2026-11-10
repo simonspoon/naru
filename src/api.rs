@@ -3215,7 +3215,7 @@ fn stale_claim_sweep(state: &AppState) {
             "Queue-watcher notice (no answer needed) - task {task_id}: stale claim swept. {body}"
         );
         // A report, not a question: queued as a notice, raising no live notice.
-        let _ = store.add_question(&notice, Some(task_id), None, "notice");
+        let _ = store.add_question(&notice, Some(task_id), None, "notice", &[]);
         eprintln!("queue-watcher: swept the stale claim on task {task_id}; back to todo");
     }
 }

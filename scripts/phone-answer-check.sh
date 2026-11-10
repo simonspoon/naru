@@ -19,6 +19,19 @@
 #   6. no usable vox, and an older vox (no `events`): the gate still works, plain
 #      notification, no reader;
 #   7. a non-real NARU_HOME with no vox override: vox is never called.
+# Then, under the main serve (naru task 2700, `naru ask` questions; numbered Q0-Q7):
+#   Q0. routing: while a live conversation is active `naru ask` (with or without
+#       choices) sends nothing to vox and raises the question notice; only
+#       `naru ask escalate` sends, once (twice / answered / a notice: nothing
+#       more); with no live conversation `naru ask` itself sends exactly one;
+#   Q1. `--choice` stores the choices; the one notify carries --choice
+#       "A: Red=q:<id>:0" ... (escalated, and the no-live path separately);
+#   Q2. a tap `q:<id>:1` answers `Green`;
+#   Q3. a reply answers with exactly its text (and a letter picks a choice); a
+#       plain question has no buttons and is answerable by reply;
+#   Q4. first answer wins; `progress` edits only a question that was sent;
+#   Q5. `--notice` never sends; Q6. bad index / unknown id / malformed data
+#       change nothing; Q7. 9 choices or an empty choice is a validation error.
 set -euo pipefail
 # Drop inherited NARU_* vars: Naru reads them before MESA_*, so one would escape this script's isolation.
 unset $(env | sed -n 's/^\(NARU_[A-Za-z0-9_]*\)=.*/\1/p')
@@ -299,6 +312,161 @@ kill -0 "$SERVER_PID" 2>/dev/null || fail "serve died on a bad line"
 wait_run
 expect_path No
 ok "5: malformed, mismatched and unknown-message lines change nothing"
+
+# =====================================================================
+# Q. `naru ask` questions from Telegram (naru task 2700), same serve
+# =====================================================================
+progress_total() { [ -f "$STUB_DIR/progress.log" ] && grep -c '^--END--$' "$STUB_DIR/progress.log" || echo 0; }
+prompt_msg() { sqlite3 "$MESA_DB" "select message_id from phone_prompts where kind='question' and ref_id=$1"; }
+q_prompts() { sqlite3 "$MESA_DB" "select count(*) from phone_prompts where kind='question'"; }
+q_answer() { "$NARU" ask show "$1" | jq -r '.answer // "null"'; }
+q_status() { "$NARU" ask show "$1" | jq -r .status; }
+is_answered() { [ "$(q_status "$1")" = answered ]; }
+edit_has() { progress_texts "$1" | grep -qF -- "$2"; } # <message id> <fixed text>
+has_choice() { # <notify block> <label=data> — the pair follows a --choice flag
+  printf '%s\n' "$1" | awk -v want="$2" 'prev=="--choice" && $0==want {found=1} {prev=$0} END{exit !found}'
+}
+expect_err() { # <code> cmd... — the command fails with that error code
+  local code=$1
+  shift
+  if "$@" >"$TMP/e.out" 2>"$TMP/e.err"; then fail "expected $code from: $* (got success: $(cat "$TMP/e.out"))"; fi
+  [ "$(jq -r .error.code <"$TMP/e.err")" = "$code" ] || fail "expected error $code from: $*, got: $(cat "$TMP/e.err")"
+}
+
+# ---- Q0/Q1. a live conversation: ask sends nothing, escalate sends once ----
+"$NARU" live start --no-agent >/dev/null
+N0=$(notify_count) P0=$(progress_total)
+QA=$("$NARU" ask --choice Red --choice Green --choice Blue "Which colour?" | jq -r .id)
+QP=$("$NARU" ask "Plain question?" | jq -r .id)
+QN=$("$NARU" ask --notice "FYI only" | jq -r .id)
+[ "$("$NARU" live turns | jq '[.[] | select(.notice == "question")] | length')" -ge 1 ] || fail "no question notice turn was raised"
+[ "$(notify_count)" = "$N0" ] && [ "$(q_prompts)" = 0 ] || fail "ask with a live conversation sent to vox: $(cat "$STUB_DIR/notify.log")"
+[ "$("$NARU" ask show "$QA" | jq -c .choices)" = '["Red","Green","Blue"]' ] || fail "stored choices: $("$NARU" ask show "$QA")"
+ok "Q0: with a live conversation, ask (with and without choices) and ask --notice send nothing to vox and a question notice is raised"
+ok "Q1a: --choice stores the three choices, shown by ask show"
+
+"$NARU" ask escalate "$QA" >/dev/null
+[ "$(notify_count)" = $((N0 + 1)) ] || fail "escalate must send exactly one notify"
+E=$(nth_notify $((N0 + 1)))
+has_choice "$E" "A: Red=q:$QA:0" && has_choice "$E" "B: Green=q:$QA:1" && has_choice "$E" "C: Blue=q:$QA:2" || fail "escalated choices: $E"
+printf '%s\n' "$E" | grep -qx -- '--title=Naru: question' || fail "question title: $E"
+printf '%s\n' "$E" | grep -q 'Which colour?' || fail "question text: $E"
+printf '%s\n' "$E" | grep -q 'Tap a choice or reply to this message with your answer.' || fail "hint: $E"
+! printf '%s\n' "$E" | grep -q -- '--button' || fail "a question has no Open Naru button: $E"
+MA=$(prompt_msg "$QA")
+[ -n "$MA" ] || fail "no phone prompt recorded for the escalated question"
+ok "Q0b/Q1b: ask escalate sends exactly one notify with --choice 'A: Red=q:$QA:0', 'B: Green=q:$QA:1', 'C: Blue=q:$QA:2'"
+
+expect_err conflict "$NARU" ask escalate "$QA"
+expect_err conflict "$NARU" ask escalate "$QN"
+expect_err not_found "$NARU" ask escalate 999999
+QX=$("$NARU" ask "Answered before escalation?" | jq -r .id)
+"$NARU" ask answer "$QX" "yes" >/dev/null
+expect_err conflict "$NARU" ask escalate "$QX"
+[ "$(notify_count)" = $((N0 + 1)) ] || fail "a refused escalate sent something: $(cat "$STUB_DIR/notify.log")"
+[ "$(progress_total)" = "$P0" ] || fail "answering a question never sent to the phone edited a message"
+ok "Q0c/Q4a: escalating twice, a notice, an answered question sends nothing more; answering a never-sent question makes no progress edit"
+
+# ---- Q2. a tap answers with the label ----
+tap "$MA" "q:$QA:1"
+answered_a() { [ "$(q_status "$QA")" = answered ]; }
+poll "the tap's answer" answered_a
+[ "$(q_answer "$QA")" = Green ] || fail "tap q:$QA:1 must answer Green: $(q_answer "$QA")"
+poll "the Answered edit" edited_to "$MA" " - Answered: Green"
+ok "Q2: a canned choice line q:$QA:1 answers the question with Green and edits the message"
+
+# ---- Q3. a reply answers verbatim; a plain question has no buttons ----
+"$NARU" ask escalate "$QP" >/dev/null
+[ "$(notify_count)" = $((N0 + 2)) ] || fail "escalating the plain question must send one more notify"
+E=$(nth_notify $((N0 + 2)))
+! printf '%s\n' "$E" | grep -q -- '--choice' || fail "a question without choices got buttons: $E"
+printf '%s\n' "$E" | grep -q 'Reply to this message with your answer.' || fail "plain question hint: $E"
+MP=$(prompt_msg "$QP")
+reply "$MP" 6001 "  Use blue; \$(touch $TMP/pwned) \`id\`  "
+answered_p() { [ "$(q_status "$QP")" = answered ]; }
+poll "the reply's answer" answered_p
+[ "$(q_answer "$QP")" = "Use blue; \$(touch $TMP/pwned) \`id\`" ] || fail "a reply must answer verbatim (trimmed): $(q_answer "$QP")"
+[ ! -e "$TMP/pwned" ] || fail "a reply was executed"
+poll "the reply's Answered edit" edit_has "$MP" "- Answered: Use blue; "
+ok "Q3a: a plain question is sent with no buttons and a reply answers it with exactly that text (never interpreted)"
+
+# ---- Q4. first answer wins ----
+BEFORE_A=$(progress_n "$MA")
+if "$NARU" ask answer "$QA" x >/dev/null 2>"$TMP/e.err"; then fail "a second answer must be refused"; fi
+tap "$MA" "q:$QA:0"
+reply "$MA" 6002 "Blue"
+grew_a() { [ "$(progress_n "$MA")" -ge $((BEFORE_A + 2)) ]; }
+poll "the edits for the late tap and reply" grew_a
+[ "$(q_answer "$QA")" = Green ] || fail "a late answer changed it: $(q_answer "$QA")"
+[ "$(progress_texts "$MA" | tail -1 | grep -c ' - Answered: Green$')" = 1 ] || fail "late edit text: $(progress_texts "$MA")"
+ok "Q4b: after the first answer, ask answer, a later tap and a later reply change nothing and error nothing"
+"$NARU" live stop >/dev/null
+
+# ---- Q0d/Q1c/Q4c/Q3b. no live conversation: ask itself sends ----
+N1=$(notify_count)
+QC=$("$NARU" ask --choice Red --choice Green --choice Blue "Which now?" | jq -r .id)
+[ "$(notify_count)" = $((N1 + 1)) ] || fail "with no live conversation ask must send exactly one notify"
+E=$(nth_notify $((N1 + 1)))
+has_choice "$E" "A: Red=q:$QC:0" && has_choice "$E" "B: Green=q:$QC:1" && has_choice "$E" "C: Blue=q:$QC:2" || fail "no-live choices: $E"
+MC=$(prompt_msg "$QC")
+[ -n "$MC" ] || fail "no phone prompt for the no-live question"
+ok "Q0d/Q1c: with no live conversation ask itself sends exactly one notify, with the three --choice items"
+
+QL=$("$NARU" ask --choice Yes --choice No "Letter pick?" | jq -r .id)
+ML=$(prompt_msg "$QL")
+reply "$ML" 6003 " b "
+poll "the letter reply" is_answered "$QL"
+[ "$(q_answer "$QL")" = No ] || fail "a letter reply must pick the choice: $(q_answer "$QL")"
+ok "Q3b: a single-letter reply (' b ') answers with that choice's label"
+
+# answered in Naru first: the message is edited, then a later tap changes nothing
+PB=$(progress_n "$MC")
+"$NARU" ask answer "$QC" "from the CLI" >/dev/null
+cli_edit() { [ "$(progress_n "$MC")" -gt "$PB" ]; }
+poll "the CLI answer's edit" cli_edit
+progress_texts "$MC" | tail -1 | grep -q -- ' - Answered: from the CLI$' || fail "CLI edit text: $(progress_texts "$MC")"
+tap "$MC" "q:$QC:2"
+reply "$MC" 6004 "later"
+grew_c() { [ "$(progress_n "$MC")" -ge $((PB + 3)) ]; }
+poll "edits for the late tap and reply" grew_c
+[ "$(q_answer "$QC")" = "from the CLI" ] || fail "a late answer changed it: $(q_answer "$QC")"
+ok "Q4c: ask answer edits the sent question's message, and a later tap or reply changes nothing"
+
+# ---- Q5. notices never send ----
+N2=$(notify_count)
+"$NARU" ask --notice "no live, still nothing" >/dev/null
+[ "$(notify_count)" = "$N2" ] || fail "a notice was sent with no live conversation"
+ok "Q5: ask --notice sends nothing to vox, with and without a live conversation"
+
+# ---- Q6. bad taps change nothing ----
+QD=$("$NARU" ask --choice Red --choice Green "Guard me?" | jq -r .id)
+MD=$(prompt_msg "$QD")
+QE=$("$NARU" ask "Barrier?" | jq -r .id)
+ME=$(prompt_msg "$QE")
+tap "$MD" "q:$QD:7"
+tap "$MD" "q:99999:0"
+tap "$MD" "q:x:0"
+tap "$MD" "q:$QD"
+tap "$MD" "q:$QD:0:1"
+tap "$MD" "q:$QD:-1"
+tap 424242 "q:$QD:0"
+tap "$MC" "q:$QD:0"
+tap "$MD" "q:$QE:0"
+reply 424242 6010 "no such message"
+reply "$MD" 6011 "   "
+reply "$ME" 6012 "barrier done"
+poll "the barrier answer" is_answered "$QE"
+[ "$(q_status "$QD")" = open ] && [ "$(q_answer "$QD")" = null ] || fail "a bad line answered the question: $("$NARU" ask show "$QD")"
+kill -0 "$SERVER_PID" 2>/dev/null || fail "serve died on a bad question line"
+ok "Q6: an out-of-range index, unknown id, malformed data, a mismatched message and an empty reply change nothing"
+
+# ---- Q7. validation sends nothing ----
+N3=$(notify_count) COUNT=$("$NARU" ask list | jq length)
+expect_err validation "$NARU" ask --choice a --choice b --choice c --choice d --choice e --choice f --choice g --choice h --choice i "Nine?"
+expect_err validation "$NARU" ask --choice a --choice "  " "Empty choice?"
+expect_err validation "$NARU" ask --choice only "One choice?"
+[ "$(notify_count)" = "$N3" ] && [ "$("$NARU" ask list | jq length)" = "$COUNT" ] || fail "an invalid ask sent or stored something"
+ok "Q7: more than 8 choices, an empty choice and a single choice are validation errors and nothing is stored or sent"
 stop_serve
 
 # =====================================================================

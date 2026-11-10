@@ -105,7 +105,7 @@ Once every agent has reported and the task is verified complete:
 
 ## Questions for a person
 
-When the task is blocked on a decision only a person can make, queue it with `naru ask --task <task id> "<question>"` (it returns at once), then continue with what is not blocked, or stop with the task parked. Read the answer later with `naru ask show <id>`.
+When the task is blocked on a decision only a person can make, queue it with `naru ask --task <task id> "<question>"` (it returns at once; pass `--choice "<option>"` once per option, before the text, when the answer is one of a few options), then continue with what is not blocked, or stop with the task parked. Read the answer later with `naru ask show <id>`.
 
 A restarted task may already carry a question: before any other work, check `naru ask list --kind question | jq '[.[] | select(.task_id == <task id>)]'`. Act on an `answered` one first; put a still `open` one to the person again first (`naru notify "Task <task id> is waiting on your answer to ask <id>: <question>"`), never a second `naru ask` for the same question. When you park the task because a question went unanswered, park it in `backlog` with a note that starts `FIRST: get an answer to ask <id>: <question>`.
 

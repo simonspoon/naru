@@ -21,7 +21,7 @@ Before any other work, check for questions an earlier attempt left on this task:
 5. **Verify fully**: unit tests, live QA, an independent code review.
 6. **On a failure, loop back** to where it points: the fix, the plan, or understanding.
 
-Note decisions and progress as you go: `naru task note $ARGUMENTS "<text>"`. Blocked on the person? `naru ask --task $ARGUMENTS "<question>"` returns at once; read the answer later with `naru ask show <id>`, and keep going on what you can.
+Note decisions and progress as you go: `naru task note $ARGUMENTS "<text>"`. Blocked on the person? `naru ask --task $ARGUMENTS "<question>"` returns at once (pass `--choice "<option>"` once per option, before the text, when the answer is one of a few options); read the answer later with `naru ask show <id>`, and keep going on what you can.
 
 ## Ending
 

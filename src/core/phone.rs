@@ -1,13 +1,16 @@
-//! Answering from the phone (naru task 2699): a workflow approval gate's
-//! Telegram message carries Approve and Cancel buttons, and a reply to that
-//! message decides it too.
+//! Answering from the phone (naru tasks 2699 and 2700): a workflow approval
+//! gate's Telegram message carries Approve and Cancel buttons, and a reply to
+//! that message decides it too; an agent's `naru ask` question, once it is
+//! sent to the phone ([`send_question`]), carries A/B/C buttons for its
+//! choices and takes a reply as its answer.
 //!
 //! `serve` runs the one `vox events --json` reader ([`start_reader`]);
 //! Telegram allows a single update consumer per bot. Each line it prints is
 //! untrusted input: it is parsed ([`parse_line`]), matched against the
-//! `phone_prompts` row of the message it names, and can do exactly one thing,
-//! `Store::decide_workflow_gate` — which is also what makes the first answer
-//! win and a redelivered event harmless. See `docs/notify.md`.
+//! `phone_prompts` row of the message it names, and can do exactly one thing:
+//! `Store::decide_workflow_gate` for a gate, `Store::answer_question` for a
+//! question — which is also what makes the first answer win and a redelivered
+//! event harmless. See `docs/notify.md`.
 
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
@@ -19,7 +22,20 @@ use serde_json::Value;
 
 use super::notify;
 use super::store::{Error, Store};
-use super::types::{WorkflowGate, WorkflowGateStatus};
+use super::types::{AgentQuestion, WorkflowGate, WorkflowGateStatus};
+
+/// The longest piece of a question or an answer put in a Telegram message
+/// (its limit is 4096 characters).
+const PHONE_TEXT_MAX: usize = 900;
+
+/// How long `naru ask` waits on vox: to learn whether it has `events`, and to
+/// send or edit a message. A hung vox must not hold the agent.
+const PROBE_LIMIT: Duration = Duration::from_secs(2);
+const VOX_LIMIT: Duration = Duration::from_secs(8);
+
+/// The line under a question that says how to answer it.
+const QUESTION_HINT: &str = "Tap a choice or reply to this message with your answer.";
+const QUESTION_HINT_NO_CHOICES: &str = "Reply to this message with your answer.";
 
 /// What a reply that is neither an approval nor a cancellation gets back.
 const HINT: &str = "Reply approve or cancel, or tap a button.";
@@ -93,6 +109,102 @@ pub fn parse_gate_data(data: &str) -> Option<(i64, WorkflowGateStatus)> {
     Some((id.parse().ok()?, status))
 }
 
+/// The callback data of a question's button: `q:<id>:<index>`.
+pub fn question_data(question_id: i64, index: usize) -> String {
+    format!("q:{question_id}:{index}")
+}
+
+/// The question and choice index a button's data names — exactly what
+/// [`question_data`] writes, nothing looser.
+pub fn parse_question_data(data: &str) -> Option<(i64, usize)> {
+    let (id, index) = data.strip_prefix("q:")?.split_once(':')?;
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    if !digits(id) || !digits(index) {
+        return None;
+    }
+    Some((id.parse().ok()?, index.parse().ok()?))
+}
+
+/// `text` cut to at most `max` characters, with `…` when it was longer.
+fn cut(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let kept: String = text.chars().take(max).collect();
+    format!("{kept}…")
+}
+
+/// The choice label letter: A, B, C ...
+fn letter(index: usize) -> char {
+    (b'A' + index as u8) as char
+}
+
+/// What a question's message says (without the how-to-answer line), and what
+/// the edit that closes it starts from.
+pub fn question_text(q: &AgentQuestion) -> String {
+    let mut text = cut(&q.body, PHONE_TEXT_MAX);
+    if let Some(task) = q.task_id {
+        text.push_str(&format!(" (task {task})"));
+    }
+    text
+}
+
+/// A question's message once it is answered, or no longer needed.
+fn question_closed_text(prompt_text: &str, q: &AgentQuestion) -> Option<String> {
+    match (q.status.as_str(), q.answer.as_deref()) {
+        ("answered", Some(a)) => Some(format!(
+            "{prompt_text} - Answered: {}",
+            cut(a, PHONE_TEXT_MAX)
+        )),
+        ("expired", _) => Some(format!("{prompt_text} - No longer needed")),
+        _ => None,
+    }
+}
+
+/// Sends question `q` to the phone and remembers the message, so a tap or a
+/// reply can answer it. Only where the phone may be reached
+/// (`notify::reader_bin`); with a vox older than `events` it is sent as plain
+/// text, with no buttons and no how-to-answer line. Every vox call is bounded
+/// ([`PROBE_LIMIT`], [`VOX_LIMIT`]). Returns the Telegram message id.
+pub fn send_question(store: &mut Store, q: &AgentQuestion) -> Result<i64, Error> {
+    let bin = notify::reader_bin().ok_or_else(|| {
+        Error::Unavailable("the phone is not reachable from this environment".into())
+    })?;
+    let prompt_text = question_text(q);
+    let mut text = prompt_text.clone();
+    let mut choices = Vec::new();
+    if notify::events_supported_within(&bin, PROBE_LIMIT) {
+        text.push('\n');
+        text.push_str(if q.choices.is_empty() {
+            QUESTION_HINT_NO_CHOICES
+        } else {
+            QUESTION_HINT
+        });
+        for (i, label) in q.choices.iter().enumerate() {
+            choices.push((format!("{}: {label}", letter(i)), question_data(q.id, i)));
+        }
+    }
+    let message_id = notify::send_bounded(&bin, &text, "Naru: question", &choices, VOX_LIMIT)?;
+    store.record_phone_prompt(message_id, "question", q.id, &prompt_text)?;
+    Ok(message_id)
+}
+
+/// After a question was answered outside Telegram (`naru ask answer`), edits
+/// its phone message, if it had one, to show the answer. Best-effort and
+/// bounded; no phone prompt means no vox call at all.
+pub fn close_question_prompt(store: &Store, q: &AgentQuestion) {
+    let Ok(Some(prompt)) = store.phone_prompt_for("question", q.id) else {
+        return;
+    };
+    let (Some(text), Some(bin)) = (question_closed_text(&prompt.text, q), notify::reader_bin())
+    else {
+        return;
+    };
+    if let Err(e) = notify::edit_bounded(&bin, prompt.message_id, &text, VOX_LIMIT) {
+        eprintln!("naru: question {} phone message not updated: {e}", q.id);
+    }
+}
+
 /// The decision a reply's text gives: one of a fixed list of words, trimmed
 /// and lowercased. Any other text decides nothing.
 pub fn reply_word(text: &str) -> Option<WorkflowGateStatus> {
@@ -140,20 +252,32 @@ pub enum Action {
 /// nothing. An already-decided gate is not an error: its message is edited
 /// so the stale buttons disappear.
 pub fn handle_line(store: &mut Store, line: &str) -> Action {
-    let gate_prompt = |store: &Store, message_id: i64| match store.phone_prompt(message_id) {
-        Ok(Some(p)) if p.kind == "gate" => Some(p),
-        Ok(_) => None,
-        Err(e) => {
-            eprintln!("naru: phone event: {e}");
-            None
-        }
-    };
+    let prompt_of =
+        |store: &Store, message_id: i64, kind: &str| match store.phone_prompt(message_id) {
+            Ok(Some(p)) if p.kind == kind => Some(p),
+            Ok(_) => None,
+            Err(e) => {
+                eprintln!("naru: phone event: {e}");
+                None
+            }
+        };
     match parse_line(line) {
         Some(Event::Choice { message_id, data }) => {
+            if let Some((question_id, index)) = parse_question_data(&data) {
+                return match prompt_of(store, message_id, "question") {
+                    Some(p) if p.ref_id == question_id => tap_question(store, &p, index),
+                    _ => {
+                        eprintln!(
+                            "naru: phone tap ignored: message {message_id} is not question {question_id}'s"
+                        );
+                        Action::Nothing
+                    }
+                };
+            }
             let Some((gate_id, status)) = parse_gate_data(&data) else {
                 return Action::Nothing;
             };
-            match gate_prompt(store, message_id) {
+            match prompt_of(store, message_id, "gate") {
                 Some(p) if p.ref_id == gate_id => decide(store, &p, status),
                 _ => {
                     eprintln!(
@@ -168,7 +292,10 @@ pub fn handle_line(store: &mut Store, line: &str) -> Action {
             message_id,
             text,
         }) => {
-            let Some(p) = gate_prompt(store, reply_to) else {
+            if let Some(p) = prompt_of(store, reply_to, "question") {
+                return reply_question(store, &p, &text);
+            }
+            let Some(p) = prompt_of(store, reply_to, "gate") else {
                 return Action::Nothing;
             };
             match reply_word(&text) {
@@ -182,6 +309,75 @@ pub fn handle_line(store: &mut Store, line: &str) -> Action {
                 },
             }
         }
+        None => Action::Nothing,
+    }
+}
+
+/// A tap on choice `index` of the question `prompt` was sent for.
+fn tap_question(store: &mut Store, prompt: &PhonePrompt, index: usize) -> Action {
+    let label = match store.get_question(prompt.ref_id) {
+        Ok(q) => q.choices.get(index).cloned(),
+        Err(e) => {
+            eprintln!("naru: phone tap ignored: {e}");
+            return Action::Nothing;
+        }
+    };
+    match label {
+        Some(label) => answer_question(store, prompt, &label),
+        None => {
+            eprintln!(
+                "naru: phone tap ignored: question {} has no choice {index}",
+                prompt.ref_id
+            );
+            Action::Nothing
+        }
+    }
+}
+
+/// A reply to the message of the question `prompt` was sent for: its trimmed
+/// text is the answer, verbatim (data, never interpreted) — except that a
+/// single letter naming a choice (`a`, `B` ...) answers with that choice.
+fn reply_question(store: &mut Store, prompt: &PhonePrompt, text: &str) -> Action {
+    let text = text.trim();
+    if text.is_empty() {
+        return Action::Nothing;
+    }
+    let mut chars = text.chars();
+    let picked = match (chars.next(), chars.next()) {
+        (Some(c), None) if c.is_ascii_alphabetic() => {
+            store.get_question(prompt.ref_id).ok().and_then(|q| {
+                q.choices
+                    .get((c.to_ascii_uppercase() as u8 - b'A') as usize)
+                    .cloned()
+            })
+        }
+        _ => None,
+    };
+    answer_question(store, prompt, picked.as_deref().unwrap_or(text))
+}
+
+/// Answers `prompt`'s question and closes its message, whether this answer
+/// won or the question was already settled (answered, or expired).
+fn answer_question(store: &mut Store, prompt: &PhonePrompt, answer: &str) -> Action {
+    let q = match store.answer_question(prompt.ref_id, answer) {
+        Ok(q) => q,
+        Err(Error::Conflict(_)) => match store.get_question(prompt.ref_id) {
+            Ok(q) => q,
+            Err(_) => return Action::Nothing,
+        },
+        Err(e) => {
+            eprintln!(
+                "naru: phone answer for question {} ignored: {e}",
+                prompt.ref_id
+            );
+            return Action::Nothing;
+        }
+    };
+    match question_closed_text(&prompt.text, &q) {
+        Some(text) => Action::Edit {
+            message_id: prompt.message_id,
+            text,
+        },
         None => Action::Nothing,
     }
 }
@@ -532,5 +728,158 @@ mod tests {
             );
         }
         assert_eq!(s.get_workflow_gate(c).unwrap().status, Rejected);
+    }
+
+    fn question(s: &mut Store, message_id: i64, choices: &[&str]) -> i64 {
+        let choices: Vec<String> = choices.iter().map(|c| c.to_string()).collect();
+        let q = s
+            .add_question("Which?", None, None, "question", &choices)
+            .unwrap();
+        s.record_phone_prompt(message_id, "question", q.id, &question_text(&q))
+            .unwrap();
+        q.id
+    }
+
+    #[test]
+    fn question_data_round_trips_and_is_strict() {
+        assert_eq!(parse_question_data(&question_data(12, 2)), Some((12, 2)));
+        for bad in [
+            "",
+            "q:",
+            "q:12",
+            "q::1",
+            "q:12:",
+            "q:12:1:x",
+            "q:-1:0",
+            "q:1:-1",
+            "q:+1:0",
+            "q: 1:0",
+            "q:1e3:0",
+            "q:99999999999999999999:0",
+            "q:1:99999999999999999999",
+            "Q:1:0",
+            "gate:1:approve",
+        ] {
+            assert_eq!(parse_question_data(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_tap_answers_only_the_question_its_message_was_sent_for() {
+        let (mut s, _d, run, node) = fixture();
+        let a = question(&mut s, 200, &["Red", "Green", "Blue"]);
+        let b = question(&mut s, 201, &["Yes", "No"]);
+        let g = gate(&mut s, run, node, 100);
+        let answer = |s: &Store, id| s.get_question(id).unwrap().answer;
+
+        for line in [
+            tap(200, &question_data(b, 0)),   // another question's data
+            tap(555, &question_data(a, 0)),   // unknown message
+            tap(200, &question_data(999, 0)), // unknown question
+            tap(200, &question_data(a, 3)),   // out of range
+            tap(200, "q:x:1"),
+            tap(100, &question_data(a, 0)), // a gate's message
+            tap(200, &gate_data(g, true)),  // gate data on a question's message
+            "garbage".to_string(),
+        ] {
+            assert_eq!(handle_line(&mut s, &line), Action::Nothing, "{line}");
+        }
+        assert_eq!((answer(&s, a), answer(&s, b)), (None, None));
+        assert_eq!(s.get_workflow_gate(g).unwrap().status, Pending);
+
+        assert_eq!(
+            handle_line(&mut s, &tap(200, &question_data(a, 1))),
+            edit(200, "Which? - Answered: Green")
+        );
+        assert_eq!(answer(&s, a).as_deref(), Some("Green"));
+        // First answer wins; a late tap or reply only repeats the stored one.
+        for line in [tap(200, &question_data(a, 0)), reply(200, "Blue")] {
+            assert_eq!(
+                handle_line(&mut s, &line),
+                edit(200, "Which? - Answered: Green")
+            );
+        }
+        assert_eq!(answer(&s, a).as_deref(), Some("Green"));
+        assert_eq!(answer(&s, b), None);
+    }
+
+    #[test]
+    fn a_reply_answers_verbatim_and_a_letter_picks_a_choice() {
+        let (mut s, _d, _run, _node) = fixture();
+        let a = question(&mut s, 200, &["Red", "Green"]);
+        let b = question(&mut s, 201, &["Red", "Green"]);
+        let c = question(&mut s, 202, &[]);
+        let d = question(&mut s, 203, &["Red", "Green"]);
+
+        assert_eq!(handle_line(&mut s, &reply(200, "  \n ")), Action::Nothing);
+        assert_eq!(handle_line(&mut s, &reply(555, "x")), Action::Nothing);
+        assert_eq!(
+            handle_line(&mut s, &reply(200, " b ")),
+            edit(200, "Which? - Answered: Green")
+        );
+        assert_eq!(
+            handle_line(&mut s, &reply(201, " Fish; rm -rf / `x` ")),
+            edit(201, "Which? - Answered: Fish; rm -rf / `x`")
+        );
+        // A letter beyond the choices, or on a question with none, is text.
+        assert_eq!(
+            handle_line(&mut s, &reply(202, "a")),
+            edit(202, "Which? - Answered: a")
+        );
+        assert_eq!(
+            handle_line(&mut s, &reply(203, "C")),
+            edit(203, "Which? - Answered: C")
+        );
+        let answer = |s: &Store, id| s.get_question(id).unwrap().answer.unwrap();
+        assert_eq!(answer(&s, a), "Green");
+        assert_eq!(answer(&s, b), "Fish; rm -rf / `x`");
+        assert_eq!(answer(&s, c), "a");
+        assert_eq!(answer(&s, d), "C");
+
+        // Over-long: a validation error, nothing stored.
+        let e = question(&mut s, 204, &[]);
+        let long = "x".repeat(Store::QUESTION_MAX + 1);
+        assert_eq!(handle_line(&mut s, &reply(204, &long)), Action::Nothing);
+        assert_eq!(s.get_question(e).unwrap().status, "open");
+    }
+
+    #[test]
+    fn the_closing_edit_cuts_a_long_answer_and_notes_an_expired_question() {
+        let (mut s, _d, _run, _node) = fixture();
+        let a = question(&mut s, 200, &[]);
+        let long = "y".repeat(3000);
+        let Action::Edit { text, .. } = handle_line(&mut s, &reply(200, &long)) else {
+            panic!("no edit");
+        };
+        assert!(text.chars().count() < 1600, "{}", text.chars().count());
+        assert!(text.ends_with('…'));
+        assert_eq!(s.get_question(a).unwrap().answer.unwrap(), long);
+
+        let b = question(&mut s, 201, &["Red", "Green"]);
+        rusqlite::Connection::open(_d.path().join("t.db"))
+            .unwrap()
+            .execute(
+                "UPDATE agent_questions SET status = 'expired' WHERE id = ?1",
+                [b],
+            )
+            .unwrap();
+        assert_eq!(
+            handle_line(&mut s, &tap(201, &question_data(b, 0))),
+            edit(201, "Which? - No longer needed")
+        );
+    }
+
+    #[test]
+    fn question_text_cuts_the_body_and_names_the_task() {
+        let (mut s, _d, _run, _node) = fixture();
+        let mut q = s
+            .add_question(&"z".repeat(2000), None, None, "question", &[])
+            .unwrap();
+        let text = question_text(&q);
+        assert_eq!(text.chars().count(), PHONE_TEXT_MAX + 1);
+        assert!(text.ends_with('…') && !text.contains("(task"));
+        q.body = "Which?".into();
+        q.task_id = Some(7);
+        assert_eq!(question_text(&q), "Which? (task 7)");
     }
 }

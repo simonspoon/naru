@@ -170,4 +170,38 @@ meant for the reader (or fail with a 409). To wait for a person, use a workflow
 `gate` or `naru ask`. Nothing in this repo or its built-in library calls those
 commands.
 
+### Agent questions (naru task 2700)
+
+A `naru ask` question can be answered in Telegram too; when it is sent at all
+is the routing rule of `docs/ask.md` (live conversation: the live agent first,
+`naru ask escalate <id>` to send it; no live conversation: sent at ask time).
+`core::phone::send_question` sends title `Naru: question`, the body (cut to
+900 characters) plus ` (task N)`, the line "Tap a choice or reply to this
+message with your answer." ("Reply to this message with your answer." without
+choices), and one button per choice, `A: <label>` with data
+`q:<question id>:<index>`, no Open Naru button. It records
+`phone_prompts(message_id, "question", id, <text without the hint line>)`. It
+runs only where `reader_bin()` is `Some`, and every vox call is bounded, so
+`naru ask` never waits on a hung vox. A vox without `events` gets plain text.
+
+The reader's handling, in addition to the gate lines above:
+
+- `choice` with data exactly `q:<digits>:<digits>` answers the question with the
+  stored label at that index, only when the tapped message is the one sent for
+  that question and the index is in range.
+- `reply` to a question's message: the trimmed text is the answer, verbatim
+  (data: stored, never interpreted); empty text does nothing; a single letter
+  `a`..`h` (either case) naming a choice answers with that choice's label.
+- The message is then edited to `<text> - Answered: <answer>` (the stored
+  answer, cut to 900 characters), which removes the buttons; an `expired`
+  question's becomes `<text> - No longer needed`. A tap or reply on an already
+  answered question does the same edit and changes nothing. `naru ask answer`
+  edits the message the same way (best-effort, bounded, logged only) when the
+  question had been sent to the phone.
+- Out-of-range index, unknown id or message, malformed data and a validation
+  error (an over-long reply) are logged and change nothing.
+
+Security as for gates: well-formed data for an open question whose message id
+matches, and the answer is always the stored label or the person's own text.
+
 Gates: `scripts/notify-check.sh`, `scripts/phone-answer-check.sh`.

@@ -734,6 +734,9 @@ struct AskArgs {
     /// raises no "question waiting" notice in the live conversation
     #[arg(long)]
     notice: bool,
+    /// One option the answer may pick (repeat for 2 to 8; before the text)
+    #[arg(long = "choice")]
+    choices: Vec<String>,
     /// Print the question without its `body`
     #[arg(long)]
     quiet: bool,
@@ -770,6 +773,13 @@ enum AskCmd {
         /// The answer text
         #[arg(num_args = 1.., trailing_var_arg = true, required = true)]
         text: Vec<String>,
+        /// Print the question without its `body` and `answer`
+        #[arg(long)]
+        quiet: bool,
+    },
+    /// Send an open question to the person's phone (Telegram), once
+    Escalate {
+        id: i64,
         /// Print the question without its `body` and `answer`
         #[arg(long)]
         quiet: bool,
@@ -6251,15 +6261,28 @@ fn run_ask(args: AskArgs) -> Result<()> {
                 .session
                 .or_else(|| std::env::var("CLAUDE_CODE_SESSION_ID").ok());
             let kind = if args.notice { "notice" } else { "question" };
-            let q =
-                store.add_question(&args.text.join(" "), args.task, session.as_deref(), kind)?;
+            let q = store.add_question(
+                &args.text.join(" "),
+                args.task,
+                session.as_deref(),
+                kind,
+                &args.choices,
+            )?;
             // The queue is the durable record; the notice is only a nudge, so
             // no live conversation (or a failed nudge) is not an error. Only a
             // real question nudges: a notice is read in a batch (naru task 2065).
-            if !args.notice
-                && let Ok(Some(live)) = store.current_live_session()
-            {
-                let _ = store.add_live_notice(live.id, LiveNotice::Question);
+            // With a live conversation the question goes to the live agent
+            // and nothing to the phone; it reaches the phone only through
+            // `ask escalate`, or here when no conversation is there to take
+            // it (naru task 2700). Best-effort: a failure is only logged.
+            if !args.notice {
+                if let Ok(Some(live)) = store.current_live_session() {
+                    let _ = store.add_live_notice(live.id, LiveNotice::Question);
+                } else if crate::core::notify::reader_bin().is_some()
+                    && let Err(e) = crate::core::phone::send_question(&mut store, &q)
+                {
+                    eprintln!("naru: question {} not sent to the phone: {e}", q.id);
+                }
             }
             print_record(&q, args.quiet, QUIET_DROP_QUESTION);
         }
@@ -6281,6 +6304,28 @@ fn run_ask(args: AskArgs) -> Result<()> {
         }
         Some(AskCmd::Answer { id, text, quiet }) => {
             let q = store.answer_question(id, &text.join(" "))?;
+            crate::core::phone::close_question_prompt(&store, &q);
+            print_record(&q, quiet, QUIET_DROP_QUESTION);
+        }
+        Some(AskCmd::Escalate { id, quiet }) => {
+            let q = store.get_question(id)?;
+            if q.kind != "question" {
+                return Err(Error::Conflict(format!(
+                    "{id} is a notice, not a question; nothing to send to the phone"
+                )));
+            }
+            if q.status != "open" {
+                return Err(Error::Conflict(format!(
+                    "question {id} is already {}; nothing to send to the phone",
+                    q.status
+                )));
+            }
+            if store.phone_prompt_for("question", id)?.is_some() {
+                return Err(Error::Conflict(format!(
+                    "question {id} was already sent to the phone"
+                )));
+            }
+            crate::core::phone::send_question(&mut store, &q)?;
             print_record(&q, quiet, QUIET_DROP_QUESTION);
         }
     }
@@ -11721,6 +11766,7 @@ mod tests {
             answered_at: None,
             kind: "question".into(),
             read_at: None,
+            choices: vec![],
         };
         let full = keys(&q);
         assert_eq!(
@@ -11735,7 +11781,8 @@ mod tests {
                 "created_at",
                 "answered_at",
                 "kind",
-                "read_at"
+                "read_at",
+                "choices"
             ]),
             "AgentQuestion gained/lost a field: decide whether it belongs in the \
              --quiet shape before updating this list",

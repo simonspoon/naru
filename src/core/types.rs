@@ -5871,6 +5871,8 @@ pub struct AgentQuestion {
     pub kind: String,
     /// When the live agent first saw it (`ask list --mark-read`); `null` = unread.
     pub read_at: Option<String>,
+    /// The options offered (`naru ask --choice`, naru task 2700); empty = free text only.
+    pub choices: Vec<String>,
 }
 
 /// The nine key colours of a theme (naru task 1840), each `#rrggbb`. Every

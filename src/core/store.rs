@@ -1640,6 +1640,9 @@ const MIGRATIONS: &[&str] = &[
        created_at TEXT NOT NULL DEFAULT (datetime('now')) \
      ); \
      CREATE INDEX idx_phone_prompts_ref ON phone_prompts(kind, ref_id);",
+    // Naru task 2700: the options a question offers (`naru ask --choice`), a
+    // JSON array of strings; NULL = none (answered by free text only).
+    "ALTER TABLE agent_questions ADD COLUMN choices TEXT;",
 ];
 
 /// Selects full task rows including the derived `blocked` flag.
@@ -1721,6 +1724,11 @@ fn row_to_agent_question(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentQuest
         answered_at: row.get(7)?,
         kind: row.get(8)?,
         read_at: row.get(9)?,
+        // Malformed stored JSON (a hand-edited db) reads as no choices.
+        choices: row
+            .get::<_, Option<String>>(10)?
+            .and_then(|j| serde_json::from_str(&j).ok())
+            .unwrap_or_default(),
     })
 }
 
@@ -5215,17 +5223,25 @@ impl Store {
     /// Longest question or answer body, in bytes.
     pub const QUESTION_MAX: usize = 8192;
 
-    const QUESTION_COLUMNS: &'static str =
-        "id, task_id, session, body, status, answer, created_at, answered_at, kind, read_at";
+    const QUESTION_COLUMNS: &'static str = "id, task_id, session, body, status, answer, created_at, answered_at, kind, read_at, choices";
+
+    /// Fewest and most `choices` a question may offer (naru task 2700).
+    pub const CHOICES_MIN: usize = 2;
+    pub const CHOICES_MAX: usize = 8;
+    /// Longest choice label, in characters.
+    pub const CHOICE_LABEL_MAX: usize = 100;
 
     /// Queues a question (naru task 2014). `body` non-blank, at most
     /// [`Self::QUESTION_MAX`] bytes; an unknown `task_id` is `Validation`.
+    /// `choices` is empty or 2 to 8 non-blank labels (stored trimmed), each at
+    /// most 100 characters, and never on a `notice`.
     pub fn add_question(
         &mut self,
         body: &str,
         task_id: Option<i64>,
         session: Option<&str>,
         kind: &str,
+        choices: &[String],
     ) -> Result<AgentQuestion> {
         if kind != "question" && kind != "notice" {
             return Err(Error::Validation(format!(
@@ -5245,11 +5261,39 @@ impl Store {
             self.get_task(t)
                 .map_err(|_| Error::Validation(format!("task {t} not found")))?;
         }
+        let choices: Vec<&str> = choices.iter().map(|c| c.trim()).collect();
+        if !choices.is_empty() {
+            if kind == "notice" {
+                return Err(Error::Validation("a notice cannot have choices".into()));
+            }
+            if !(Self::CHOICES_MIN..=Self::CHOICES_MAX).contains(&choices.len()) {
+                return Err(Error::Validation(format!(
+                    "a question takes {} to {} choices (got {})",
+                    Self::CHOICES_MIN,
+                    Self::CHOICES_MAX,
+                    choices.len()
+                )));
+            }
+            if choices.iter().any(|c| c.is_empty()) {
+                return Err(Error::Validation("a choice must not be empty".into()));
+            }
+            if choices
+                .iter()
+                .any(|c| c.chars().count() > Self::CHOICE_LABEL_MAX)
+            {
+                return Err(Error::Validation(format!(
+                    "a choice must be at most {} characters",
+                    Self::CHOICE_LABEL_MAX
+                )));
+            }
+        }
+        let choices_json = (!choices.is_empty())
+            .then(|| serde_json::to_string(&choices).expect("choices serialize"));
         let session = session.map(str::trim).filter(|s| !s.is_empty());
         self.conn.execute(
-            "INSERT INTO agent_questions (task_id, session, body, kind, created_at) \
-             VALUES (?1, ?2, ?3, ?4, datetime('now'))",
-            (task_id, session, body, kind),
+            "INSERT INTO agent_questions (task_id, session, body, kind, choices, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'))",
+            (task_id, session, body, kind, choices_json),
         )?;
         self.get_question(self.conn.last_insert_rowid())
     }
@@ -15990,20 +16034,64 @@ mod tests {
     }
 
     #[test]
+    fn question_choices_are_validated_trimmed_and_stored() {
+        let (mut store, _dir) = temp_store();
+        let c = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let q = store
+            .add_question("which?", None, None, "question", &c(&[" Red ", "Green"]))
+            .unwrap();
+        assert_eq!(q.choices, c(&["Red", "Green"]));
+        assert_eq!(store.get_question(q.id).unwrap().choices, q.choices);
+        let plain = store
+            .add_question("free?", None, None, "question", &[])
+            .unwrap();
+        assert!(plain.choices.is_empty());
+
+        let long = "x".repeat(101);
+        let nine: Vec<String> = (0..9).map(|i| format!("c{i}")).collect();
+        for (kind, bad) in [
+            ("question", c(&["only"])),
+            ("question", nine),
+            ("question", c(&["a", "  "])),
+            ("question", c(&["a", &long])),
+            ("notice", c(&["a", "b"])),
+        ] {
+            assert!(
+                matches!(
+                    store.add_question("q", None, None, kind, &bad),
+                    Err(Error::Validation(_))
+                ),
+                "{kind} {bad:?}"
+            );
+        }
+        let eight: Vec<String> = (0..8).map(|i| format!("c{i}")).collect();
+        assert_eq!(
+            store
+                .add_question("q", None, None, "question", &eight)
+                .unwrap()
+                .choices
+                .len(),
+            8
+        );
+        // Nothing stored by the rejected ones: three questions in all.
+        assert_eq!(store.list_questions(None, None, false).unwrap().len(), 3);
+    }
+
+    #[test]
     fn agent_questions_queue_and_answer_once() {
         let (mut store, _dir) = temp_store();
         let p = store.create_project("p", None, None, None, None).unwrap();
         let t = add_task(&mut store, p.id, "task");
         let q = store
-            .add_question("which way?", Some(t.id), Some("s1"), "question")
+            .add_question("which way?", Some(t.id), Some("s1"), "question", &[])
             .unwrap();
         assert_eq!((q.status.as_str(), q.answer.as_deref()), ("open", None));
         assert!(matches!(
-            store.add_question("  ", None, None, "question"),
+            store.add_question("  ", None, None, "question", &[]),
             Err(Error::Validation(_))
         ));
         assert!(matches!(
-            store.add_question("x", Some(999), None, "question"),
+            store.add_question("x", Some(999), None, "question", &[]),
             Err(Error::Validation(_))
         ));
         assert_eq!(
@@ -16029,7 +16117,7 @@ mod tests {
         assert!(matches!(store.get_question(99), Err(Error::NotFound(_))));
         // Naru task 2651: an open notice is not an open question.
         store
-            .add_question("loop report", Some(t.id), None, "notice")
+            .add_question("loop report", Some(t.id), None, "notice", &[])
             .unwrap();
         assert!(
             store
@@ -19484,15 +19572,15 @@ mod tests {
         );
         assert_eq!(
             MIGRATIONS.len(),
-            110,
-            "a fresh db should report user_version 110"
+            111,
+            "a fresh db should report user_version 111"
         );
         let (store, _dir) = temp_store();
         let version: i64 = store
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 110);
+        assert_eq!(version, 111);
     }
 
     /// Naru task 2651: legacy loop reports stored as questions become
@@ -19553,17 +19641,17 @@ mod tests {
         let t = add_task(&mut store, p.id, "task");
         let other = add_task(&mut store, p.id, "other");
         let q = store
-            .add_question("which?", Some(t.id), None, "question")
+            .add_question("which?", Some(t.id), None, "question", &[])
             .unwrap();
         let a = store
-            .add_question("asked", Some(t.id), None, "question")
+            .add_question("asked", Some(t.id), None, "question", &[])
             .unwrap();
         store.answer_question(a.id, "yes").unwrap();
         let n = store
-            .add_question("report", Some(t.id), None, "notice")
+            .add_question("report", Some(t.id), None, "notice", &[])
             .unwrap();
         let o = store
-            .add_question("still?", Some(other.id), None, "question")
+            .add_question("still?", Some(other.id), None, "question", &[])
             .unwrap();
         let close = |status| TaskPatch {
             status: Some(status),
@@ -19628,10 +19716,10 @@ mod tests {
             let done = add_task(&mut store, p.id, "done");
             let live = add_task(&mut store, p.id, "live");
             let q1 = store
-                .add_question("old", Some(done.id), None, "question")
+                .add_question("old", Some(done.id), None, "question", &[])
                 .unwrap();
             let q2 = store
-                .add_question("live", Some(live.id), None, "question")
+                .add_question("live", Some(live.id), None, "question", &[])
                 .unwrap();
             store
                 .conn
@@ -19640,7 +19728,10 @@ mod tests {
             // Undo what a later migration added, so it re-runs cleanly.
             store
                 .conn
-                .execute_batch("DROP TABLE phone_prompts;")
+                .execute_batch(
+                    "DROP TABLE phone_prompts; \
+                     ALTER TABLE agent_questions DROP COLUMN choices;",
+                )
                 .unwrap();
             store
                 .conn
@@ -19717,7 +19808,7 @@ mod tests {
             .conn
             // Undo what later migrations added, so they re-run cleanly.
             .execute_batch(&format!(
-                "DROP TABLE phone_prompts; ALTER TABLE live_results DROP COLUMN report_file; ALTER TABLE live_results DROP COLUMN artifact_id; ALTER TABLE workflow_edges DROP COLUMN kind; ALTER TABLE cc_messages DROP COLUMN cache_creation_1h_tokens; ALTER TABLE projects DROP COLUMN run_restart; ALTER TABLE projects DROP COLUMN run_dir; ALTER TABLE projects DROP COLUMN run_health; DROP TABLE live_board_clips; PRAGMA user_version = {DROP_LOOP}"
+                "DROP TABLE phone_prompts; ALTER TABLE agent_questions DROP COLUMN choices; ALTER TABLE live_results DROP COLUMN report_file; ALTER TABLE live_results DROP COLUMN artifact_id; ALTER TABLE workflow_edges DROP COLUMN kind; ALTER TABLE cc_messages DROP COLUMN cache_creation_1h_tokens; ALTER TABLE projects DROP COLUMN run_restart; ALTER TABLE projects DROP COLUMN run_dir; ALTER TABLE projects DROP COLUMN run_health; DROP TABLE live_board_clips; PRAGMA user_version = {DROP_LOOP}"
             ))
             .unwrap();
         drop(store);
