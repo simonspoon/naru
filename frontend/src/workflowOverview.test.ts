@@ -70,8 +70,10 @@ describe('workflowOverview', () => {
     expect(lastFailureLabel(wf({ last_failure_at: '2026-01-01 09:00:00' }), NOW)).toBe('3h ago')
   })
 
-  it('derives the next run for a time workflow only', () => {
-    expect(nextRunLabel(wf({ next_run_at: '2026-01-01 13:00:00' }), NOW)).toBe('—')
+  it('derives the next run for a scheduled workflow only', () => {
+    expect(nextRunLabel(wf(), NOW)).toBe('—')
+    // a cron schedule node: no time trigger, but the server stamped a next run
+    expect(nextRunLabel(wf({ next_run_at: '2026-01-01 13:00:00' }), NOW)).toBe('in 1h')
     const t = { trigger: 'time' as const }
     expect(nextRunLabel(wf(t), NOW)).toBe('due')
     expect(nextRunLabel(wf({ ...t, next_run_at: '2026-01-01 11:00:00' }), NOW)).toBe('due')

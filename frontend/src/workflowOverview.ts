@@ -37,11 +37,12 @@ export function lastFailureLabel(w: Workflow, now: number = Date.now()): string 
   return w.last_failure_at === null ? '—' : timeAgo(w.last_failure_at, now)
 }
 
-/** The next scheduled run. Only an enabled time workflow has one: a time workflow
+/** The next scheduled run. Only an enabled time or cron-schedule workflow has one: a time workflow
  * that never ran on its timer (null) or whose stamp has passed is due on the
  * watcher's next tick. */
 export function nextRunLabel(w: Workflow, now: number = Date.now()): string {
-  if (!isScheduled(w)) return '—'
+  // A cron `schedule` node has no `time` trigger, but the server gives it a stamp.
+  if (!isScheduled(w) && w.next_run_at === null) return '—'
   if (w.next_run_at === null) return 'due'
   const secs = Math.ceil((parseTimestamp(w.next_run_at).getTime() - now) / 1000)
   if (secs <= 0) return 'due'

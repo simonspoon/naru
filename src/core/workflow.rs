@@ -285,6 +285,35 @@ impl Cron {
     }
 }
 
+/// The UTC fields `(year, month, day, hour, minute, dow)` of Unix minute
+/// `min` (dow 0 = Sunday), by the days-to-civil algorithm.
+fn civil_minute(min: i64) -> (i64, u32, u32, u32, u32, u32) {
+    let days = min.div_euclid(1440);
+    let rem = min.rem_euclid(1440) as u32;
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    (y, m, d, rem / 60, rem % 60, (days + 4).rem_euclid(7) as u32)
+}
+
+/// The first minute strictly after Unix time `after_secs` that `cron` names,
+/// as `YYYY-MM-DD HH:MM:SS` UTC (the `next_run_at` form), scanning minute by
+/// minute for up to a year; `None` when nothing matches in that span.
+pub fn next_cron_run(cron: &Cron, after_secs: i64) -> Option<String> {
+    let start = after_secs.div_euclid(60) + 1;
+    (start..start + 366 * 1440).find_map(|min| {
+        let (y, mo, d, h, mi, w) = civil_minute(min);
+        cron.matches(mi, h, d, mo, w)
+            .then(|| format!("{y:04}-{mo:02}-{d:02} {h:02}:{mi:02}:00"))
+    })
+}
+
 /// Checks one node's `config` against its kind and answers it normalized —
 /// the form `Store` writes. Unknown keys and bad values are errors (the
 /// store's `validation`); nothing about the *environment* is checked (a
@@ -6979,6 +7008,41 @@ mod tests {
         assert!(st.with(|s| claim_time_run(s, every)).unwrap().is_some());
         assert!(st.with(|s| s.due_time_workflows()).unwrap().is_empty());
         assert!(st.with(|s| claim_time_run(s, every)).unwrap().is_none());
+    }
+
+    #[test]
+    fn next_cron_run_finds_the_next_match() {
+        let c = parse_cron("0 9 * * *").unwrap();
+        // 2026-11-10 08:30:00 UTC = 1_794_299_400
+        assert_eq!(
+            next_cron_run(&c, 1_794_299_400).unwrap(),
+            "2026-11-10 09:00:00"
+        );
+        // at 09:00:00 exactly the next one is tomorrow
+        assert_eq!(
+            next_cron_run(&c, 1_794_301_200).unwrap(),
+            "2026-11-11 09:00:00"
+        );
+        // Feb 31 never matches
+        assert!(next_cron_run(&parse_cron("0 0 31 2 *").unwrap(), 0).is_none());
+    }
+
+    #[test]
+    fn list_shows_next_run_for_a_cron_schedule() {
+        let (st, _d) = store();
+        st.with(|s| {
+            let wf = s.create_workflow(None, "Cron", None).unwrap().id;
+            node(
+                s,
+                wf,
+                WorkflowNodeKind::Schedule,
+                "S",
+                json!({"cron": "0 9 * * *"}),
+            );
+        });
+        let row = st.with(|s| s.list_workflows(None)).unwrap().remove(0);
+        let next = row.next_run_at.unwrap();
+        assert!(next.ends_with(" 09:00:00"), "{next}");
     }
 
     #[test]

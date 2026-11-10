@@ -2960,7 +2960,11 @@ const WORKFLOW_COLUMNS: &str = "w.id, w.project_id, w.name, w.description, \
               WHERE c.workflow_id = w.id \
                 AND (c.base_rev IS NULL OR c.base_rev < \
                      (SELECT MAX(r.rev) FROM workflow_revisions r \
-                       WHERE r.workflow_id = b.workflow_id)))";
+                       WHERE r.workflow_id = b.workflow_id))), \
+     (SELECT json_extract(n.config, '$.cron') FROM workflow_nodes n \
+        WHERE n.workflow_id = w.id AND n.kind = 'schedule' AND w.enabled = 1 \
+          AND json_extract(n.config, '$.every_minutes') IS NULL \
+        ORDER BY n.id LIMIT 1)";
 const WORKFLOW_NODE_COLUMNS: &str =
     "id, workflow_id, kind, title, config, x, y, created_at, updated_at";
 const WORKFLOW_EDGE_COLUMNS: &str =
@@ -3017,7 +3021,21 @@ fn row_to_workflow(row: &rusqlite::Row<'_>) -> rusqlite::Result<Workflow> {
             .as_deref()
             .and_then(WorkflowRunStatus::parse),
         last_failure_at: row.get(10)?,
-        next_run_at: row.get(11)?,
+        next_run_at: match row.get::<_, Option<String>>(11)? {
+            Some(t) => Some(t),
+            // A `schedule` node's cron: the subselect above only knows
+            // `every_minutes`, so the next match is scanned for here.
+            None => row
+                .get::<_, Option<String>>(17)?
+                .and_then(|c| super::workflow::parse_cron(&c).ok())
+                .and_then(|c| {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .ok()?
+                        .as_secs();
+                    super::workflow::next_cron_run(&c, now as i64)
+                }),
+        },
         trigger_events: row
             .get::<_, Option<String>>(12)?
             .and_then(|j| serde_json::from_str(&j).ok())
