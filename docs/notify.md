@@ -53,8 +53,10 @@ when `serve` runs `--lan`** (and, with a DNS name, `--allow-host`).
 
 In order: `--base-url`; the `notify.base-url` key in `~/.mesa/config.json`
 (read-only from the CLI, no Settings UI, preserved by every other section's
-save); otherwise `http://<this machine's LAN IPv4>:7770`, found by asking the OS
-which interface routes outward (no packet is sent). With no LAN address the
+save); otherwise `http://<this machine's LAN IPv4>:<port>`, where `<port>` is `serve.port`
+from the same config file (7770 when unset) and the address is found by asking
+the OS which interface routes outward (no packet is sent). A `serve --port N`
+given only as a flag is invisible to the CLI; set `serve.port` or `--base-url`. With no LAN address the
 command is `unavailable` and asks for `--base-url`. The base must be `http://`
 or `https://`; a trailing slash is dropped.
 

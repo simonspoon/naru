@@ -19,9 +19,6 @@ use serde_json::{Value, json};
 
 use super::store::{Error, Result};
 
-/// The port the button's auto-detected base URL names: `serve`'s default.
-const DEFAULT_PORT: u16 = 7770;
-
 /// Longest a route may be, matching the live conversation's route bound.
 pub const ROUTE_MAX: usize = 200;
 
@@ -99,7 +96,7 @@ fn lan_ip() -> Option<IpAddr> {
 }
 
 /// The base URL for the button: `flag`, else the `notify.base-url` config
-/// key, else `http://<LAN IPv4>:7770`.
+/// key, else `http://<LAN IPv4>:<serve.port>` (7770 when the config sets none).
 pub(crate) fn resolve_base(flag: Option<&str>) -> Result<String> {
     if let Some(flag) = flag {
         return validate_base_url(flag);
@@ -109,13 +106,24 @@ pub(crate) fn resolve_base(flag: Option<&str>) -> Result<String> {
         Ok(None) => {}
         Err(message) => return Err(Error::Unavailable(message)),
     }
+    let port = serve_port(super::config::serve_settings())?;
     match lan_ip() {
-        Some(ip) => Ok(format!("http://{ip}:{DEFAULT_PORT}")),
+        Some(ip) => Ok(format!("http://{ip}:{port}")),
         None => Err(Error::Unavailable(
             "could not find this machine's LAN address for the button; pass --base-url \
              <url> or set notify.base-url in ~/.mesa/config.json"
                 .into(),
         )),
+    }
+}
+
+/// The port the auto-detected base names: the config's `serve.port`, else
+/// `serve`'s default. A config read error is `unavailable`, as for
+/// `notify.base-url`.
+fn serve_port(settings: std::result::Result<super::config::ServeSettings, String>) -> Result<u16> {
+    match settings {
+        Ok(s) => Ok(s.port.unwrap_or(super::config::DEFAULT_SERVE_PORT)),
+        Err(message) => Err(Error::Unavailable(message)),
     }
 }
 
@@ -229,6 +237,57 @@ fn excerpt(stderr: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn serve_port_follows_config_else_default() {
+        use crate::core::config::ServeSettings;
+        let with = |port| {
+            Ok(ServeSettings {
+                port,
+                ..Default::default()
+            })
+        };
+        assert_eq!(serve_port(with(Some(7777))).unwrap(), 7777);
+        assert_eq!(serve_port(with(None)).unwrap(), 7770);
+        assert!(matches!(
+            serve_port(Err("bad".into())),
+            Err(Error::Unavailable(_))
+        ));
+    }
+
+    #[test]
+    fn resolve_base_uses_config_serve_port() {
+        use crate::core::attachments::ENV_LOCK;
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("naru-notify-2697-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = dir.join("config.json");
+        let prev = std::env::var("MESA_CONFIG_FILE");
+        // SAFETY: ENV_LOCK gives this test exclusive access to the env vars.
+        unsafe { std::env::set_var("MESA_CONFIG_FILE", &cfg) };
+        let ip = lan_ip();
+        std::fs::write(&cfg, r#"{"serve":{"port":7777}}"#).unwrap();
+        let got = resolve_base(None);
+        std::fs::write(
+            &cfg,
+            r#"{"serve":{"port":7777},"notify":{"base-url":"https://n.example"}}"#,
+        )
+        .unwrap();
+        let configured = resolve_base(None).unwrap();
+        let flagged = resolve_base(Some("http://1.2.3.4:9")).unwrap();
+        unsafe {
+            match prev {
+                Ok(v) => std::env::set_var("MESA_CONFIG_FILE", v),
+                Err(_) => std::env::remove_var("MESA_CONFIG_FILE"),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        if let Some(ip) = ip {
+            assert_eq!(got.unwrap(), format!("http://{ip}:7777"));
+        }
+        assert_eq!(configured, "https://n.example");
+        assert_eq!(flagged, "http://1.2.3.4:9");
+    }
 
     #[test]
     fn send_is_stubbed_under_test_without_a_vox_override() {

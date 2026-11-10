@@ -402,7 +402,7 @@ EXAMPLES
     /// page, which bounces into the iOS app's `naru://<route>` link; the phone
     /// reaches it only while `serve --lan` runs. The button's base URL is
     /// `--base-url`, else `notify.base-url` in ~/.mesa/config.json, else this
-    /// machine's LAN address on port 7770. Prints
+    /// machine's LAN address on the config's `serve.port` (7770 if unset). Prints
     /// `{sent, message_id, chat_id, open_url}`; takes no `--quiet`.
     /// See docs/notify.md.
     #[command(after_help = "\

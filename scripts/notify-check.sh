@@ -113,6 +113,12 @@ set +e
 rc=$?
 set -e
 if [ "$rc" = 0 ]; then
+  echo '{"serve":{"port":7777}}' >"$MESA_CONFIG_FILE"
+  run_ok --open live "x"
+  jq -r .open_url <<<"$OUT" | grep -Eq '^http://[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:7777/open/live$' ||
+    fail "serve.port base: $OUT"
+  ok "no flag: the LAN IPv4 on the config's serve.port is used"
+  rm "$MESA_CONFIG_FILE"
   jq -r .open_url <"$TMP/out" | grep -Eq '^http://[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:7770/open/live$' ||
     fail "auto-detected base: $(cat "$TMP/out")"
   ok "no flag, no config: the LAN IPv4 on :7770 is used"
