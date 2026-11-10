@@ -54,8 +54,8 @@ when `serve` runs `--lan`** (and, with a DNS name, `--allow-host`).
 
 In order: `--base-url`; the `notify.base-url` key in `~/.mesa/config.json`
 (read-only from the CLI, no Settings UI, preserved by every other section's
-save); otherwise `http://<this machine's LAN IPv4>:<port>`, where `<port>` is `serve.port`
-from the same config file (7770 when unset) and the address is found by asking
+save); otherwise `http://<host>:<port>`, where `<host>` is this machine's **Tailscale IPv4** when Tailscale is up (asked of `tailscale ip -4` at send time, PATH then the macOS app's binary, override `NARU_TAILSCALE_BIN`; only a 100.64.0.0/10 answer counts) so the button works off home wifi, else its LAN IPv4. The server must listen beyond loopback (`serve --lan`, which binds 0.0.0.0 and so answers on the Tailscale address too); default `serve` binds 127.0.0.1 and answers on neither. `<port>` is `serve.port`
+from the same config file (7770 when unset); the LAN address is found by asking
 the OS which interface routes outward (no packet is sent). A `serve --port N`
 given only as a flag is invisible to the CLI; set `serve.port` or `--base-url`. With no LAN address the
 command is `unavailable` and asks for `--base-url`. The base must be `http://`

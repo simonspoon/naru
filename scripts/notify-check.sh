@@ -9,7 +9,7 @@
 #      arrives byte-identical), the printed JSON, no --title/--button when not
 #      asked for;
 #   2. base-URL precedence: --base-url, then `notify.base-url` in the config,
-#      then the auto-detected LAN address (or `unavailable` naming --base-url);
+#      then the auto-detected Tailscale or LAN address (or `unavailable` naming --base-url);
 #      a trailing slash on the base is handled;
 #   3. failures: a missing binary and a stub saying "Run `vox init` first" are
 #      `unavailable` (exit 1) naming what to do; a bad --open, a non-http
@@ -109,8 +109,22 @@ run_ok --open live --base-url http://10.0.0.5:7770 "x"
 ok "notify.base-url in the config is used, and --base-url beats it"
 
 rm "$MESA_CONFIG_FILE"
+# Tailscale preference (naru task 2703): a stub `tailscale` printing a 100.64/10
+# address wins; one printing anything else falls back to the LAN address.
+printf '#!/bin/sh\necho 100.64.9.8\n' >"$STUB_DIR/ts-up"
+printf '#!/bin/sh\necho 192.168.9.8\n' >"$STUB_DIR/ts-bad"
+chmod +x "$STUB_DIR/ts-up" "$STUB_DIR/ts-bad"
+echo '{"serve":{"port":7777}}' >"$MESA_CONFIG_FILE"
+NARU_TAILSCALE_BIN="$STUB_DIR/ts-up" run_ok --open live "x"
+[ "$(jq -r .open_url <<<"$OUT")" = "http://100.64.9.8:7777/open/live" ] || fail "tailscale base: $OUT"
+NARU_TAILSCALE_BIN="$STUB_DIR/ts-bad" run_ok --open live "x"
+jq -r .open_url <<<"$OUT" | grep -Eq '^http://[0-9.]+:7777/open/live$' && ! jq -r .open_url <<<"$OUT" | grep -q 192.168.9.8 ||
+  fail "non-tailscale answer must be ignored: $OUT"
+ok "a Tailscale address is preferred; a non-100.64/10 answer falls back"
+rm "$MESA_CONFIG_FILE"
+
 set +e
-"$MESA" notify --open live "x" >"$TMP/out" 2>"$TMP/err"
+NARU_TAILSCALE_BIN="$STUB_DIR/ts-bad" "$MESA" notify --open live "x" >"$TMP/out" 2>"$TMP/err"
 rc=$?
 set -e
 if [ "$rc" = 0 ]; then

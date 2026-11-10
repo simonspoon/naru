@@ -101,9 +101,70 @@ fn lan_ip() -> Option<IpAddr> {
     (!ip.is_loopback() && !ip.is_unspecified()).then_some(ip)
 }
 
+/// Whether `ip` is in Tailscale's CGNAT range, 100.64.0.0/10.
+fn is_tailscale_v4(ip: IpAddr) -> bool {
+    matches!(ip, IpAddr::V4(v4) if v4.octets()[0] == 100 && (64..128).contains(&v4.octets()[1]))
+}
+
+/// This machine's own Tailscale IPv4, asked of the `tailscale` CLI at send
+/// time (`tailscale ip -4`), or `None` when Tailscale is absent, down or
+/// answers anything outside its 100.64.0.0/10 range (including on Windows
+/// without the CLI on PATH). `MESA_TAILSCALE_BIN` / `NARU_TAILSCALE_BIN`
+/// override the binary, the same seam as `vox_bin`.
+fn tailscale_ip() -> Option<IpAddr> {
+    let var = |n: &str| std::env::var(n).ok().filter(|v| !v.is_empty());
+    let bins = match var("NARU_TAILSCALE_BIN").or_else(|| var("MESA_TAILSCALE_BIN")) {
+        Some(bin) => vec![bin],
+        None => vec![
+            "tailscale".to_string(),
+            "/Applications/Tailscale.app/Contents/MacOS/Tailscale".to_string(),
+        ],
+    };
+    bins.iter().find_map(|bin| {
+        let mut child = Command::new(bin)
+            .args(["ip", "-4"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()?;
+        // A wedged daemon must not stall a notification: give it 2 s.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            match child.try_wait().ok()? {
+                Some(status) if status.success() => break,
+                Some(_) => return None,
+                None if std::time::Instant::now() >= deadline => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                None => std::thread::sleep(std::time::Duration::from_millis(20)),
+            }
+        }
+        let out = child.wait_with_output().ok()?;
+        let ip: IpAddr = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .next()?
+            .trim()
+            .parse()
+            .ok()?;
+        is_tailscale_v4(ip).then_some(ip)
+    })
+}
+
 /// The base URL for the button: `flag`, else the `notify.base-url` config
-/// key, else `http://<LAN IPv4>:<serve.port>` (7770 when the config sets none).
+/// key, else `http://<Tailscale IPv4>:<serve.port>` when Tailscale is up
+/// here, else `http://<LAN IPv4>:<serve.port>` (7770 when the config sets none).
 pub(crate) fn resolve_base(flag: Option<&str>) -> Result<String> {
+    resolve_base_with(flag, tailscale_ip, lan_ip)
+}
+
+fn resolve_base_with(
+    flag: Option<&str>,
+    tailscale: impl FnOnce() -> Option<IpAddr>,
+    lan: impl FnOnce() -> Option<IpAddr>,
+) -> Result<String> {
     if let Some(flag) = flag {
         return validate_base_url(flag);
     }
@@ -113,7 +174,7 @@ pub(crate) fn resolve_base(flag: Option<&str>) -> Result<String> {
         Err(message) => return Err(Error::Unavailable(message)),
     }
     let port = serve_port(super::config::serve_settings())?;
-    match lan_ip() {
+    match tailscale().or_else(lan) {
         Some(ip) => Ok(format!("http://{ip}:{port}")),
         None => Err(Error::Unavailable(
             "could not find this machine's LAN address for the button; pass --base-url \
@@ -390,25 +451,28 @@ mod tests {
     }
 
     #[test]
-    fn resolve_base_uses_config_serve_port() {
+    fn resolve_base_order() {
         use crate::core::attachments::ENV_LOCK;
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let dir = std::env::temp_dir().join(format!("naru-notify-2697-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("naru-notify-2703-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let cfg = dir.join("config.json");
         let prev = std::env::var("MESA_CONFIG_FILE");
         // SAFETY: ENV_LOCK gives this test exclusive access to the env vars.
         unsafe { std::env::set_var("MESA_CONFIG_FILE", &cfg) };
-        let ip = lan_ip();
+        let ts: Option<IpAddr> = Some("100.64.1.2".parse().unwrap());
+        let lan: Option<IpAddr> = Some("192.168.1.5".parse().unwrap());
         std::fs::write(&cfg, r#"{"serve":{"port":7777}}"#).unwrap();
-        let got = resolve_base(None);
+        let both = resolve_base_with(None, || ts, || lan);
+        let lan_only = resolve_base_with(None, || None, || lan);
+        let neither = resolve_base_with(None, || None, || None);
+        let flagged = resolve_base_with(Some("http://1.2.3.4:9"), || ts, || lan);
         std::fs::write(
             &cfg,
             r#"{"serve":{"port":7777},"notify":{"base-url":"https://n.example"}}"#,
         )
         .unwrap();
-        let configured = resolve_base(None).unwrap();
-        let flagged = resolve_base(Some("http://1.2.3.4:9")).unwrap();
+        let configured = resolve_base_with(None, || ts, || lan);
         unsafe {
             match prev {
                 Ok(v) => std::env::set_var("MESA_CONFIG_FILE", v),
@@ -416,11 +480,22 @@ mod tests {
             }
         }
         let _ = std::fs::remove_dir_all(&dir);
-        if let Some(ip) = ip {
-            assert_eq!(got.unwrap(), format!("http://{ip}:7777"));
-        }
-        assert_eq!(configured, "https://n.example");
-        assert_eq!(flagged, "http://1.2.3.4:9");
+        assert_eq!(both.unwrap(), "http://100.64.1.2:7777");
+        assert_eq!(lan_only.unwrap(), "http://192.168.1.5:7777");
+        assert!(matches!(neither, Err(Error::Unavailable(_))));
+        assert_eq!(flagged.unwrap(), "http://1.2.3.4:9");
+        assert_eq!(configured.unwrap(), "https://n.example");
+    }
+
+    #[test]
+    fn tailscale_range() {
+        assert!(is_tailscale_v4("100.64.0.1".parse().unwrap()));
+        assert!(is_tailscale_v4("100.127.255.255".parse().unwrap()));
+        assert!(!is_tailscale_v4("100.128.0.1".parse().unwrap()));
+        assert!(!is_tailscale_v4("192.168.1.5".parse().unwrap()));
+        assert!(!is_tailscale_v4(
+            "fd7a:115c:a1e0::bc35:de79".parse().unwrap()
+        ));
     }
 
     #[test]
