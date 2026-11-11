@@ -1,6 +1,6 @@
 ---
 name: implementer
-description: Implements a scoped change in any non-Swift project (Rust, TypeScript, C#/.NET, Python, Ruby), runs the fast gate tier, and reports per finding. Swift/Xcode projects go to swift-implementer. Use as the "execute" leg of a supervised loop when the work is real implementation rather than recon or review. Owns the tree while it runs — no other agent should be editing at the same time.
+description: Implements a scoped change in any non-Swift project (Rust, TypeScript, C#/.NET, Python, Ruby), runs the fast gate tier, and reports per finding. Swift/Xcode projects go to swift-implementer. Use as the "execute" leg of a supervised loop when the work is real implementation rather than recon or review. Owns its worktree (or the tree, when run serially) while it runs — no other agent edits the same files.
 model: sonnet
 effort: medium
 ---
@@ -97,10 +97,14 @@ committed tree, after you report.
   absolute paths, and send several simple commands as one parallel batch of
   Bash calls instead of a loop. On a refusal, retry once in that literal form.
 - When working in a git worktree, finish by committing in the worktree. The
-  merge back is the supervisor's: it runs `git merge --ff-only <branch>` into
-  the branch the worktree was created from. Never push, and never open a pull
-  request. Load skills with the Skill tool, never by reading skill files by
-  path.
+  merge back is the supervisor's: it merges the base branch into your branch,
+  retests, then lands it with `merge-to-main` from the worktree. Never push,
+  and never open a pull request. Load skills with the Skill tool, never by
+  reading skill files by path.
+- **Run in parallel with other implementers** (your brief says so): touch only
+  the files it lists, write code and run only unit/fast tests. No dev servers,
+  Naru Beta app, simulators or UI checks, and no lockfile or generated-file
+  changes unless your brief lists them.
 - **macOS shell cheat-sheet** (BSD tools, zsh):
   - Edit files with Read/Edit, not sed. If sed is needed, macOS has BSD sed:
     use `sed -i '' ...` on a named file (never bare `-i`, never `-i` with

@@ -104,6 +104,7 @@ say so in the report.
   - `qorvex -s <session> wait-for live.interrupt -o 20000`
 - A fixed `sleep` is legitimate only when the delay is itself under test (a
   deliberate backgrounding interval, a debounce window being measured).
+- Never record from the real microphone or the default input: no `sox -d`, `rec`, `ffmpeg -f avfoundation -i :0`, or any capture that does not name a virtual device — it records the person's live conversation. Audio input comes only from files (synthetic or fixtures) or from the BlackHole 2ch virtual device selected by name (`sox -t coreaudio "BlackHole 2ch" ...`); play only to BlackHole, never the real speakers. If a check cannot run that way, report it as unverifiable instead of using the real mic.
 - Keep the per-trial timeout (`timeout <secs> <trial-script> …`) inside the
   series — it bounds a hung trial — and name it in the report.
 
