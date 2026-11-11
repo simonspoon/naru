@@ -20996,8 +20996,14 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
     /// (DNS-name Host) and a cross-site fetch (foreign Origin) are still
     /// refused on all three mutations. Only a Rust test can reach the
     /// peer-address half — every curl from this machine is a loopback peer.
+    // `HOME_LOCK` is held across the awaits on purpose — see
+    // `run_script_reports_a_nonzero_exit_as_data`.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn lan_page_may_author_a_script_but_not_from_a_rebound_page() {
+        let _home = crate::core::library::test_home::HOME_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let (_dir, mut state) = test_state();
         state.lan = true;
         let headers = hdrs(Some("192.168.1.50:0"), Some("http://192.168.1.50:0"));
@@ -21096,8 +21102,14 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
     /// `--lan` already hands that network the run — while a rebound page
     /// (DNS-name Host) and a cross-site fetch (foreign Origin) stay refused,
     /// and default mode refuses a non-loopback peer outright.
+    // `HOME_LOCK` is held across the awaits on purpose — see
+    // `run_script_reports_a_nonzero_exit_as_data`.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn lan_page_may_start_and_stop_a_detached_run_but_not_from_a_rebound_page() {
+        let _home = crate::core::library::test_home::HOME_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let (_dir, mut state) = test_state();
         state.lan = true;
         let script = new_script(&state, None, "sleep 30");
@@ -21505,8 +21517,17 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
     }
 
     /// A script's own nonzero exit is data in a 200, exactly like a `HookRun`.
+    // `HOME_LOCK` is held across the awaits on purpose: an unbound script
+    // runs in `config::workspace_dir()`, read from the process-global `$HOME`
+    // that `library::test_home::with_home_dir` swaps to a tempdir and then
+    // deletes, so without it bash can be spawned in a vanished cwd (a 502).
+    // `#[tokio::test]` is current-thread, so nothing here contends for it.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn run_script_reports_a_nonzero_exit_as_data() {
+        let _home = crate::core::library::test_home::HOME_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let (_dir, state) = test_state();
         let script = new_script(&state, None, "echo out; echo err >&2; exit 3");
         let resp = run_one(&state, script.id).await.unwrap();
@@ -21563,8 +21584,14 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
 
     /// cwd comes from the script's own project binding, resolved server-side;
     /// an unbound script runs in `~/.mesa/workspace`.
+    // `HOME_LOCK` is held across the awaits on purpose — see
+    // `run_script_reports_a_nonzero_exit_as_data`.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn run_script_cwd_is_the_bound_projects_local_path_else_the_workspace() {
+        let _home = crate::core::library::test_home::HOME_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let (dir, state) = test_state();
         let root = dir.path().join("repo");
         std::fs::create_dir_all(&root).unwrap();
