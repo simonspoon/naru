@@ -25,6 +25,9 @@ pub const DEV_GUARD_HOOK: &str = r##"#!/usr/bin/env bash
 # MESA_DB / NARU_HOME / MESA_HOME (from an assignment in the command, else the
 # hook's environment) name somewhere other than the real data locations, or
 # when none is set (the serve would open the real db).
+# An install.sh / cargo install / launchctl-on-com.naru.* mention that sits
+# only inside quotes, as an argument of a command that just reads or records
+# text (git commit -m, naru task note, echo, grep ...), is data and passes.
 # A guardrail, not a security boundary. Never fails a tool call otherwise.
 command -v jq >/dev/null 2>&1 || exit 0
 
@@ -96,7 +99,65 @@ case "$tool" in
       *install.sh*) why="scripts/install.sh installs onto the real PATH" ;;
       *"cargo install"*) why="cargo install overwrites the real binary" ;;
       *launchctl*com.naru.*|*com.naru.*launchctl*) why="launchctl on a com.naru.* service restarts the real install" ;;
-      *"$app"*) why="$app is the real app" ;;
+    esac
+    # The match above can only be lifted, never added to: python prints
+    # "data" when every mention sits inside quotes as an argument of a
+    # text-only command (git commit -m, naru task note, echo, grep ...) in a
+    # plain command list. Any pipe, redirect, subshell, brace, heredoc,
+    # command substitution (even inside quotes), ANSI-C quote, unbalanced
+    # quote, assignment of a mention, a mention outside quotes, or a glob,
+    # $ or backslash in any other segment (a decoy mention must not wave an obfuscated run
+    # through) keeps the deny; so does a missing python3.
+    if [ -n "$why" ]; then
+      data=$(printf '%s' "$cmd" | python3 -c '
+import re, sys
+cmd = sys.stdin.read()
+FR = ("install.sh", "cargo install", "launchctl", "com.naru.")
+DATA = set("echo grep egrep fgrep cat head tail ls wc jq helios git naru mesa".split())
+SUB = {"git": set("commit log show diff status tag".split()), "naru": set("task inbox live memory kb ask notify".split())}
+SUB["mesa"] = SUB["naru"]
+if "$\x27" in cmd or "$(" in cmd or "`" in cmd: sys.exit(0)
+segs, raw, unq, val, bare, q, w, i = [[]], "", "", "", "", "", False, 0
+def flush():
+    global raw, unq, val, w
+    if w: segs[-1].append((raw, unq, val))
+    raw, unq, val, w = "", "", "", False
+while i < len(cmd):
+    c = cmd[i]
+    if q:
+        raw += c
+        if c == q: q = ""
+        elif q == "\"" and c == "\\" and i + 1 < len(cmd): i += 1; raw += cmd[i]; val += cmd[i]
+        else: val += c
+    elif c in "\x27\"": q, raw, w = c, raw + c, True
+    elif c == "\\": raw += cmd[i:i+2]; unq += cmd[i:i+2]; val += cmd[i+1:i+2]; bare += cmd[i:i+2]; w = True; i += 1
+    elif c in " \t": flush(); bare += c
+    elif c in ";&|\n": flush(); segs.append([]); bare += c
+    else: raw += c; unq += c; val += c; bare += c; w = True
+    i += 1
+flush()
+if q or re.search(r"[<>(){}]", bare) or "|" in bare.replace("||", ""): sys.exit(0)
+for s in segs:
+    if not any(f in " ".join(x[2] for x in s) for f in FR):
+        if any(re.search(r"[*?\[$\\]", x[0]) for x in s): sys.exit(0)
+        continue
+    if any(f in " ".join(x[1] for x in s) for f in FR): sys.exit(0)
+    k = 0
+    while k < len(s) and re.match(r"[A-Za-z_]\w*=", s[k][0]):
+        if any(f in s[k][2] for f in FR): sys.exit(0)
+        k += 1
+    if k == len(s): sys.exit(0)
+    r0, u0 = s[k][0], s[k][1]
+    base = r0.rsplit("/", 1)[-1]
+    if r0 != u0 or "$" in r0 or "\\" in r0 or base not in DATA or ("/" in r0 and base not in ("naru", "mesa")): sys.exit(0)
+    args = [x[0] for x in s[k+1:]]
+    if base in SUB and (not args or args[0] not in SUB[base]): sys.exit(0)
+print("data")
+' 2>/dev/null) || data=""
+      [ "$data" = data ] && why=""
+    fi
+    case "$cmd" in
+      *"$app"*) [ -n "$why" ] || why="$app is the real app" ;;
     esac
     if [ -z "$why" ]; then
       sp=$(serve_problem "$cmd")
@@ -218,5 +279,116 @@ mod tests {
                 None => return,
             }
         }
+    }
+
+    /// The quote-aware lift (naru task 2707): a mention inside quotes as an
+    /// argument of a text-only command passes; everything the plain
+    /// substring match blocked before still blocks.
+    #[test]
+    fn install_rule_quoted_mentions() {
+        let cases: &[(&str, bool)] = &[
+            // blocked before, still blocked
+            ("scripts/install.sh", true),
+            ("./scripts/install.sh", true),
+            ("\"scripts/install.sh\"", true),
+            ("bash scripts/install.sh", true),
+            ("bash \"scripts/install.sh\"", true),
+            ("sh -c \"scripts/install.sh\"", true),
+            ("eval \"scripts/install.sh\"", true),
+            ("env \"scripts/install.sh\"", true),
+            ("cat scripts/install.sh", true),
+            ("git add scripts/install.sh", true),
+            ("echo \"scripts/install.sh\" | bash", true),
+            ("(echo \"scripts/install.sh\") | sh", true),
+            ("bash <(echo \"scripts/install.sh\")", true),
+            ("echo \"scripts/install.sh\" > f", true),
+            ("echo \"$(scripts/install.sh)\"", true),
+            ("echo \"`scripts/install.sh`\"", true),
+            ("echo $'scripts/install.sh'", true),
+            ("x=\"scripts/install.sh\"; bash \"$x\"", true),
+            ("export X=\"scripts/install.sh\"; bash \"$X\"", true),
+            ("printf -v x \"scripts/install.sh\"; bash \"$x\"", true),
+            ("GIT_PAGER=\"scripts/install.sh\" git log", true),
+            ("git -c core.pager=\"scripts/install.sh\" log", true),
+            ("git grep -O\"scripts/install.sh\" x", true),
+            ("rg --pre \"scripts/install.sh\" x", true),
+            ("echo \"'$(scripts/install.sh)'\"", true),
+            ("echo \"'`scripts/install.sh`'\"", true),
+            ("printf '-v' x 'scripts/install.sh'; bash \"$x\"", true),
+            ("echo \"install.sh\"; bash scripts/inst*ll.sh", true),
+            (
+                "x=scripts/inst; echo \"install.sh\"; bash \"$x\"all.sh",
+                true,
+            ),
+            ("echo \"install.sh\"; bash scripts/ins''tall.sh", true),
+            ("echo \"install.sh\"; bash scripts/ins\\\ntall.sh", true),
+            ("echo \"install.sh\"; bash scripts/ins\"\\\n\"tall.sh", true),
+            (
+                "rg --hostname-bin 'scripts/install.sh' --hyperlink-format x .",
+                true,
+            ),
+            ("naru script create x --body \"scripts/install.sh\"", true),
+            ("echo \"install.sh\"; scripts/install\".sh\"", true),
+            ("echo \"install.sh", true),
+            ("cat <<EOF\nscripts/install.sh\nEOF", true),
+            ("git commit -m \"x\" # install.sh", true),
+            ("cargo install --path .", true),
+            ("echo \"x\" && cargo install --path .", true),
+            (
+                "git commit -m \"cargo install\" && cargo install --path .",
+                true,
+            ),
+            ("launchctl kickstart -k gui/501/com.naru.serve", true),
+            ("launchctl kickstart -k \"gui/501/com.naru.serve\"", true),
+            (
+                "L=\"gui/501/com.naru.serve\"; launchctl kickstart -k \"$L\"",
+                true,
+            ),
+            ("git commit -m \"install.sh\" && naru serve", true),
+            (
+                "git commit -m \"install.sh\" && cp x /Applications/Naru.app/x",
+                true,
+            ),
+            // a merely quoted mention is data
+            ("git commit -m \"fix the scripts/install.sh guard\"", false),
+            ("naru task note 1 \"ran scripts/install.sh\"", false),
+            (
+                "target/release/naru task update 5 --result 'install.sh ok'",
+                false,
+            ),
+            ("naru live say 'install.sh is done'", false),
+            ("echo \"cargo install\"", false),
+            ("grep -n \"install.sh\" docs/dev-env.md", false),
+            ("cargo test && git commit -m \"task 1: install.sh\"", false),
+            ("git commit -m 'launchctl kickstart com.naru.serve'", false),
+        ];
+        for (cmd, want) in cases {
+            match denies(cmd, &[]) {
+                Some(got) => assert_eq!(got, *want, "{cmd}"),
+                None => return,
+            }
+        }
+    }
+
+    /// Without python3 on PATH the lift never happens: the old substring
+    /// match decides.
+    #[test]
+    fn install_rule_without_python_denies() {
+        let dir = tempfile::tempdir().unwrap();
+        for tool in ["bash", "jq", "cat", "awk"] {
+            let Ok(out) = Command::new("which").arg(tool).output() else {
+                return;
+            };
+            let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if p.is_empty() {
+                return;
+            }
+            std::os::unix::fs::symlink(p, dir.path().join(tool)).unwrap();
+        }
+        let path = dir.path().to_str().unwrap();
+        assert_eq!(
+            denies("git commit -m \"install.sh\"", &[("PATH", path)]),
+            Some(true)
+        );
     }
 }

@@ -38,12 +38,21 @@ over a bespoke prompt.
   `swift-implementer` takes Swift/Xcode work. Name the project and its absolute
   path in the brief, and tell the agent to take build, test and lint commands
   from the repo's `CLAUDE.md`, README and CI config. A task that spans both is
-  two briefs, run one at a time. Work that is research or documentation only
-  needs no implementer: edit the docs through a brief, or hand a question to
-  `researcher`.
+  two briefs: parallel if their files are disjoint (see below), else serial.
+  Work that is research or documentation only needs no implementer: edit the
+  docs through a brief, or hand a question to `researcher`.
+- **Parallel implementers.** Up to 3 implementers at once, within the one Naru
+  task (the queue stays one task at a time per project), only for pieces with
+  disjoint files (the planner's `parallel-group`, see `splitting.md`); pieces
+  with overlapping files run serially, which is the default. Each runs with
+  Agent `isolation: "worktree"` (own branch) and a "Parallel implementer brief"
+  (`briefs.md`), and only writes code and runs unit/fast tests: dev servers,
+  Naru Beta, simulators, UI checks and the full chain run once, on the merged
+  result. Merge pieces back one at a time (see Wrapping up), then review,
+  verify and the full chain on the combined tree. Implementers and verifiers
+  never run together: the cap is 3 concurrent agents of either kind.
 - **Parallel verifiers.** `verifier` and `ui-verifier` may run in parallel, cap
-  3 concurrent agents. Implementers stay one at a time (parallel implementers
-  are a later step).
+  3 concurrent agents.
   - Parallelize only when the parts are independent (e.g. one `ui-verifier` per
     page or feature, no shared state) AND the task is big enough to pay for it;
     otherwise stay serial. Parallelize when there are at least 2 independent
@@ -79,13 +88,18 @@ Once every agent has reported and the task is verified complete:
   every subagent still running; stop qorvex sessions it started
   (`qorvex session list` / `qorvex session stop <id>` — its own only); kill any
   scratch `naru serve`, khora or other server it launched (targeted kills by
-  pid, never a reap-all); if it worked in a worktree, commit there, then run
-  `git merge --ff-only <worktree branch>` into the branch the worktree was
-  created from (merge that branch into the worktree and retest first if it has
-  moved; never push, never open a pull request), then remove the worktree
-  (`ExitWorktree` remove) only if this same session called `EnterWorktree`; a
-  worktree the harness or another session created is not yours to exit (the
-  call is a no-op error), so commit there, merge it as above and leave it.
+  pid, never a reap-all); if it worked in a worktree (its own, or a piece
+  branch from a parallel implementer), commit there, merge the base branch
+  into the worktree branch and retest, then merge back into the base with
+  `merge-to-main` run from the worktree (never raw `git merge` in the main
+  checkout; never push, never open a pull request); with parallel pieces do
+  this one piece at a time, re-merging the base into each next piece after the
+  previous landed. Then remove the worktree: `ExitWorktree` remove only if this
+  same session called `EnterWorktree`; a worktree the harness created (agent
+  `isolation: "worktree"`) or another session created is not yours to exit
+  (the call is a no-op error), so after merging, remove a harness piece
+  worktree you spawned with `git worktree remove <path>` and `git branch -d
+  <branch>` (see `resources.md`), and leave another session's.
   Load skills with the Skill tool, never by reading
   skill files by path. **Never touch a resource created by another session** —
   host processes included: never pick a kill target by command-line pattern

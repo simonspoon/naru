@@ -53,6 +53,10 @@ deny "a Write into the app" "$(file_in Write /Applications/Naru.app/x)"
 deny "an Edit of the app" "$(file_in Edit /Applications/Naru.app/Contents/Info.plist)"
 deny "an install from a subagent" "$(bash_in 'cargo install --path .' implementer)"
 
+deny "a quoted install.sh run as the command" "$(bash_in '"scripts/install.sh"')"
+deny "a quoted install.sh piped into a shell" "$(bash_in 'echo "scripts/install.sh" | bash')"
+allow "a commit message mentioning install.sh" "$(bash_in 'git commit -m "fix the scripts/install.sh guard"')"
+
 allow "dev-env.sh" "$(bash_in 'scripts/dev-env.sh')"
 allow "self-deploy.sh" "$(bash_in 'scripts/self-deploy.sh')"
 allow "cargo build" "$(bash_in 'cargo build --release')"
