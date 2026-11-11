@@ -187,8 +187,19 @@ mod tests {
         std::fs::create_dir(tmp.path().join("target")).unwrap();
         let reg = WatchRegistry::new();
         let mut sub = reg.subscribe(&root).unwrap();
-        // Let the stream start before the burst.
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        // Let the stream start, and drain setup noise until it is quiet: on a
+        // loaded runner FSEvents can deliver an event for the root directory
+        // itself (mapped to `""`) after the stream starts (CI run 42954144689).
+        // Only a `""` event is tolerated here; nothing non-excluded exists
+        // under the root yet, so it can only be the root itself.
+        let settle = tokio::time::Instant::now() + Duration::from_secs(10);
+        while let Ok(ev) = tokio::time::timeout(Duration::from_millis(1000), sub.rx.recv()).await {
+            assert_eq!(ev.unwrap().dirs, Some(vec![String::new()]), "setup noise");
+            assert!(
+                tokio::time::Instant::now() < settle,
+                "watcher never went quiet"
+            );
+        }
 
         // Excluded-only writes: nothing within 1.5s.
         std::fs::write(tmp.path().join("target/x.o"), b"x").unwrap();
