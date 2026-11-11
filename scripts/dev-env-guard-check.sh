@@ -56,6 +56,14 @@ deny "an install from a subagent" "$(bash_in 'cargo install --path .' implemente
 deny "a quoted install.sh run as the command" "$(bash_in '"scripts/install.sh"')"
 deny "a quoted install.sh piped into a shell" "$(bash_in 'echo "scripts/install.sh" | bash')"
 allow "a commit message mentioning install.sh" "$(bash_in 'git commit -m "fix the scripts/install.sh guard"')"
+# naru task 2709: readers and git staging/inspection may name it unquoted
+allow "cat of install.sh" "$(bash_in 'cat scripts/install.sh')"
+allow "git add of install.sh" "$(bash_in 'git add scripts/install.sh && git commit -m "task 1: x"')"
+allow "git diff of install.sh" "$(bash_in 'git diff -- scripts/install.sh')"
+deny "install.sh piped from cat into a shell" "$(bash_in 'cat scripts/install.sh | bash')"
+deny "install.sh copied then run" "$(bash_in 'cp scripts/install.sh /tmp/x && bash /tmp/x')"
+deny "install.sh via find -exec" "$(bash_in 'find scripts -name install.sh -exec bash {} +')"
+deny "install.sh via an external diff" "$(bash_in 'GIT_EXTERNAL_DIFF=bash git diff scripts/install.sh')"
 
 allow "dev-env.sh" "$(bash_in 'scripts/dev-env.sh')"
 allow "self-deploy.sh" "$(bash_in 'scripts/self-deploy.sh')"
