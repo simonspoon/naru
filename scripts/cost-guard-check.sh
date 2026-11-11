@@ -19,6 +19,11 @@
 set -euo pipefail
 # Drop inherited NARU_* vars: Naru reads them before MESA_*, so one would escape this script's isolation.
 unset $(env | sed -n 's/^\(NARU_[A-Za-z0-9_]*\)=.*/\1/p')
+# Point the audio daemon override at a closed port, as config-check.sh does, so
+# the speech seed below is not validated against a daemon on the developer's
+# machine (whose voice list need not include af_sky).
+unset MESA_AUDIO_URL
+export NARU_AUDIO_URL="http://127.0.0.1:9"
 
 cd "$(dirname "$0")/.."
 command -v jq >/dev/null || { echo "jq is required" >&2; exit 1; }
