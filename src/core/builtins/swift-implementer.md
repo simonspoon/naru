@@ -103,6 +103,9 @@ tier; the supervisor runs `full` once on the finished tree.
   - Never put `$(( ))` arithmetic or chained path-setup variables
     (`A=...; B=$A/x; cd $B`) inline; write the steps to a script file in your
     scratch directory and run it.
+  - Single-quote every grep/sed pattern, especially one with braces or
+    brackets: `grep -n 'import { foo } from' file` (unquoted, zsh expands them
+    and fails with `no matches found`).
 - **Never search above the repo you were given.** Your search root is the repo
   root — never `/`, never `$HOME`. If the brief names a file you cannot find
   in this repo, it is in another repo: stop and ask the supervisor for its
