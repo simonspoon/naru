@@ -453,8 +453,7 @@ pub fn dream_prompt(project_id: i64, notebook: &[LiveNotebookEntry]) -> String {
 /// `Some(reason)` iff its active `entries` hold **more** than
 /// [`live::LIVE_NOTEBOOK_BUDGET_WORDS`] words across at least two entries
 /// (a dream pass needs two, as `naru memory dream` says). The budget alone
-/// — not [`live::dream_wanted`]'s lower word mark or its lookalike rule,
-/// which exist to keep the live prompt small.
+/// — not [`live::dream_wanted`]'s lookalike or unused-crossing rules.
 pub fn dream_wanted(entries: &[LiveNotebookEntry]) -> Option<String> {
     let words: usize = entries.iter().map(|e| live::word_count(&e.body)).sum();
     (entries.len() >= 2 && words > live::LIVE_NOTEBOOK_BUDGET_WORDS).then(|| {

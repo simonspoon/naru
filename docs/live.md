@@ -1278,7 +1278,7 @@ notebook may therefore run over between dreams; the **dream pass** owns the
 budget ("Dreaming" below) — over 1000 words it merges, deletes and shortens
 entries until the notebook fits, never deleting a standing norm or a kept
 entry to make room — and its automatic trigger already fires whenever the
-notebook is over (`dream_wanted`'s 300-word mark, "When it runs"). The
+notebook is over (`dream_wanted`'s budget mark, "When it runs"). The
 history: until mesa task 1331 a write past the budget was `validation`;
 1331 let it succeed and retired the least-recently-used entries as
 `evicted` in the same transaction; and since a norm is followed without
@@ -1595,8 +1595,12 @@ request. Both automatic triggers are gated by one **cheap, deterministic
 check — no model call** — `live::dream_wanted(&active entries)`, which
 answers a reason string when either
 
-- the active notebook holds at least `LIVE_DREAM_MIN_WORDS` (300, 30% of
-  the 1000-word budget) — "notebook holds 312 of 1000 words" — or
+- the active notebook holds **more** than `LIVE_NOTEBOOK_BUDGET_WORDS`
+  (1000; exactly 1000 is within it) — "notebook holds 1012 of 1000 words" —
+  or (naru task 2792: until then the mark was 300 words, but the dream only
+  trims back *to* the budget and leaves a tidy notebook alone, so a notebook
+  anywhere from 300 to 1000 words wanted a dream after every tidy and rested
+  every handoff, three times in one night of session 222)
 - two entries look alike: the Jaccard similarity of their lowercase
   alphanumeric token **sets** is at least `LIVE_DREAM_SIMILARITY` (0.5),
   entries under three tokens never compared — "entries 12 and 18 look

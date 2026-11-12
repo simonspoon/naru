@@ -203,8 +203,8 @@ dream — one `DreamSpawn`, shared with `naru memory dream` — when:
 
 - **the notebook is over its budget**: `project_memory::dream_wanted`, more
   than 1000 active words (1000 exactly is within it) across at least two
-  entries. The budget only — not the live notebook's 300-word or lookalike
-  rules, which exist to keep a live prompt small; and
+  entries. The budget only — not the live notebook's lookalike or
+  unused-crossing rules; and
 - **no earlier dream for the project is still running**: the
   `project_dreams` table (migration index 74, one row per project, `ON
   DELETE CASCADE`) holds the last dream's receipt and when it started. A

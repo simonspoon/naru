@@ -4681,7 +4681,7 @@ ok "live notice after the conversation ended: not_found"
 #
 # `mesa live memory dream` stays explicit-only between conversations, but the
 # pass now also runs on its own, gated by one deterministic check
-# (`live::dream_wanted`: 300 active words, or two entries whose token sets
+# (`live::dream_wanted`: over 1000 active words, or two entries whose token sets
 # overlap by half): at a handoff — the outgoing agent announces a rest, the
 # dream is started beside the successor, the session rests until the
 # successor's first `listen` finds the dream job finished — and when a
@@ -4694,7 +4694,7 @@ ok "live notice after the conversation ended: not_found"
 rm -f "$STUB_DIR/done-ids"
 run 0 "$MESA" live memory list
 DW=$(jqs '[.[] | .body | [scan("\\S+")] | length] | add // 0')
-[ "$DW" -lt 300 ] || fail "fixture: the notebook already holds $DW words, over the dream threshold"
+[ "$DW" -le 1000 ] || fail "fixture: the notebook already holds $DW words, over the dream threshold"
 run 0 "$MESA" live start "live gate project"
 DS=$(jqs .id)
 DA1=$(jqs .agent_id)

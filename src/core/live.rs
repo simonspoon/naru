@@ -794,14 +794,6 @@ pub fn validate_category(category: &str) -> crate::core::Result<&str> {
     }
 }
 
-/// The active notebook is worth a dream pass (mesa task 1155) once it holds
-/// this many words — 30% of [`LIVE_NOTEBOOK_BUDGET_WORDS`]. Below it a
-/// notebook has room to grow, and a consolidation agent reading it would
-/// mostly find nothing to do; at it, the notebook is a few conversations from
-/// its budget, which only a dream pass brings it back within, and duplicates
-/// are what a notebook that size is most likely to hold.
-pub const LIVE_DREAM_MIN_WORDS: usize = 300;
-
 /// Two active entries whose lowercase alphanumeric token **sets** overlap at
 /// least this much (Jaccard) are taken to say the same thing, and that alone
 /// is worth a dream pass whatever the word count — the merge verb exists for
@@ -819,7 +811,10 @@ const LIVE_DREAM_MIN_TOKENS: usize = 3;
 /// handoff, and the end of a conversation) run **instead of** asking a model
 /// whether the notebook needs tidying. `None` with fewer than two entries,
 /// since there is nothing to merge; otherwise a reason when the notebook is
-/// at [`LIVE_DREAM_MIN_WORDS`], holds a pair at [`LIVE_DREAM_SIMILARITY`]
+/// **over** [`LIVE_NOTEBOOK_BUDGET_WORDS`] (naru task 2792: at exactly the
+/// budget it is within it — the dream pass only trims back to the budget, so
+/// any lower mark re-fired after every tidy and rested every handoff), holds
+/// a pair at [`LIVE_DREAM_SIMILARITY`]
 /// (the first such pair by id), or holds an entry of `crossed` (mesa task
 /// 1337). Pure: slices in, a sentence out.
 ///
@@ -841,7 +836,7 @@ pub fn dream_wanted(entries: &[crate::core::LiveNotebookEntry], crossed: &[i64])
         return None;
     }
     let words: usize = entries.iter().map(|e| word_count(&e.body)).sum();
-    if words >= LIVE_DREAM_MIN_WORDS {
+    if words > LIVE_NOTEBOOK_BUDGET_WORDS {
         return Some(format!(
             "notebook holds {words} of {LIVE_NOTEBOOK_BUDGET_WORDS} words"
         ));
@@ -3639,12 +3634,16 @@ question is a task, not a note",
         assert_eq!(dream_wanted(&quiet[..1], &[]), None);
         assert_eq!(dream_wanted(&[], &[]), None);
 
-        // 150 words each, two entries: exactly the threshold.
-        let long = "word ".repeat(150);
-        let heavy = [sample_entry(1, &long), sample_entry(2, &long)];
+        // 500 words each, two entries: exactly the budget is within it
+        // (naru task 2792); one word more is over.
+        let long = "word ".repeat(500);
+        let full = [sample_entry(1, &long), sample_entry(2, &long)];
+        assert_eq!(dream_wanted(&full, &[]), None);
+        let over = format!("{long}more");
+        let heavy = [sample_entry(1, &long), sample_entry(2, &over)];
         assert_eq!(
             dream_wanted(&heavy, &[]).as_deref(),
-            Some("notebook holds 300 of 1000 words")
+            Some("notebook holds 1001 of 1000 words")
         );
         let light = [sample_entry(1, &long), sample_entry(2, "just a few words")];
         assert_eq!(dream_wanted(&light, &[]), None);
@@ -3685,7 +3684,7 @@ question is a task, not a note",
         // The older triggers still win the reason.
         assert_eq!(
             dream_wanted(&heavy, &[1]).as_deref(),
-            Some("notebook holds 300 of 1000 words")
+            Some("notebook holds 1001 of 1000 words")
         );
     }
 
