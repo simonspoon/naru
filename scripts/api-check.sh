@@ -260,11 +260,13 @@ raw POST "/api/projects/$PROJ/git/commit" -d 'worktree=/x'
 [ "$STATUS" = "415" ] || fail "git commit without JSON Content-Type: expected 415, got $STATUS"
 api 422 POST "/api/projects/$PROJ/git/commit" '{"message":"m"}'
 [ "$(jqb .error.code)" = "validation" ] || fail "git commit without a worktree: error.code ($BODY)"
-api 404 POST "/api/projects/$PROJ/git/commit" '{"worktree":"/x","message":"m"}'
+api 422 POST "/api/projects/$PROJ/git/commit" '{"worktree":"/x","message":"m"}'
+[ "$(jqb .error.message)" = "staged_digest is required" ] || fail "git commit without a staged_digest: message ($BODY)"
+api 404 POST "/api/projects/$PROJ/git/commit" '{"worktree":"/x","message":"m","staged_digest":"0-0"}'
 raw GET "/api/projects/$PROJ/git/commit"
 [ "$STATUS" = "405" ] || fail "git commit must not answer a GET, got $STATUS"
 api 200 GET "/api/projects/$PROJ/git/commit-info"
-ok "git commit route: foreign Origin/Host 403, JSON required, worktree required 422, no folder 404, never a GET; commit-info 200"
+ok "git commit route: foreign Origin/Host 403, JSON required, worktree and staged_digest required 422, no folder 404, never a GET; commit-info 200"
 
 # ---- Git branch and stash routes (naru task 2741): the same gate and ladder ----
 # One body per route, WITHOUT the worktree (422) and WITH a worktree no project

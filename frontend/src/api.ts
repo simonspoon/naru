@@ -604,18 +604,23 @@ export function getProjectGitCommitInfo(
 /** Body of the commit route (naru task 2740). `worktree` is the explicit path
  * and never omitted; `expected_head` is required with `amend` (the `head.hash`
  * the message was loaded from); `allow_published` only after the person
- * confirmed amending a commit that is already on its upstream. */
+ * confirmed amending a commit that is already on a remote branch, and
+ * `allow_merge` only after they confirmed amending a merge commit;
+ * `staged_digest` is the `GitRepoView.staged_digest` of the staged list shown
+ * (naru task 2801). */
 export interface GitCommitBody {
   worktree: string
   repo?: string
   message: string
+  staged_digest: string
   amend?: boolean
   expected_head?: string
   allow_published?: boolean
+  allow_merge?: boolean
 }
 
 /** Commit (or amend HEAD) in one worktree. Call it only through
- * `createGitActions` (gitActions.ts), which asks first for a published amend;
+ * `createGitActions` (gitActions.ts), which asks first for a published or merge amend;
  * a test pins that this is its only caller. */
 export function commitProjectGit(id: number, body: GitCommitBody): Promise<GitCommitResult> {
   return request(`/api/projects/${id}/git/commit`, jsonInit('POST', body))

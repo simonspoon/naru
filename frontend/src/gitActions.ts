@@ -271,13 +271,17 @@ export type WriteOutcome =
   | { ok: false; reason: 'error'; code: string; message: string; prefix: string }
 
 /** What the commit box asks of the gate (naru task 2740). `published` = the
- * amended HEAD is already on its upstream: the gate asks `plan` first. */
+ * amended HEAD is already on a remote branch, `merge` = it is a merge commit:
+ * for either the gate asks `plan` first. */
 export type CommitRequest = {
   message: string
+  /** `GitRepoView.staged_digest` of the staged list on screen. */
+  stagedDigest: string
   amend: boolean
   /** The `head.hash` the amended message was loaded from; required with `amend`. */
   expectedHead?: string
   published: boolean
+  merge: boolean
   plan?: DiscardPlan
 }
 
@@ -388,23 +392,29 @@ export function createGitActions(deps: {
       sendHunks('stage', ctx, t, (b) => api.stageHunks(b)),
     unstageHunks: (ctx: WriteCtx, t: HunkTarget): Promise<WriteOutcome> =>
       sendHunks('unstage', ctx, t, (b) => api.unstageHunks(b)),
-    /** Commit or amend. Amending a published HEAD asks first (`req.plan`) and
-     * only then sends, with `allow_published`; nothing else ever asks. */
+    /** Commit or amend. Amending a published HEAD or a merge commit asks first
+     * (`req.plan`) and only then sends, with `allow_published` /
+     * `allow_merge`; nothing else ever asks. */
     async commit(ctx: WriteCtx, req: CommitRequest): Promise<CommitOutcome> {
       if (ctx.worktree === null) return { ok: false, reason: 'no-worktree' }
       if (req.amend && (req.expectedHead === undefined || req.expectedHead === '')) {
         return { ok: false, reason: 'empty' }
       }
-      const body: GitCommitBody = { worktree: ctx.worktree, message: req.message }
+      const body: GitCommitBody = {
+        worktree: ctx.worktree,
+        message: req.message,
+        staged_digest: req.stagedDigest,
+      }
       if (ctx.repo !== undefined) body.repo = ctx.repo
       if (req.amend) {
         body.amend = true
         body.expected_head = req.expectedHead
-        if (req.published) {
+        if (req.published || req.merge) {
           if (req.plan === undefined || !(await confirm(req.plan))) {
             return { ok: false, reason: 'cancelled' }
           }
-          body.allow_published = true
+          if (req.published) body.allow_published = true
+          if (req.merge) body.allow_merge = true
         }
       }
       try {

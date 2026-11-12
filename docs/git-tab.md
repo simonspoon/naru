@@ -540,10 +540,14 @@ only; a read that fails is `None`/`false`, never a panic):
   read with `log -z`, so it is the whole raw message, uncapped, with nothing
   added; `is_merge` = more than one parent.
 - `upstream` = `rev-parse --abbrev-ref --symbolic-full-name @{upstream}`;
-  `head_published` = an upstream exists and `merge-base --is-ancestor HEAD
-  <full upstream ref>` exits 0 (false with no upstream or on an unborn HEAD).
-  It looks only at the branch's configured upstream: a branch pushed without
-  tracking, or a detached HEAD, is not detected and gets no confirm.
+  `published_on` = the ref that already holds HEAD: the upstream when
+  `merge-base --is-ancestor HEAD <full upstream ref>` exits 0; else, on a
+  branch, the first remote-tracking branch that contains HEAD (`for-each-ref
+  --contains HEAD refs/remotes`, `<remote>/HEAD` skipped), which is how a
+  branch pushed without tracking is seen (naru task 2801); else None.
+  `head_published` = `published_on` is set. Always None / false on an unborn
+  or a detached HEAD (amending there moves no branch). It reads the local
+  remote-tracking refs as of the last fetch or push; nothing is fetched.
 - `author_name`/`author_email` = `git -C <dir> config --get user.name|email`
   (so the worktree's or repo's own config applies); None when unset or blank.
   Only config is read: an identity supplied by `GIT_AUTHOR_*` in the server's
@@ -553,8 +557,8 @@ only; a read that fails is `None`/`false`, never a panic):
   text without its `#` lines, trailing whitespace trimmed, capped at the 64 KiB
   body cap; None when empty.
 
-**`POST .../git/commit`.** Body `{ worktree, repo?, message, amend?,
-expected_head?, allow_published? }`. `require_agent_access` first, never a GET
+**`POST .../git/commit`.** Body `{ worktree, repo?, message, staged_digest,
+amend?, expected_head?, allow_published?, allow_merge? }`. `require_agent_access` first, never a GET
 (405), JSON Content-Type. Success `200` → `GitCommitResult { hash,
 short_hash, amended, view }` (`view` = a fresh `view_of`). Order, nothing that
 writes runs before every check passes:
@@ -563,7 +567,7 @@ writes runs before every check passes:
    `message` empty after normalisation (`commit message is empty`); amend
    without `expected_head` or with one that is not a FULL lowercase hash
    (exactly 40 or 64 hex digits), so a short or uppercase one is never a
-   misleading 409.
+   misleading 409; `staged_digest` missing (`staged_digest is required`).
 2. Project folder, repo, worktree: `404`, exactly as `git_write`.
 3. A **fresh** `view_of` (404 when not a repo) and a fresh `commit_info_of`.
 4. `422`: a conflicted file (`<path> has conflicts; resolve it in the
@@ -573,11 +577,16 @@ writes runs before every check passes:
    operation is in progress (`A <op> is in progress in this worktree; amend is
    not available`); no amend and nothing staged (`nothing is staged`) unless the
    operation is `merge` (concluding a merge may stage nothing).
-5. `409 conflict`: amend and `expected_head` is not HEAD's full sha (`HEAD
+5. `409 conflict`, in this order: amend and `expected_head` is not
+   HEAD's full sha (`HEAD
    moved since the last commit was loaded. It was reloaded; nothing was
-   committed.`, caches dropped); amend and `head_published` without
-   `allow_published: true` (`The last commit is already on <upstream>. Amending
-   rewrites published history; confirm to proceed.`).
+   committed.`, caches dropped); `staged_digest` is not the fresh view's
+   (`The staged changes changed since they were shown. They were reloaded;
+   nothing was committed.`, caches dropped); amend and `head_published` without
+   `allow_published: true` (`The last commit is already on <published_on>. Amending
+   rewrites published history; confirm to proceed.`); amend of a merge commit
+   (`head.is_merge`) without `allow_merge: true` (`The last commit is a merge
+   commit. Amending replaces it with a new merge commit; confirm to proceed.`).
 6. `git::commit` (below). Git or a hook failing is `409 conflict` carrying the
    text.
 7. After **every** attempt past step 5, success or failure,
@@ -591,10 +600,25 @@ inherit the environment and their own git pathspecs must keep working. Never
 `--no-verify`, `--allow-empty`, a pathspec or `-m`; never a push, a retry, or a
 removal of `index.lock` (a held lock is git's own error, and the file stays).
 Hooks run normally and inherit the server's environment, so a hook that needs a
-tool missing from a launchd `PATH` fails with its own message. Amend is
-check-then-act: HEAD is compared to `expected_head` in the handler and again
-just before git runs (same 409), but the window is one git spawn, not atomic
+tool missing from a launchd `PATH` fails with its own message. Both pins are
+check-then-act: an amend's HEAD is compared to `expected_head`, and the staged
+set to `staged_digest`, in the handler and again
+just before git runs (same 409s), but the window is one git spawn, not atomic
 (an atomic `commit-tree` + `update-ref` would skip the hooks).
+
+**Staged digest (naru task 2801).** A commit records whatever is in the index
+when git runs, so the client sends back the `GitRepoView.staged_digest`
+(`#[serde(default)]`) of the view its staged list was drawn from, and a file
+staged meanwhile by an agent or another process is a 409 instead of part of the
+commit. `git::parse_view` computes it from the same `git status` read as the
+file list, over every entry with a staged change (X is not `.`): X, the HEAD
+and index modes, the HEAD and index blob ids, the path and a rename's original
+path. `"{entries:x}-{DefaultHasher:016x}"`, like the hunk digest: a staleness
+check, not a security boundary. Nothing of the working-tree side goes in, so an
+unstaged edit, an untracked file or a conflicted entry does not move it; the
+same path staged again with other content does. It is required on a plain
+commit, an amend and a merge conclusion alike (the digest of an empty staged
+set is a value too).
 
 **Message.** `normalize_commit_message`: `\r\n` to `\n`, leading blank lines
 dropped, trailing whitespace of the whole text trimmed, exactly one `\n` last;
@@ -632,10 +656,14 @@ author preserved), failing `pre-commit`/`commit-msg` (both outputs, HEAD and
 index unchanged), a passing hook, a held `index.lock` (stays), a hung hook
 stopped at an injected 1 s timeout with no lock left, a failing gpg program,
 `normalize_commit_message`, `commit_info_of` (born/unborn/detached, identity,
-published, prepared message, linked worktree). `src/api.rs` `git_commit_*`:
+published, pushed without an upstream, prepared message, linked worktree), the
+staged digest (pure on porcelain text, and on a real index). `src/api.rs` `git_commit_*`:
 happy path with fresh follow-up reads, the 422 table, unborn amend, conflict
 and merge, stale `expected_head`, published amend with and without
-`allow_published`, a failing hook, 404s, the agent gate, a linked worktree
+`allow_published` (with an upstream, and pushed without one), a stale
+`staged_digest` (409, no commit, index untouched; an unstaged edit is not
+stale), a merge-commit amend with and without `allow_merge`, a failing hook,
+404s, the agent gate, a linked worktree
 moving only its own branch, the commit-info ladder. `scripts/api-check.sh`
 asserts the gate halves and that `commit-info` answers 200.
 
@@ -1216,7 +1244,11 @@ agent or workflow reaches it.
   amending, nor during a merge). Warnings `[data-commit-warning]`: detached
   HEAD ("HEAD is detached: this commit will be on no branch."), a merge /
   cherry-pick / revert in progress ("this commit concludes it"), a published
-  amend. The operation banner of the working tree is not repeated.
+  amend, an amend of a merge commit. The operation banner of the working tree
+  is not repeated. Every commit sends the `staged_digest` of the view the
+  staged list is drawn from; the server's 409 "The staged changes changed
+  since they were shown…" is shown like any failure, the list is reloaded and
+  the draft kept.
 - **Cmd/Ctrl+Enter** in the subject or body commits. A synchronous latch
   (`createSubmitGuard`, held in a ref) lets only one of two clicks or keydowns
   in the same tick through; the button is disabled during the request.
@@ -1229,12 +1261,18 @@ agent or workflow reaches it.
   disabled with its reason (`[data-commit-amend-reason]`) during an operation.
   On: the fields load HEAD's message (or the stored amend draft, only when its
   `head` is still HEAD); off: the ordinary draft returns untouched. Sends
-  `amend: true, expected_head: head.hash`. When HEAD is already on its upstream
-  the click asks first through `GitConfirmDialog` ("Amend a published
+  `amend: true, expected_head: head.hash`. When HEAD is already published
+  (`head_published`: on its upstream, or on another remote branch it was
+  pushed to) the click asks first through `GitConfirmDialog` ("Amend a published
   commit?": worktree, branch, `<sha> <subject>`, that it is already on
-  `<upstream>`, that the branch and upstream diverge); only "Amend commit"
-  sends, with `allow_published: true`. A plain commit and an unpublished amend
-  never ask.
+  `<published_on>`, that the branch and that ref diverge); only "Amend commit"
+  sends, with `allow_published: true`. When HEAD is a merge commit it asks the
+  same way ("Amend a merge commit?": that it is a merge commit, that the new
+  one keeps the same parents and takes in anything staged) and sends
+  `allow_merge: true`; a published merge commit is one dialog ("Amend a
+  published merge commit?") with both sets of lines and both flags
+  (`amendConfirmPlan`). A plain commit and an amend of an unpublished,
+  non-merge commit never ask.
 - **HEAD moved under an amend.** An amend draft is for one HEAD. If HEAD
   changes (a commit from elsewhere, or the server's 409 "HEAD moved") while the
   amend text is live or edited, the fields show the ordinary draft and

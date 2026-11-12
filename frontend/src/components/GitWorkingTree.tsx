@@ -759,6 +759,7 @@ export function GitWorkingTree({
                     worktreePath={worktreePath}
                     diffWorktree={diffWorktree}
                     stagedCount={split.staged.length}
+                    stagedDigest={repoView.staged_digest}
                     hasConflicts={split.conflicts.length > 0}
                     busy={busy}
                     rev={rev}

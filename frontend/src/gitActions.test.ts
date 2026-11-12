@@ -332,23 +332,29 @@ describe('commit and amend', () => {
 
   it('a plain commit never asks and sends the message once', async () => {
     const { api, confirm, actions } = harness(false)
-    const out = await actions.commit({ ...ctx, repo: 'sub' }, { message: 'msg', amend: false, published: false })
+    const out = await actions.commit({ ...ctx, repo: 'sub' }, { message: 'msg', stagedDigest: 'd1', amend: false, published: false, merge: false })
     expect(out).toEqual({ ok: true, result: commitResult })
     expect(confirm).not.toHaveBeenCalled()
     expect(api.commit).toHaveBeenCalledTimes(1)
-    expect(api.commit).toHaveBeenCalledWith({ worktree: WT, repo: 'sub', message: 'msg' })
+    expect(api.commit).toHaveBeenCalledWith({ worktree: WT, repo: 'sub', message: 'msg', staged_digest: 'd1' })
   })
 
   it('an unpublished amend never asks and sends expected_head', async () => {
     const { api, confirm, actions } = harness(false)
-    await actions.commit(ctx, { message: 'm', amend: true, expectedHead: HEAD, published: false })
+    await actions.commit(ctx, { message: 'm', stagedDigest: 'd1', amend: true, expectedHead: HEAD, published: false, merge: false })
     expect(confirm).not.toHaveBeenCalled()
-    expect(api.commit).toHaveBeenCalledWith({ worktree: WT, message: 'm', amend: true, expected_head: HEAD })
+    expect(api.commit).toHaveBeenCalledWith({
+      worktree: WT,
+      message: 'm',
+      staged_digest: 'd1',
+      amend: true,
+      expected_head: HEAD,
+    })
   })
 
   it('a published amend: false never reaches the api', async () => {
     const { api, confirm, actions } = harness(false)
-    const out = await actions.commit(ctx, { message: 'm', amend: true, expectedHead: HEAD, published: true, plan })
+    const out = await actions.commit(ctx, { message: 'm', stagedDigest: 'd1', amend: true, expectedHead: HEAD, published: true, merge: false, plan })
     expect(out).toEqual({ ok: false, reason: 'cancelled' })
     expect(confirm).toHaveBeenCalledWith(plan)
     expect(api.commit).not.toHaveBeenCalled()
@@ -357,7 +363,7 @@ describe('commit and amend', () => {
   it('a published amend: true sends once with allow_published, after the answer', async () => {
     let release: (v: boolean) => void = () => {}
     const { api, confirm, actions } = harness(() => new Promise<boolean>((r) => (release = r)))
-    const p = actions.commit(ctx, { message: 'm', amend: true, expectedHead: HEAD, published: true, plan })
+    const p = actions.commit(ctx, { message: 'm', stagedDigest: 'd1', amend: true, expectedHead: HEAD, published: true, merge: false, plan })
     await Promise.resolve()
     expect(api.commit).not.toHaveBeenCalled()
     release(true)
@@ -367,20 +373,55 @@ describe('commit and amend', () => {
     expect(api.commit).toHaveBeenCalledWith({
       worktree: WT,
       message: 'm',
+      staged_digest: 'd1',
       amend: true,
       expected_head: HEAD,
       allow_published: true,
     })
   })
 
+  it('a merge amend asks too: false sends nothing, true sends allow_merge only', async () => {
+    const req = { message: 'm', stagedDigest: 'd1', amend: true, expectedHead: HEAD, published: false, merge: true, plan }
+    const no = harness(false)
+    expect(await no.actions.commit(ctx, req)).toEqual({ ok: false, reason: 'cancelled' })
+    expect(no.confirm).toHaveBeenCalledWith(plan)
+    expect(no.api.commit).not.toHaveBeenCalled()
+    // No plan to show: nothing is sent either.
+    expect(await no.actions.commit(ctx, { ...req, plan: undefined })).toEqual({ ok: false, reason: 'cancelled' })
+    const yes = harness(true)
+    await yes.actions.commit(ctx, req)
+    expect(yes.confirm).toHaveBeenCalledTimes(1)
+    expect(yes.api.commit).toHaveBeenCalledWith({
+      worktree: WT,
+      message: 'm',
+      staged_digest: 'd1',
+      amend: true,
+      expected_head: HEAD,
+      allow_merge: true,
+    })
+    // Published and a merge: one question, both flags.
+    const both = harness(true)
+    await both.actions.commit(ctx, { ...req, published: true })
+    expect(both.confirm).toHaveBeenCalledTimes(1)
+    expect(both.api.commit).toHaveBeenCalledWith({
+      worktree: WT,
+      message: 'm',
+      staged_digest: 'd1',
+      amend: true,
+      expected_head: HEAD,
+      allow_published: true,
+      allow_merge: true,
+    })
+  })
+
   it('sends nothing without a worktree, or an amend without its expected head', async () => {
     const { api, confirm, actions } = harness(true)
     const none = { worktree: null, branch: 'b' }
-    expect(await actions.commit(none, { message: 'm', amend: false, published: false })).toEqual({
+    expect(await actions.commit(none, { message: 'm', stagedDigest: 'd1', amend: false, published: false, merge: false })).toEqual({
       ok: false,
       reason: 'no-worktree',
     })
-    expect(await actions.commit(ctx, { message: 'm', amend: true, published: false })).toEqual({
+    expect(await actions.commit(ctx, { message: 'm', stagedDigest: 'd1', amend: true, published: false, merge: false })).toEqual({
       ok: false,
       reason: 'empty',
     })
@@ -392,7 +433,7 @@ describe('commit and amend', () => {
     const { api, actions } = harness(true)
     const msg = 'hook failed\nline 2'
     vi.mocked(api.commit).mockRejectedValueOnce(Object.assign(new Error(msg), { code: 'conflict' }))
-    const out = await actions.commit(ctx, { message: 'm', amend: false, published: false })
+    const out = await actions.commit(ctx, { message: 'm', stagedDigest: 'd1', amend: false, published: false, merge: false })
     expect(out).toEqual({
       ok: false,
       reason: 'error',

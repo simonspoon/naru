@@ -10939,6 +10939,10 @@ async fn post_project_git_discard(
 const HEAD_MOVED: &str =
     "HEAD moved since the last commit was loaded. It was reloaded; nothing was committed.";
 
+/// The 409 for a commit whose `staged_digest` is not the index's (naru task 2801).
+const STAGED_CHANGED: &str =
+    "The staged changes changed since they were shown. They were reloaded; nothing was committed.";
+
 /// Body of `POST .../git/commit` (naru task 2740).
 #[derive(Deserialize)]
 struct GitCommitBody {
@@ -10950,8 +10954,14 @@ struct GitCommitBody {
     amend: Option<bool>,
     /// REQUIRED when amending: the full HEAD sha the client loaded.
     expected_head: Option<String>,
-    /// Confirms amending a commit already on the upstream.
+    /// Confirms amending a commit already on the upstream or another remote
+    /// branch.
     allow_published: Option<bool>,
+    /// Confirms amending a merge commit.
+    allow_merge: Option<bool>,
+    /// REQUIRED: `GitRepoView.staged_digest` of the staged list the client
+    /// showed.
+    staged_digest: Option<String>,
 }
 
 /// `GET .../git/commit-info[?repo=][&worktree=]` — what the commit box needs
@@ -10975,10 +10985,12 @@ async fn get_project_git_commit_info(
     Ok(Json(ProjectGitCommitInfo { path, info }).into_response())
 }
 
-/// `POST /api/projects/{id}/git/commit` — `{worktree, repo?, message, amend?,
-/// expected_head?, allow_published?}`. Agent-grade gate, like `stage`. Order:
-/// body shape (422), project/repo/worktree (404), a FRESH view and commit
-/// info, the per-state rules (422), a moved HEAD or a published amend (409),
+/// `POST /api/projects/{id}/git/commit` — `{worktree, repo?, message,
+/// staged_digest, amend?, expected_head?, allow_published?, allow_merge?}`.
+/// Agent-grade gate, like `stage`. Order: body shape (422),
+/// project/repo/worktree (404), a FRESH view and commit info, the per-state
+/// rules (422), a moved HEAD, a changed staged set, a published amend or an
+/// amended merge commit (409),
 /// then the one `git commit` (409 with git's and the hooks' output). Caches
 /// drop after any attempt past the 409s; success returns the new HEAD and the
 /// fresh view. Nothing here is wired into an agent flow.
@@ -11015,6 +11027,10 @@ async fn post_project_git_commit(
         }
         (_, h) => h,
     };
+    let staged_digest = body
+        .staged_digest
+        .clone()
+        .ok_or_else(|| git_write_validation("staged_digest is required"))?;
     let not_found = |message: String| ApiError {
         status: StatusCode::NOT_FOUND,
         code: "not_found",
@@ -11063,27 +11079,42 @@ async fn post_project_git_commit(
     } else if !git::any_staged(&view.files) && info.operation.as_deref() != Some("merge") {
         return Err(git_write_validation("nothing is staged"));
     }
+    // A moved HEAD first: it usually moves the staged digest too, and is the
+    // truer message.
+    if amend && info.head.as_ref().map(|h| h.hash.as_str()) != expected {
+        drop_git_caches(&state);
+        state.git_file_log_cache.lock().unwrap().clear();
+        return Err(conflict(HEAD_MOVED.into()));
+    }
+    if view.staged_digest != staged_digest {
+        drop_git_caches(&state);
+        state.git_file_log_cache.lock().unwrap().clear();
+        return Err(conflict(STAGED_CHANGED.into()));
+    }
     if amend {
-        let head = info.head.as_ref().map(|h| h.hash.as_str());
-        if head != expected {
-            drop_git_caches(&state);
-            state.git_file_log_cache.lock().unwrap().clear();
-            return Err(conflict(HEAD_MOVED.into()));
-        }
         if info.head_published && body.allow_published != Some(true) {
-            let upstream = info.upstream.as_deref().unwrap_or("its upstream");
+            let on = info.published_on.as_deref().unwrap_or("its upstream");
             return Err(conflict(format!(
-                "The last commit is already on {upstream}. Amending rewrites published history; confirm to proceed."
+                "The last commit is already on {on}. Amending rewrites published history; confirm to proceed."
             )));
+        }
+        if info.head.as_ref().is_some_and(|h| h.is_merge) && body.allow_merge != Some(true) {
+            return Err(conflict(
+                "The last commit is a merge commit. Amending replaces it with a new merge commit; confirm to proceed.".into(),
+            ));
         }
     }
     let written = {
         let d = dir.clone();
         let expected = expected.map(str::to_string);
         tokio::task::spawn_blocking(move || {
-            // Amend is check-then-act: re-read HEAD right before git runs.
+            // Check-then-act: re-read an amend's HEAD, and the staged set,
+            // right before git runs.
             if amend && git::head_of(&d).map(|h| h.0) != expected {
                 return Err(HEAD_MOVED.to_string());
+            }
+            if git::view_of(&d).map(|v| v.staged_digest) != Some(staged_digest) {
+                return Err(STAGED_CHANGED.to_string());
             }
             git::commit(&d, &message, amend)
         })
@@ -29153,11 +29184,18 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         .await
     }
 
+    /// Posts `body`; one without a `staged_digest` gets the worktree's
+    /// current one, as a client that just loaded the view would send (or a
+    /// placeholder when the worktree is no repo).
     async fn commit_post(
         state: &AppState,
         id: i64,
-        body: serde_json::Value,
+        mut body: serde_json::Value,
     ) -> ApiResult<Response> {
+        if body.get("staged_digest").is_none() {
+            let view = body["worktree"].as_str().and_then(git::view_of);
+            body["staged_digest"] = json!(view.map_or("none".into(), |v| v.staged_digest));
+        }
         commit_post_as(state, id, body, loopback(), hdrs(Some("localhost:0"), None)).await
     }
 
@@ -29471,6 +29509,196 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         let r = json_body(commit_post(&state, id, body(Some(true))).await.unwrap()).await;
         assert_eq!(r["amended"], true);
         assert_ne!(gco(&root, &["rev-parse", "HEAD"]), old);
+    }
+
+    #[tokio::test]
+    async fn git_commit_asks_before_amending_a_head_pushed_without_an_upstream() {
+        let (_db, state) = test_state();
+        let (tmp, root, id, wt) = git_commit_fixture(&state);
+        let remote = tmp.path().join("remote.git");
+        std::fs::create_dir_all(&remote).unwrap();
+        git_in(&remote, &["init", "-q", "--bare"]);
+        git_in(
+            &root,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        let branch = gco(&root, &["rev-parse", "--abbrev-ref", "HEAD"]);
+        // No `-u`: the branch has no upstream.
+        git_in(&root, &["push", "-q", "origin", &branch]);
+        assert!(
+            !std::process::Command::new("git")
+                .args([
+                    "-C",
+                    root.to_str().unwrap(),
+                    "rev-parse",
+                    "-q",
+                    "@{upstream}"
+                ])
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+        let info = commit_info_get(&state, id, "/x").await.unwrap();
+        assert_eq!(info["info"]["upstream"], serde_json::Value::Null);
+        assert_eq!(info["info"]["head_published"], true);
+        assert_eq!(info["info"]["published_on"], format!("origin/{branch}"));
+        let old = gco(&root, &["rev-parse", "HEAD"]);
+        let body = |allow: Option<bool>| {
+            json!({"worktree": wt, "message": "rewritten", "amend": true,
+                   "expected_head": old, "allow_published": allow})
+        };
+        for allow in [None, Some(false)] {
+            let e = commit_post(&state, id, body(allow)).await.err().unwrap();
+            assert_eq!(e.status, StatusCode::CONFLICT);
+            assert_eq!(
+                e.message,
+                format!(
+                    "The last commit is already on origin/{branch}. Amending rewrites published history; confirm to proceed."
+                )
+            );
+            assert_eq!(gco(&root, &["rev-parse", "HEAD"]), old);
+        }
+        let r = json_body(commit_post(&state, id, body(Some(true))).await.unwrap()).await;
+        assert_eq!(r["amended"], true);
+        assert_ne!(gco(&root, &["rev-parse", "HEAD"]), old);
+    }
+
+    #[tokio::test]
+    async fn git_commit_refuses_a_staged_set_that_is_not_the_one_shown() {
+        let (_db, state) = test_state();
+        let (_tmp, root, id, wt) = git_commit_fixture(&state);
+        std::fs::write(root.join("new.txt"), "n\n").unwrap();
+        git_in(&root, &["add", "new.txt"]);
+        let old = gco(&root, &["rev-parse", "HEAD"]);
+        // What the client was shown.
+        let shown = json_body(
+            get_project_git(
+                State(state.clone()),
+                Path(id),
+                Query(GitViewQuery {
+                    worktree: None,
+                    repo: None,
+                }),
+            )
+            .await
+            .unwrap(),
+        )
+        .await["repo"]["staged_digest"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        // Required.
+        let e = commit_post_as(
+            &state,
+            id,
+            json!({"worktree": wt, "message": "m"}),
+            loopback(),
+            hdrs(Some("localhost:0"), None),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert_eq!(e.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(e.message, "staged_digest is required");
+        // Something else stages another file, and other content of the same file.
+        std::fs::write(root.join("sneaky.txt"), "s\n").unwrap();
+        git_in(&root, &["add", "sneaky.txt"]);
+        let stale = |amend: bool| {
+            let mut b = json!({"worktree": wt, "message": "m", "staged_digest": shown});
+            if amend {
+                b["amend"] = json!(true);
+                b["expected_head"] = json!(old);
+            }
+            b
+        };
+        let index = gco(&root, &["diff", "--cached", "--raw"]);
+        for amend in [false, true] {
+            let e = commit_post(&state, id, stale(amend)).await.err().unwrap();
+            assert_eq!(e.status, StatusCode::CONFLICT, "amend={amend}");
+            assert_eq!(e.code, "conflict");
+            assert_eq!(
+                e.message,
+                "The staged changes changed since they were shown. They were reloaded; nothing was committed."
+            );
+            assert_eq!(gco(&root, &["rev-parse", "HEAD"]), old);
+            assert_eq!(gco(&root, &["rev-list", "--count", "HEAD"]), "2");
+            assert_eq!(gco(&root, &["diff", "--cached", "--raw"]), index);
+        }
+        // A moved HEAD is reported before the staged set.
+        let mut moved = stale(true);
+        moved["expected_head"] = json!("1".repeat(40));
+        let e = commit_post(&state, id, moved).await.err().unwrap();
+        assert_eq!(e.status, StatusCode::CONFLICT);
+        assert_eq!(e.message, HEAD_MOVED);
+        git_in(&root, &["reset", "-q", "sneaky.txt"]);
+        std::fs::write(root.join("new.txt"), "other content\n").unwrap();
+        git_in(&root, &["add", "new.txt"]);
+        let e = commit_post(&state, id, stale(false)).await.err().unwrap();
+        assert_eq!(e.status, StatusCode::CONFLICT);
+        assert_eq!(gco(&root, &["rev-parse", "HEAD"]), old);
+        // An unstaged edit is not the staged set: the digest shown still holds.
+        std::fs::write(root.join("new.txt"), "n\n").unwrap();
+        git_in(&root, &["add", "new.txt"]);
+        std::fs::write(root.join("base.txt"), "edited, not staged\n").unwrap();
+        let r = json_body(commit_post(&state, id, stale(false)).await.unwrap()).await;
+        assert_eq!(r["amended"], false);
+        assert_eq!(gco(&root, &["rev-list", "--count", "HEAD"]), "3");
+        assert_eq!(
+            gco(&root, &["show", "--name-only", "--format=", "HEAD"]),
+            "new.txt"
+        );
+    }
+
+    #[tokio::test]
+    async fn git_commit_asks_before_amending_a_merge_commit() {
+        let (_db, state) = test_state();
+        let (_tmp, root, id, wt) = git_commit_fixture(&state);
+        git_in(&root, &["branch", "-M", "main"]);
+        git_in(&root, &["checkout", "-q", "-b", "other"]);
+        std::fs::write(root.join("o.txt"), "o\n").unwrap();
+        git_in(&root, &["add", "."]);
+        git_in(&root, &["commit", "-q", "-m", "other side"]);
+        git_in(&root, &["checkout", "-q", "main"]);
+        std::fs::write(root.join("m.txt"), "m\n").unwrap();
+        git_in(&root, &["add", "."]);
+        git_in(&root, &["commit", "-q", "-m", "main side"]);
+        git_in(
+            &root,
+            &["merge", "-q", "--no-ff", "-m", "Merge other", "other"],
+        );
+        let old = gco(&root, &["rev-parse", "HEAD"]);
+        let parents = gco(&root, &["rev-list", "--parents", "-n", "1", "HEAD"]);
+        assert_eq!(parents.split(' ').count(), 3);
+        let info = commit_info_get(&state, id, "/x").await.unwrap();
+        assert_eq!(info["info"]["head"]["is_merge"], true);
+        let body = |allow: Option<bool>| {
+            json!({"worktree": wt, "message": "Merge other, reworded", "amend": true,
+                   "expected_head": old, "allow_merge": allow})
+        };
+        for allow in [None, Some(false)] {
+            let e = commit_post(&state, id, body(allow)).await.err().unwrap();
+            assert_eq!(e.status, StatusCode::CONFLICT);
+            assert_eq!(e.code, "conflict");
+            assert_eq!(
+                e.message,
+                "The last commit is a merge commit. Amending replaces it with a new merge commit; confirm to proceed."
+            );
+            assert_eq!(gco(&root, &["rev-parse", "HEAD"]), old);
+        }
+        let r = json_body(commit_post(&state, id, body(Some(true))).await.unwrap()).await;
+        assert_eq!(r["amended"], true);
+        assert_ne!(gco(&root, &["rev-parse", "HEAD"]), old);
+        // Still a merge of the same two parents.
+        let now = gco(&root, &["rev-list", "--parents", "-n", "1", "HEAD"]);
+        assert_eq!(
+            now.split(' ').skip(1).collect::<Vec<_>>(),
+            parents.split(' ').skip(1).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            gco(&root, &["log", "-1", "--format=%s"]),
+            "Merge other, reworded"
+        );
     }
 
     #[tokio::test]

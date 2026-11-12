@@ -1496,6 +1496,11 @@ pub struct GitRepoView {
     /// `"rebase"`, `"cherry-pick"`, `"revert"`, `"bisect"`, else None.
     #[serde(default)]
     pub operation: Option<String>,
+    /// A staleness token for the staged set (naru task 2801): it changes when
+    /// a staged entry's path, mode or content does, and only then. The commit
+    /// route takes it back as `staged_digest`. Not a security boundary.
+    #[serde(default)]
+    pub staged_digest: String,
 }
 
 /// One entry from `git worktree list --porcelain` (see
@@ -1670,9 +1675,13 @@ pub struct GitCommitInfo {
     pub head: Option<GitHeadCommit>,
     /// The branch's upstream (`origin/main`), if it has one.
     pub upstream: Option<String>,
-    /// HEAD is already contained in `upstream` (not ahead of it): amending
-    /// rewrites published history. Always false without an upstream.
+    /// HEAD is already contained in `upstream` (not ahead of it) or, on a
+    /// branch, in any other remote-tracking branch (pushed without tracking):
+    /// amending rewrites published history. Same as `published_on` being set.
     pub head_published: bool,
+    /// The ref that already holds HEAD (`origin/main`): the upstream when it
+    /// does, else the first remote-tracking branch that does; else None.
+    pub published_on: Option<String>,
     /// `git config user.name` / `user.email` as that worktree sees them;
     /// None when unset or blank.
     pub author_name: Option<String>,

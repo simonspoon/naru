@@ -1,7 +1,7 @@
 // The commit box's rules (naru task 2740, docs/git-tab.md "Commit box"): the
 // draft record and its storage, message composing and splitting, the subject
-// guide, why the button is off, when Amend is offered, the published-amend
-// dialog text and the labels. No React, no DOM; `components/GitCommitBox.tsx`
+// guide, why the button is off, when Amend is offered, the amend confirm
+// dialog text (published, merge commit) and the labels. No React, no DOM; `components/GitCommitBox.tsx`
 // only lays them out. Repo text (subjects, branches, paths) is data: nothing
 // here builds markup from it.
 import { plural } from './gitActions'
@@ -249,10 +249,13 @@ export function commitState(i: CommitStateIn): CommitState {
   if (i.info !== null) {
     if (i.info.detached) warnings.push('HEAD is detached: this commit will be on no branch.')
     warnings.push(...operationWarning(i.info.operation))
-    if (i.amending && i.info.head_published && i.info.upstream !== null) {
+    if (i.amending && i.info.head_published && i.info.published_on !== null) {
       warnings.push(
-        `The last commit is already on ${i.info.upstream}: amending it asks you to confirm first.`,
+        `The last commit is already on ${i.info.published_on}: amending it asks you to confirm first.`,
       )
+    }
+    if (i.amending && i.info.head?.is_merge === true) {
+      warnings.push('The last commit is a merge commit: amending it asks you to confirm first.')
     }
   }
   const no = (reason: string): CommitState => ({ canCommit: false, reason, warnings })
@@ -289,26 +292,44 @@ export function amendState(info: GitCommitInfo | null): AmendState {
   return { offered: true, disabled: false, reason: null }
 }
 
-/** The dialog of amending a commit that is already on its upstream. */
-export function publishedAmendPlan(
+/** The dialog of an amend that asks first: the commit is already on a remote
+ * branch (its upstream, or another one it was pushed to), it is a merge
+ * commit, or both. Null when neither: that amend never asks. */
+export function amendConfirmPlan(
   info: GitCommitInfo,
   worktree: string,
   branch: string,
-): DiscardPlan {
+): DiscardPlan | null {
   const head = info.head
-  const upstream = info.upstream ?? 'its upstream'
+  const merge = head?.is_merge === true
+  if (!info.head_published && !merge) return null
+  const on = info.published_on ?? 'its upstream'
   const line = head === null ? '' : `${head.short_hash} ${splitMessage(head.message).subject}`
+  const consequences: string[] = []
+  if (info.head_published) {
+    consequences.push(
+      `This commit is already on ${on}.`,
+      `Amending replaces it with a new commit, so ${branch} and ${on} diverge, and anyone who pulled the old commit keeps it.`,
+    )
+  }
+  if (merge) {
+    consequences.push(
+      'This is a merge commit.',
+      'Amending replaces it with a new merge commit of the same parents; anything staged becomes part of the merge itself.',
+    )
+  }
   return {
-    title: 'Amend a published commit?',
+    title: !merge
+      ? 'Amend a published commit?'
+      : info.head_published
+        ? 'Amend a published merge commit?'
+        : 'Amend a merge commit?',
     worktree,
     branch,
     paths: [line],
     listed: [line],
     more: 0,
-    consequences: [
-      `This commit is already on ${upstream}.`,
-      `Amending replaces it with a new commit, so ${branch} and ${upstream} diverge, and anyone who pulled the old commit keeps it.`,
-    ],
+    consequences,
     confirmLabel: 'Amend commit',
     irreversible: 'This cannot be undone from here.',
     listLabel: 'The commit to be amended',

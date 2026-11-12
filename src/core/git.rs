@@ -274,14 +274,31 @@ fn operation_in(git_dir: &std::path::Path) -> Option<String> {
 /// more NUL-terminated field, the original path. `operation` is filled by
 /// `view_of`, which alone can see the git dir.
 fn parse_view(porcelain: &str) -> GitRepoView {
+    use std::hash::Hasher;
     let mut files = Vec::new();
     let mut headers = Vec::new();
+    // The staged set (naru task 2801): X, HEAD and index mode and blob, and
+    // the path(s) of every entry with a staged change. Nothing of the
+    // working-tree side goes in, so an unstaged edit does not move it.
+    let mut staged = std::hash::DefaultHasher::new();
+    let mut staged_n = 0usize;
+    let mut add_staged = |f: &[&str], path: &str, orig: Option<&str>| {
+        let Some(x) = f[0].get(..1).filter(|x| *x != ".") else {
+            return;
+        };
+        staged_n += 1;
+        for part in [x, f[2], f[3], f[5], f[6], path, orig.unwrap_or("")] {
+            staged.write(part.as_bytes());
+            staged.write(&[0]);
+        }
+    };
     let mut it = porcelain.split('\0');
     while let Some(rec) = it.next() {
         // '1 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <path>'
         if let Some(rest) = rec.strip_prefix("1 ") {
             let f: Vec<&str> = rest.splitn(8, ' ').collect();
             if f.len() == 8 {
+                add_staged(&f, f[7], None);
                 files.push(GitFile {
                     status: f[0].to_string(),
                     path: f[7].to_string(),
@@ -294,6 +311,7 @@ fn parse_view(porcelain: &str) -> GitRepoView {
             let orig = it.next().map(str::to_string);
             let f: Vec<&str> = rest.splitn(9, ' ').collect();
             if f.len() == 9 {
+                add_staged(&f, f[8], orig.as_deref());
                 files.push(GitFile {
                     status: f[0].to_string(),
                     path: f[8].to_string(),
@@ -329,6 +347,7 @@ fn parse_view(porcelain: &str) -> GitRepoView {
         status,
         files,
         operation: None,
+        staged_digest: format!("{staged_n:x}-{:016x}", staged.finish()),
     }
 }
 
@@ -2371,10 +2390,34 @@ pub fn commit_info_of(dir: &str) -> Option<GitCommitInfo> {
             "@{upstream}",
         ],
     );
-    let head_published = head.is_some()
+    let on_upstream = head.is_some()
         && read_git_line(dir, &["rev-parse", "--symbolic-full-name", "@{upstream}"])
             .and_then(|full| read_git(dir, &["merge-base", "--is-ancestor", "HEAD", &full]))
             .is_some_and(|(c, _)| c == 0);
+    // Pushed without tracking (naru task 2801): on a branch, HEAD is also
+    // published when any remote-tracking branch contains it.
+    let published_on = if on_upstream {
+        upstream.clone()
+    } else if head.is_some() && branch.is_some() {
+        read_git_line(
+            dir,
+            &[
+                "for-each-ref",
+                "--contains",
+                "HEAD",
+                "--format=%(refname)",
+                "refs/remotes",
+            ],
+        )
+        .and_then(|refs| {
+            refs.lines()
+                .filter(|r| !r.ends_with("/HEAD"))
+                .find_map(|r| r.strip_prefix("refs/remotes/"))
+                .map(str::to_string)
+        })
+    } else {
+        None
+    };
     let config = |key: &str| read_git_line(dir, &["config", "--get", key]);
     let operation = operation_in(std::path::Path::new(&git_dir));
     let prepared_message = operation
@@ -2402,7 +2445,8 @@ pub fn commit_info_of(dir: &str) -> Option<GitCommitInfo> {
         unborn,
         head,
         upstream,
-        head_published,
+        head_published: published_on.is_some(),
+        published_on,
         author_name: config("user.name"),
         author_email: config("user.email"),
         operation,
@@ -3310,6 +3354,44 @@ mod tests {
         assert_eq!(v.files[2].orig_path.as_deref(), Some("-old file"));
         assert_eq!(v.files[3].path, "-dash");
         assert_eq!(v.status.dirty, 4);
+    }
+
+    #[test]
+    fn parse_view_staged_digest_follows_only_the_staged_side() {
+        let d = |body: &str| parse_view(&format!("# branch.head main\0{body}")).staged_digest;
+        let empty = d("");
+        assert!(empty.starts_with("0-"), "{empty}");
+        // Unstaged, untracked and conflicted entries are not the staged set.
+        assert_eq!(
+            d(
+                "1 .M N... 100644 100644 100644 aaa aaa a.txt\0? new\0u UU N... 100644 100644 100644 100644 a b c x.txt\0"
+            ),
+            empty
+        );
+        let one = d("1 M. N... 100644 100644 100644 aaa bbb a.txt\0");
+        assert!(one.starts_with("1-"), "{one}");
+        assert_eq!(one, d("1 M. N... 100644 100644 100644 aaa bbb a.txt\0"));
+        // The working-tree side (Y, mW) and other unstaged files do not move it.
+        assert_eq!(
+            one,
+            d(
+                "1 MM N... 100644 100644 100755 aaa bbb a.txt\x001 .M N... 100644 100644 100644 ccc ccc b.txt\0"
+            )
+        );
+        // The index blob, the index mode, the path and a second file do.
+        for other in [
+            "1 M. N... 100644 100644 100644 aaa ccc a.txt\0",
+            "1 M. N... 100644 100755 100644 aaa bbb a.txt\0",
+            "1 M. N... 100644 100644 100644 aaa bbb b.txt\0",
+            "1 M. N... 100644 100644 100644 aaa bbb a.txt\x001 A. N... 000000 100644 100644 000 ddd n.txt\0",
+            "2 R. N... 100644 100644 100644 aaa bbb R100 a.txt\0old.txt\0",
+        ] {
+            assert_ne!(one, d(other), "{other}");
+        }
+        assert_ne!(
+            d("2 R. N... 100644 100644 100644 aaa bbb R100 a.txt\0old.txt\0"),
+            d("2 R. N... 100644 100644 100644 aaa bbb R100 a.txt\0other.txt\0")
+        );
     }
 
     #[test]
@@ -6508,11 +6590,79 @@ mod commit_tests {
         let i = commit_info_of(s(d)).unwrap();
         assert_eq!(i.upstream.as_deref(), Some("origin/main"));
         assert!(i.head_published);
+        assert_eq!(i.published_on.as_deref(), Some("origin/main"));
         std::fs::write(d.join("a.txt"), "more\n").unwrap();
         g(d, &["commit", "-q", "-a", "-m", "local only"]);
         let i = commit_info_of(s(d)).unwrap();
         assert_eq!(i.upstream.as_deref(), Some("origin/main"));
         assert!(!i.head_published);
+    }
+
+    #[test]
+    fn commit_info_sees_a_head_pushed_without_an_upstream() {
+        let tmp = repo();
+        let d = tmp.path();
+        let remote = tempfile::tempdir().unwrap();
+        g(remote.path(), &["init", "-q", "--bare", "-b", "main"]);
+        g(
+            d,
+            &["remote", "add", "origin", remote.path().to_str().unwrap()],
+        );
+        // Pushed with no `-u`: no upstream, but origin/main holds HEAD.
+        g(d, &["push", "-q", "origin", "main"]);
+        let i = commit_info_of(s(d)).unwrap();
+        assert!(i.upstream.is_none());
+        assert!(i.head_published);
+        assert_eq!(i.published_on.as_deref(), Some("origin/main"));
+        // `origin/HEAD` is never the name shown.
+        g(d, &["remote", "set-head", "origin", "main"]);
+        assert_eq!(
+            commit_info_of(s(d)).unwrap().published_on.as_deref(),
+            Some("origin/main")
+        );
+        // A detached HEAD is on no branch: amending rewrites nothing published.
+        g(d, &["checkout", "-q", "--detach"]);
+        let i = commit_info_of(s(d)).unwrap();
+        assert!(!i.head_published && i.published_on.is_none());
+        g(d, &["checkout", "-q", "main"]);
+        // A new local commit is on no remote branch.
+        std::fs::write(d.join("a.txt"), "more\n").unwrap();
+        g(d, &["commit", "-q", "-a", "-m", "local only"]);
+        let i = commit_info_of(s(d)).unwrap();
+        assert!(!i.head_published && i.published_on.is_none());
+        // With an upstream that does not hold HEAD, another remote branch that does counts.
+        g(d, &["branch", "-q", "--set-upstream-to=origin/main"]);
+        g(d, &["push", "-q", "origin", "main:refs/heads/copy"]);
+        let i = commit_info_of(s(d)).unwrap();
+        assert_eq!(i.upstream.as_deref(), Some("origin/main"));
+        assert!(i.head_published);
+        assert_eq!(i.published_on.as_deref(), Some("origin/copy"));
+    }
+
+    #[test]
+    fn view_of_staged_digest_changes_with_the_index_only() {
+        let tmp = repo();
+        let d = tmp.path();
+        let digest = || view_of(s(d)).unwrap().staged_digest;
+        let clean = digest();
+        std::fs::write(d.join("a.txt"), "one\n").unwrap();
+        assert_eq!(digest(), clean, "an unstaged edit");
+        g(d, &["add", "a.txt"]);
+        let one = digest();
+        assert_ne!(one, clean);
+        std::fs::write(d.join("b.txt"), "unstaged\n").unwrap();
+        std::fs::write(d.join("new.txt"), "n\n").unwrap();
+        assert_eq!(digest(), one, "unstaged and untracked files");
+        // The same path staged again with other content.
+        std::fs::write(d.join("a.txt"), "two\n").unwrap();
+        assert_eq!(digest(), one);
+        g(d, &["add", "a.txt"]);
+        let two = digest();
+        assert_ne!(two, one);
+        g(d, &["add", "new.txt"]);
+        assert_ne!(digest(), two);
+        g(d, &["reset", "-q"]);
+        assert_eq!(digest(), clean);
     }
 
     #[test]

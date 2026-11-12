@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   adoptStaleAmend,
   afterSuccess,
+  amendConfirmPlan,
   dropStaleAmend,
   staleAmend,
   amendState,
@@ -13,7 +14,6 @@ import {
   createSubmitGuard,
   draftKey,
   parseDraft,
-  publishedAmendPlan,
   serializeDraft,
   splitMessage,
   startAmend,
@@ -35,6 +35,7 @@ const info = (o: Partial<GitCommitInfo> = {}): GitCommitInfo => ({
   head,
   upstream: null,
   head_published: false,
+  published_on: null,
   author_name: 'Ada',
   author_email: 'ada@example.com',
   operation: null,
@@ -222,9 +223,19 @@ describe('commitState', () => {
       'A merge is in progress: this commit concludes it.',
     ])
     expect(commitState(inp({ info: info({ operation: 'rebase' }) })).warnings[0]).toContain('rebase')
-    const pub = info({ upstream: 'origin/main', head_published: true })
+    const pub = info({ upstream: 'origin/main', head_published: true, published_on: 'origin/main' })
     expect(commitState(inp({ info: pub, amending: true })).warnings[0]).toContain('origin/main')
     expect(commitState(inp({ info: pub })).warnings).toEqual([])
+    // Pushed without an upstream: the remote branch that holds it is named.
+    const loose = info({ head_published: true, published_on: 'origin/feat' })
+    expect(commitState(inp({ info: loose, amending: true })).warnings).toEqual([
+      'The last commit is already on origin/feat: amending it asks you to confirm first.',
+    ])
+    const merge = info({ head: { ...head, is_merge: true } })
+    expect(commitState(inp({ info: merge, amending: true })).warnings).toEqual([
+      'The last commit is a merge commit: amending it asks you to confirm first.',
+    ])
+    expect(commitState(inp({ info: merge })).warnings).toEqual([])
   })
 })
 
@@ -240,9 +251,45 @@ describe('amendState', () => {
   })
 })
 
-describe('published amend dialog', () => {
+describe('amend confirm dialog', () => {
+  it('is null for an ordinary unpublished commit', () => {
+    expect(amendConfirmPlan(info(), WT, 'main')).toBeNull()
+  })
+
+  it('a commit pushed without an upstream names the remote branch that holds it', () => {
+    const p = amendConfirmPlan(info({ head_published: true, published_on: 'origin/feat' }), WT, 'feat')!
+    expect(p.title).toBe('Amend a published commit?')
+    expect(p.consequences[0]).toBe('This commit is already on origin/feat.')
+    expect(p.consequences[1]).toContain('feat and origin/feat diverge')
+  })
+
+  it('a merge commit says so, alone or with the published lines', () => {
+    const merged = { ...head, is_merge: true }
+    const m = amendConfirmPlan(info({ head: merged }), WT, 'main')!
+    expect(m.title).toBe('Amend a merge commit?')
+    expect(m.consequences).toEqual([
+      'This is a merge commit.',
+      'Amending replaces it with a new merge commit of the same parents; anything staged becomes part of the merge itself.',
+    ])
+    expect(m.listed).toEqual(['abc1234 Fix the thing'])
+    expect(m.confirmLabel).toBe('Amend commit')
+    const both = amendConfirmPlan(
+      info({ head: merged, upstream: 'origin/main', head_published: true, published_on: 'origin/main' }),
+      WT,
+      'main',
+    )!
+    expect(both.title).toBe('Amend a published merge commit?')
+    expect(both.consequences).toHaveLength(4)
+    expect(both.consequences[0]).toBe('This commit is already on origin/main.')
+    expect(both.consequences[2]).toBe('This is a merge commit.')
+  })
+
   it('names the worktree, branch, commit and the consequence', () => {
-    const p = publishedAmendPlan(info({ upstream: 'origin/main', head_published: true }), WT, 'main')
+    const p = amendConfirmPlan(
+      info({ upstream: 'origin/main', head_published: true, published_on: 'origin/main' }),
+      WT,
+      'main',
+    )!
     expect(p.title).toBe('Amend a published commit?')
     expect(p.worktree).toBe(WT)
     expect(p.branch).toBe('main')

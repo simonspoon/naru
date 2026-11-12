@@ -19,10 +19,16 @@ unborn: boolean, head: GitHeadCommit | null,
  */
 upstream: string | null, 
 /**
- * HEAD is already contained in `upstream` (not ahead of it): amending
- * rewrites published history. Always false without an upstream.
+ * HEAD is already contained in `upstream` (not ahead of it) or, on a
+ * branch, in any other remote-tracking branch (pushed without tracking):
+ * amending rewrites published history. Same as `published_on` being set.
  */
 head_published: boolean, 
+/**
+ * The ref that already holds HEAD (`origin/main`): the upstream when it
+ * does, else the first remote-tracking branch that does; else None.
+ */
+published_on: string | null, 
 /**
  * `git config user.name` / `user.email` as that worktree sees them;
  * None when unset or blank.

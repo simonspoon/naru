@@ -19,4 +19,10 @@ files: Array<GitFile>,
  * An operation in progress in this worktree: exactly one of `"merge"`,
  * `"rebase"`, `"cherry-pick"`, `"revert"`, `"bisect"`, else None.
  */
-operation: string | null, };
+operation: string | null, 
+/**
+ * A staleness token for the staged set (naru task 2801): it changes when
+ * a staged entry's path, mode or content does, and only then. The commit
+ * route takes it back as `staged_digest`. Not a security boundary.
+ */
+staged_digest: string, };

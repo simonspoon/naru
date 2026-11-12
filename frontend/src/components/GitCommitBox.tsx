@@ -8,6 +8,7 @@ import {
   activeFields,
   adoptStaleAmend,
   afterSuccess,
+  amendConfirmPlan,
   amendState,
   amendingNow,
   applyPrepared,
@@ -18,7 +19,6 @@ import {
   draftKey,
   dropStaleAmend,
   loadDraft,
-  publishedAmendPlan,
   STALE_AMEND_REASON,
   saveDraft,
   staleAmend,
@@ -43,6 +43,7 @@ export function GitCommitBox({
   worktreePath,
   diffWorktree,
   stagedCount,
+  stagedDigest,
   hasConflicts,
   busy,
   rev,
@@ -57,6 +58,8 @@ export function GitCommitBox({
   /** The worktree as the read routes want it (null = the default one). */
   diffWorktree: string | null
   stagedCount: number
+  /** `staged_digest` of the view the staged list is drawn from. */
+  stagedDigest: string
   hasConflicts: boolean
   /** A write of the working tree is in flight (this commit included). */
   busy: boolean
@@ -140,10 +143,12 @@ export function GitCommitBox({
     try {
       const out = await onCommit({
         message: composeMessage(fields.subject, fields.body),
+        stagedDigest,
         amend: wasAmending,
         expectedHead: wasAmending ? head?.hash : undefined,
         published: wasAmending && info.head_published,
-        plan: wasAmending ? publishedAmendPlan(info, worktreePath, branch) : undefined,
+        merge: wasAmending && head?.is_merge === true,
+        plan: (wasAmending ? amendConfirmPlan(info, worktreePath, branch) : null) ?? undefined,
       })
       if (out.ok) {
         // The box may be gone (worktree switched mid-flight): store it directly too.
