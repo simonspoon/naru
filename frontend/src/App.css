@@ -14803,3 +14803,428 @@ span.orbit-spark {
   display: flex;
   gap: 0.5rem;
 }
+
+/* ---- Git tab History: commit graph, detail panel, drill-down (naru task
+   2735, docs/git-tab.md "History view"). `.git-history` is its own size
+   container so a narrow Custom-layout pane drills down like a phone does
+   (viewport media queries cannot see pane width). ---- */
+.git-history {
+  container-type: inline-size;
+}
+
+.git-history-toolbar {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.git-history-layout {
+  display: flex;
+  gap: 1rem;
+  align-items: stretch;
+  height: var(--tab-viewport-height);
+  min-height: var(--tab-viewport-min);
+}
+
+.git-history-right {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.git-history .git-diff-pane {
+  height: auto;
+  min-height: 0;
+  flex: 1;
+}
+
+.git-graph-list {
+  flex: none;
+  width: 30rem;
+  min-width: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.git-graph-list.dim {
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+.git-commit-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+button.git-commit-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0 0.5rem 0 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  color: var(--text);
+  font-weight: 400;
+  text-align: left;
+  overflow: hidden;
+}
+
+button.git-commit-row:hover:not(:disabled) {
+  background: var(--surface-hover);
+  box-shadow: none;
+}
+
+button.git-commit-row.selected,
+button.git-commit-row.selected:hover:not(:disabled) {
+  background: var(--surface-raised);
+  box-shadow: inset 0 0 0 1px var(--cyan), 0 0 10px var(--cyan-dim);
+}
+
+.git-graph-svg {
+  flex: none;
+  display: block;
+}
+
+.git-edge {
+  fill: none;
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+.git-node {
+  fill: currentColor;
+  stroke: none;
+}
+
+.git-node.merge {
+  fill: var(--panel);
+  stroke: currentColor;
+  stroke-width: 2;
+}
+
+.git-node-head {
+  fill: none;
+  stroke: var(--text-h);
+  stroke-width: 1.5;
+}
+
+.git-graph-more {
+  fill: var(--muted);
+  font-size: 12px;
+}
+
+.lane-c0 { color: var(--lane-0); stroke: var(--lane-0); }
+.lane-c1 { color: var(--lane-1); stroke: var(--lane-1); }
+.lane-c2 { color: var(--lane-2); stroke: var(--lane-2); }
+.lane-c3 { color: var(--lane-3); stroke: var(--lane-3); }
+.lane-c4 { color: var(--lane-4); stroke: var(--lane-4); }
+.lane-c5 { color: var(--lane-5); stroke: var(--lane-5); }
+.lane-c6 { color: var(--lane-6); stroke: var(--lane-6); }
+.lane-c7 { color: var(--lane-7); stroke: var(--lane-7); }
+
+/* A node is a fill, not a stroke: the stroke the lane class sets is only for
+   the merge ring. */
+.git-node:not(.merge) {
+  stroke: none;
+}
+
+.git-ref-badges {
+  flex: none;
+  display: flex;
+  gap: 0.25rem;
+  max-width: 45%;
+  overflow: hidden;
+}
+
+.badge.git-ref {
+  margin: 0;
+  max-width: 10rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.7rem;
+  line-height: 1.5;
+  border-color: transparent;
+}
+
+.git-ref-head {
+  background: var(--cyan);
+  color: var(--on-accent);
+}
+
+.git-ref-detached {
+  background: var(--amber);
+  color: var(--on-accent);
+}
+
+.git-ref-branch {
+  background: var(--surface-raised);
+  color: var(--cyan);
+  border-color: var(--cyan-dim);
+}
+
+.git-ref-remote {
+  background: var(--violet-dim);
+  color: var(--violet);
+  border-color: var(--violet-edge);
+}
+
+.git-ref-tag {
+  background: rgba(var(--amber-rgb), 0.12);
+  color: var(--amber);
+}
+
+.git-ref-other,
+.git-ref-more {
+  background: var(--surface);
+  color: var(--muted);
+}
+
+.git-commit-subject {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.git-commit-author,
+.git-commit-date,
+.git-sha {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+}
+
+.git-commit-author {
+  max-width: 7rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.git-sha {
+  color: var(--cyan);
+  user-select: text;
+  background: none;
+  padding: 0;
+}
+
+.git-load-more {
+  padding: 0.5rem;
+  text-align: center;
+}
+
+.git-history-end {
+  font-size: 0.8rem;
+  text-align: center;
+  margin: 0.5rem 0;
+}
+
+.git-commit-detail {
+  flex: none;
+  max-height: 45%;
+  overflow: auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  padding: 0.5rem 0.75rem;
+}
+
+.git-commit-detail p {
+  margin: 0 0 0.4rem;
+}
+
+.git-detail-subject {
+  margin: 0 0 0.4rem;
+  font-size: 1rem;
+}
+
+.git-detail-body {
+  white-space: pre-wrap;
+}
+
+.git-detail-meta {
+  font-size: 0.85rem;
+}
+
+.git-detail-sha {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.git-sha-full {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  user-select: text;
+  word-break: break-all;
+}
+
+.git-detail-parents {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  font-size: 0.85rem;
+}
+
+.git-parent,
+.git-copy {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  padding: 0.1rem 0.5rem;
+}
+
+.git-detail-note,
+.git-detail-total {
+  font-size: 0.8rem;
+}
+
+.git-file-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+button.git-file-row {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0.25rem 0.4rem;
+  background: none;
+  border: 1px solid transparent;
+  color: var(--text);
+  font-weight: 400;
+  text-align: left;
+}
+
+button.git-file-row .git-file-path {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+button.git-file-row.selected {
+  border-color: var(--cyan);
+  box-shadow: 0 0 10px var(--cyan-dim);
+}
+
+.git-file-stat {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+}
+
+.git-stat-add {
+  color: var(--green);
+}
+
+.git-stat-del {
+  color: var(--red);
+}
+
+.git-back-narrow {
+  display: none;
+}
+
+/* Pane wide tier: hand the viewport box down a rung, like .git-layout above. */
+@media (min-width: 861px) {
+  .project-pane-body > .git-view > .git-history {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .project-pane-body > .git-view > .git-history > .git-history-layout {
+    height: auto;
+    flex: 1;
+    min-height: 0;
+  }
+}
+
+/* Drill-down: list -> detail -> diff, one screen at a time. */
+@container (max-width: 52rem) {
+  .git-history-layout .git-graph-list,
+  .git-history-layout .git-history-right {
+    width: 100%;
+    flex: 1;
+  }
+
+  .git-history-layout[data-level='list'] .git-history-right,
+  .git-history-layout:not([data-level='list']) .git-graph-list {
+    display: none;
+  }
+
+  .git-history-layout[data-level='detail'] .git-history-diff,
+  .git-history-layout[data-level='diff'] .git-commit-detail {
+    display: none;
+  }
+
+  .git-history-layout .git-commit-detail {
+    max-height: none;
+    flex: 1;
+  }
+
+  .git-history-layout[data-level='diff'] .git-back-diff {
+    display: block;
+    align-self: flex-start;
+  }
+
+  .git-history-layout[data-level='detail'] .git-back-narrow {
+    display: block;
+  }
+
+  .git-history-layout[data-level='diff'] .git-commit-detail .git-back-narrow {
+    display: none;
+  }
+
+  .git-history-toolbar {
+    justify-content: flex-start;
+  }
+}
+
+@container (max-width: 37.5rem) {
+  .git-commit-author {
+    display: none;
+  }
+}
+
+@media (max-width: 600px) {
+  .git-parent,
+  .git-copy,
+  button.git-file-row,
+  .git-back-narrow {
+    min-height: 44px;
+  }
+
+  .git-history-toolbar button {
+    min-height: 44px;
+  }
+}
+
+/* A pane at <=861px viewport has no definite height to bind the layout to
+   (`--tab-viewport-height` is a percentage there), so bound the list itself:
+   it must scroll inside itself, or its auto-load sentinel is always in view. */
+@media (max-width: 860px) {
+  .git-graph-list {
+    max-height: 75vh;
+  }
+
+  @supports (height: 100dvh) {
+    .git-graph-list {
+      max-height: 75dvh;
+    }
+  }
+}

@@ -24,6 +24,8 @@ const COMMIT = {
   author: 'Simon',
   date: '2026-07-26T05:00:00+00:00',
   subject: 'do the thing',
+  parents: [],
+  refs: [],
 }
 
 describe('summarizeStat', () => {

@@ -4,22 +4,25 @@
 //! store. Decorative data for the sidebar: any failure (no repo, no git,
 //! detached folder) is `None`, never an error surfaced to the client.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::process::{Command, Stdio};
 
 use crate::core::types::{
-    DiffStat, GitCommit, GitCommitFile, GitFile, GitRepo, GitRepoView, GitStatus, GitWorktree,
+    DiffStat, GitCommit, GitCommitDetail, GitCommitFile, GitFile, GitRef, GitRefKind, GitRepo,
+    GitRepoView, GitStatus, GitWorktree,
 };
 
 /// Diff text is capped so one huge file can't balloon the JSON response
 /// (hooks' 64 KiB output cap precedent, scaled for diffs).
 const DIFF_CAP: usize = 256 * 1024;
 
-/// Cap on `commit_log_of` — recent history for browsing, not a full walk; no
-/// pagination UI (spec W2), so a fixed size. 100 is generous for "browse
-/// recent history" while keeping the `git log` call and response bounded
-/// (same order-of-magnitude judgement as DIFF_CAP).
+/// Page size of the log readers — 100 keeps each `git log` call and response
+/// bounded (same order-of-magnitude judgement as DIFF_CAP); the History view
+/// pages with `commit_log_page`'s `skip`.
 const LOG_CAP: usize = 100;
+
+/// Cap on a commit message body in `commit_detail_of`.
+const BODY_CAP: usize = 64 * 1024;
 
 /// The root (first) commit of the git repo at `path` (default: cwd), or `None`
 /// if it is not a git repo or git is unavailable. Uses `--reverse` and takes the
@@ -386,7 +389,7 @@ fn capped(bytes: &[u8]) -> String {
 }
 
 /// Recent commit log (`git -C <dir> log -n LOG_CAP --date=iso-strict
-/// --pretty=format:%H%x1f%h%x1f%an%x1f%aI%x1f%s`), newest first (git log's
+/// --pretty=format:%H%x00%h%x00%an%x00%aI%x00%s`), newest first (git log's
 /// default order). Empty vec on ANY failure — not a repo, or a real repo
 /// with an unborn HEAD (no commits yet) are indistinguishable at this level
 /// on purpose; the caller has already established repo validity via
@@ -394,7 +397,34 @@ fn capped(bytes: &[u8]) -> String {
 /// yet" in practice, and either way an empty list is the correct quiet
 /// result (M9).
 pub fn commit_log_of(dir: &str) -> Vec<GitCommit> {
-    run_log(dir, None, &[])
+    run_log(dir, None, &[], LOG_CAP, false)
+}
+
+/// One page of the History view's log: up to [`LOG_CAP`] commits starting
+/// `skip` commits in, with each commit's `refs` filled, plus whether git has
+/// more past the page. `all` walks every ref (`git log --all`) instead of
+/// `dir`'s HEAD. Asks git for one extra commit to learn `has_more`. Git's
+/// DEFAULT order (reverse chronological) on purpose: `--topo-order`,
+/// `--date-order` and `--graph` force a walk of the whole history when the
+/// repo has no commit-graph file, and a page must stay bounded on a huge
+/// repo. Same empty-on-any-failure contract as [`commit_log_of`] (unborn HEAD
+/// included).
+pub fn commit_log_page(dir: &str, all: bool, skip: usize) -> (Vec<GitCommit>, bool) {
+    let mut extra = Vec::new();
+    if all {
+        extra.push("--all".to_string());
+    }
+    if skip > 0 {
+        extra.push(format!("--skip={skip}"));
+    }
+    page(run_log(dir, None, &extra, LOG_CAP + 1, true))
+}
+
+/// Splits git's `LOG_CAP + 1` answer into the page and its `has_more`.
+fn page(mut commits: Vec<GitCommit>) -> (Vec<GitCommit>, bool) {
+    let more = commits.len() > LOG_CAP;
+    commits.truncate(LOG_CAP);
+    (commits, more)
 }
 
 /// Commits that touched ONE path, newest first — `commit_log_of` with a
@@ -413,7 +443,13 @@ pub fn commit_log_of(dir: &str) -> Vec<GitCommit> {
 /// diffable. An empty vec is a legitimate answer: a file that exists on
 /// disk but was never committed simply has no history.
 pub fn file_log_of(dir: &str, rel: &str) -> Vec<GitCommit> {
-    run_log(dir, Some(rel), &[])
+    file_log_page(dir, rel).0
+}
+
+/// [`file_log_of`] plus whether the file has more commits past the first
+/// [`LOG_CAP`]. Refs stay empty (the Files tab has no use for them).
+pub fn file_log_page(dir: &str, rel: &str) -> (Vec<GitCommit>, bool) {
+    page(run_log(dir, Some(rel), &[], LOG_CAP + 1, false))
 }
 
 /// Commits made in `dir` between `since` and `until` (task 920, spec D4) —
@@ -438,6 +474,8 @@ pub fn log_between(dir: &str, since: &str, until: &str) -> Vec<GitCommit> {
             format!("--since={since} UTC"),
             format!("--until={until} UTC"),
         ],
+        LOG_CAP,
+        false,
     )
 }
 
@@ -445,7 +483,7 @@ pub fn log_between(dir: &str, since: &str, until: &str) -> Vec<GitCommit> {
 /// with no upper bound, `since` being `Store`'s UTC text and pinned the same
 /// way (` UTC`). Same cap, same empty-vec-on-failure contract.
 pub fn log_since(dir: &str, since: &str) -> Vec<GitCommit> {
-    run_log(dir, None, &[format!("--since={since} UTC")])
+    run_log(dir, None, &[format!("--since={since} UTC")], LOG_CAP, false)
 }
 
 /// The newest commit on any ref in `dir` since `since` (`Store`'s UTC text)
@@ -493,25 +531,37 @@ pub fn tracked_files(dir: &str, max: usize) -> Vec<String> {
     }
 }
 
-/// Shared body of `commit_log_of`/`file_log_of`/`log_between`. `extra` holds
-/// additional `git log` flags (currently just `log_between`'s `--since`/
-/// `--until` pair) passed as separate `Command::arg`s — never string-built —
-/// so an untrusted value can never be read as a second flag; `pathspec` is
-/// passed after `--` when present. Empty vec on ANY failure — not a repo, or
-/// a real repo with an unborn HEAD (no commits yet) are indistinguishable at
-/// this level on purpose; the caller has already established repo validity
-/// via `project_git_view`, so here "git log failed" only ever means "no
-/// commits yet" in practice, and either way an empty list is the correct
-/// quiet result (M9).
-fn run_log(dir: &str, pathspec: Option<&str>, extra: &[String]) -> Vec<GitCommit> {
+/// Shared body of the log readers. `extra` holds additional `git log` flags
+/// (`--since`/`--until`, `--all`, `--skip=N`) passed as separate
+/// `Command::arg`s — never string-built — so an untrusted value can never be
+/// read as a second flag; `pathspec` is passed after `--` when present.
+/// `limit` is the `-n` count. `with_refs` adds `%D` under `--decorate=full`;
+/// receipts and triage pass false so a frozen log never captures branch
+/// positions. Empty vec on ANY failure — not a repo, or a real repo with an
+/// unborn HEAD (no commits yet) are indistinguishable at this level on
+/// purpose; the caller has already established repo validity via
+/// `project_git_view`, so here "git log failed" only ever means "no commits
+/// yet" in practice, and either way an empty list is the correct quiet
+/// result (M9).
+fn run_log(
+    dir: &str,
+    pathspec: Option<&str>,
+    extra: &[String],
+    limit: usize,
+    with_refs: bool,
+) -> Vec<GitCommit> {
+    let format = if with_refs {
+        "--pretty=format:%H%x00%h%x00%an%x00%aI%x00%P%x00%D%x00%s"
+    } else {
+        "--pretty=format:%H%x00%h%x00%an%x00%aI%x00%P%x00%x00%s"
+    };
     let mut cmd = Command::new("git");
-    cmd.args(["-C", dir]).args([
-        "log",
-        "-n",
-        &LOG_CAP.to_string(),
-        "--date=iso-strict",
-        "--pretty=format:%H%x1f%h%x1f%an%x1f%aI%x1f%s",
-    ]);
+    cmd.args(["-C", dir])
+        .args(["log", "-n", &limit.to_string(), "--date=iso-strict"]);
+    if with_refs {
+        cmd.arg("--decorate=full");
+    }
+    cmd.arg(format);
     cmd.args(extra);
     if let Some(rel) = pathspec {
         cmd.arg("--").arg(rel);
@@ -526,18 +576,20 @@ fn run_log(dir: &str, pathspec: Option<&str>, extra: &[String]) -> Vec<GitCommit
     parse_log(&String::from_utf8_lossy(&out.stdout))
 }
 
-/// Kept pure like parse_status/parse_view: splits `%x1f`-joined fields per
-/// line (unit separator — commit subjects/authors can contain almost
-/// anything but a newline, so a control byte avoids delimiter collisions
-/// that a tab or comma could hit).
+/// Kept pure like parse_status/parse_view: splits `%x00`-joined fields per
+/// line. NUL, because git cannot store one in a name or subject, whereas a
+/// name may hold any other control byte (0x1f included) and would shift the
+/// fields. The subject is last and takes the rest of the line.
 fn parse_log(text: &str) -> Vec<GitCommit> {
     let mut commits = Vec::new();
     for line in text.lines() {
         if line.is_empty() {
             continue;
         }
-        let mut it = line.split('\u{1f}');
-        let (hash, short_hash, author, date, subject) = (
+        let mut it = line.splitn(7, '\0');
+        let (hash, short_hash, author, date, parents, decor, subject) = (
+            it.next().unwrap_or(""),
+            it.next().unwrap_or(""),
             it.next().unwrap_or(""),
             it.next().unwrap_or(""),
             it.next().unwrap_or(""),
@@ -550,9 +602,58 @@ fn parse_log(text: &str) -> Vec<GitCommit> {
             author: author.to_string(),
             date: date.to_string(),
             subject: subject.to_string(),
+            parents: parents
+                .split(' ')
+                .filter(|p| !p.is_empty())
+                .map(str::to_string)
+                .collect(),
+            refs: parse_refs(decor),
         });
     }
     commits
+}
+
+/// Parses `%D` under `--decorate=full` (entries joined by ", "): `HEAD ->
+/// refs/heads/main`, a bare `HEAD` (detached), `refs/heads/x`,
+/// `refs/remotes/origin/x`, `tag: refs/tags/v1`, anything else (`refs/stash`).
+fn parse_refs(decor: &str) -> Vec<GitRef> {
+    decor
+        .split(", ")
+        .filter(|e| !e.is_empty())
+        .map(|e| {
+            if e == "HEAD" {
+                GitRef {
+                    kind: GitRefKind::Head,
+                    name: "HEAD".into(),
+                    is_head: true,
+                }
+            } else if let Some(rest) = e.strip_prefix("HEAD -> ") {
+                GitRef {
+                    is_head: true,
+                    ..classify_ref(rest)
+                }
+            } else {
+                classify_ref(e.strip_prefix("tag: ").unwrap_or(e))
+            }
+        })
+        .collect()
+}
+
+fn classify_ref(full: &str) -> GitRef {
+    let (kind, name) = if let Some(n) = full.strip_prefix("refs/heads/") {
+        (GitRefKind::Branch, n)
+    } else if let Some(n) = full.strip_prefix("refs/remotes/") {
+        (GitRefKind::Remote, n)
+    } else if let Some(n) = full.strip_prefix("refs/tags/") {
+        (GitRefKind::Tag, n)
+    } else {
+        (GitRefKind::Other, full)
+    };
+    GitRef {
+        kind,
+        name: name.to_string(),
+        is_head: false,
+    }
 }
 
 /// Defense-in-depth (M8): rejects anything that isn't plausibly a git hash
@@ -567,71 +668,205 @@ fn is_valid_commit_id(sha: &str) -> bool {
     (7..=64).contains(&len) && sha.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// Files changed in one commit: `git -C <dir> show --no-color --name-status
-/// --format= <sha>` (`--format=` suppresses the commit header, leaving only
-/// the name-status lines — works unmodified for the root/initial commit,
-/// which `git show` diffs against the empty tree, satisfying M4; for merge
-/// commits this is git's own default combined-diff behavior, per the spec's
-/// stated assumption). `sha` is validated by `is_valid_commit_id` (M8)
-/// BEFORE the Command is built; an invalid shape short-circuits to `None`
-/// without spawning git. `None` on invalid shape or git failure (unknown
-/// sha, not a repo) — the caller maps this to `not_found`. `Some(vec![])`
-/// is a legitimate answer (an empty commit).
+/// Files changed in one commit: `git -C <dir> show --no-color
+/// --diff-merges=first-parent --name-status -z --format= <sha>` merged with the
+/// same call's `--numstat -z` by path for the line counts. `--format=`
+/// suppresses the commit header; the root commit diffs against the empty
+/// tree (all files `A`). A merge commit is diffed against its FIRST parent
+/// (`--diff-merges=first-parent`, the same flag `commit_file_diff_of` uses),
+/// so the list is "what this merge brought onto its branch" and every listed
+/// file has a non-empty diff — git's default combined diff would list almost
+/// nothing and render as unreadable `diff --cc` text. `-z` keeps paths
+/// unquoted. `sha` is validated by `is_valid_commit_id` (M8) BEFORE the
+/// Command is built; an invalid shape short-circuits to `None` without
+/// spawning git. `None` on invalid shape or git failure (unknown sha, not a
+/// repo) — the caller maps this to `not_found`. `Some(vec![])` is a
+/// legitimate answer (an empty commit). A failed numstat leaves the counts
+/// `None` rather than failing the list.
 pub fn commit_files_of(dir: &str, sha: &str) -> Option<Vec<GitCommitFile>> {
+    if !is_valid_commit_id(sha) {
+        return None;
+    }
+    let show = |fmt: &str| {
+        Command::new("git")
+            .args(["-C", dir])
+            .args([
+                "show",
+                "--no-color",
+                "--diff-merges=first-parent",
+                fmt,
+                "-z",
+                "--format=",
+                sha,
+            ])
+            .stdin(Stdio::null())
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+    };
+    let names = show("--name-status")?;
+    let mut files = parse_commit_files(&String::from_utf8_lossy(&names.stdout));
+    if let Some(nums) = show("--numstat") {
+        let counts = parse_numstat_z(&String::from_utf8_lossy(&nums.stdout));
+        for f in &mut files {
+            if let Some((a, d)) = counts.get(&f.path) {
+                f.added = *a;
+                f.deleted = *d;
+            }
+        }
+    }
+    Some(files)
+}
+
+/// Kept pure: parses `git show --name-status -z` — NUL-separated tokens,
+/// `STATUS\0path\0` (add/modify/delete/etc.) or `STATUS\0old\0new\0` for a
+/// rename/copy (STATUS carries a similarity score e.g. "R100"). Counts are
+/// left `None` for the caller to fill.
+fn parse_commit_files(text: &str) -> Vec<GitCommitFile> {
+    let mut files = Vec::new();
+    let mut toks = text.split('\0').filter(|t| !t.is_empty());
+    while let Some(status) = toks.next() {
+        let (path, orig_path) = if status.starts_with('R') || status.starts_with('C') {
+            let (Some(old), Some(new)) = (toks.next(), toks.next()) else {
+                break;
+            };
+            (new.to_string(), Some(old.to_string()))
+        } else {
+            let Some(p) = toks.next() else {
+                break;
+            };
+            (p.to_string(), None)
+        };
+        files.push(GitCommitFile {
+            status: status.to_string(),
+            path,
+            orig_path,
+            added: None,
+            deleted: None,
+        });
+    }
+    files
+}
+
+/// Kept pure: parses `git show --numstat -z` into `path -> (added, deleted)`,
+/// `None` counts for a binary file (`-`/`-`). Entries are `added\tdeleted\t
+/// path\0`; a rename is `added\tdeleted\t\0old\0new\0` and is keyed by the
+/// NEW path (what `GitCommitFile.path` holds).
+fn parse_numstat_z(text: &str) -> HashMap<String, (Option<u32>, Option<u32>)> {
+    let mut out = HashMap::new();
+    let mut toks = text.split('\0').filter(|t| !t.is_empty());
+    while let Some(tok) = toks.next() {
+        let mut parts = tok.splitn(3, '\t');
+        let (Some(a), Some(d), Some(path)) = (parts.next(), parts.next(), parts.next()) else {
+            continue;
+        };
+        let path = if path.is_empty() {
+            let (Some(_old), Some(new)) = (toks.next(), toks.next()) else {
+                break;
+            };
+            new
+        } else {
+            path
+        };
+        out.insert(path.to_string(), (a.parse().ok(), d.parse().ok()));
+    }
+    out
+}
+
+/// One commit's header and message (`git log -n 1 --format=…`, fields split
+/// on `%x00` with the body last so it may hold anything). `None` on an
+/// invalid sha shape (checked before any spawn), an unknown sha or a non-
+/// commit object. The body is capped at [`BODY_CAP`] on a char boundary.
+pub fn commit_detail_of(dir: &str, sha: &str) -> Option<GitCommitDetail> {
     if !is_valid_commit_id(sha) {
         return None;
     }
     let out = Command::new("git")
         .args(["-C", dir])
-        .args(["show", "--no-color", "--name-status", "--format=", sha])
+        .args([
+            "log",
+            "-n",
+            "1",
+            "--no-color",
+            "--format=%H%x00%h%x00%P%x00%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI%x00%s%x00%b",
+            sha,
+            "--",
+        ])
         .stdin(Stdio::null())
         .output()
         .ok()?;
     if !out.status.success() {
         return None;
     }
-    Some(parse_commit_files(&String::from_utf8_lossy(&out.stdout)))
+    parse_commit_detail(&String::from_utf8_lossy(&out.stdout))
 }
 
-/// Kept pure: parses `git show --name-status` lines. Two shapes, tab-
-/// separated: `STATUS\tpath` (add/modify/delete/etc.) and
-/// `STATUS\told_path\tnew_path` (rename/copy, STATUS carries a similarity
-/// score e.g. "R100").
-fn parse_commit_files(text: &str) -> Vec<GitCommitFile> {
-    let mut files = Vec::new();
-    for line in text.lines() {
-        if line.is_empty() {
-            continue;
-        }
-        let mut parts = line.split('\t');
-        let status = parts.next().unwrap_or("").to_string();
-        let a = parts.next();
-        let b = parts.next();
-        let (path, orig_path) = match (a, b) {
-            (Some(old), Some(new)) => (new.to_string(), Some(old.to_string())),
-            (Some(p), None) => (p.to_string(), None),
-            (None, _) => continue,
-        };
-        files.push(GitCommitFile {
-            status,
-            path,
-            orig_path,
-        });
+fn parse_commit_detail(text: &str) -> Option<GitCommitDetail> {
+    let mut it = text.splitn(11, '\0');
+    let mut next = || it.next();
+    let hash = next()?;
+    let short_hash = next()?;
+    let parents = next()?;
+    let author = next()?;
+    let author_email = next()?;
+    let author_date = next()?;
+    let committer = next()?;
+    let committer_email = next()?;
+    let committer_date = next()?;
+    let subject = next()?;
+    let body = next()?.trim_end();
+    if hash.is_empty() {
+        return None;
     }
-    files
+    let mut body = body.to_string();
+    if body.len() > BODY_CAP {
+        let cut = (0..=BODY_CAP).rev().find(|i| body.is_char_boundary(*i));
+        body.truncate(cut.unwrap_or(0));
+        body.push_str("\n[message truncated]");
+    }
+    Some(GitCommitDetail {
+        hash: hash.to_string(),
+        short_hash: short_hash.to_string(),
+        parents: parents
+            .split(' ')
+            .filter(|p| !p.is_empty())
+            .map(str::to_string)
+            .collect(),
+        author: author.to_string(),
+        author_email: author_email.to_string(),
+        author_date: author_date.to_string(),
+        committer: committer.to_string(),
+        committer_email: committer_email.to_string(),
+        committer_date: committer_date.to_string(),
+        subject: subject.to_string(),
+        body,
+    })
 }
 
 /// One file's diff as introduced by one commit: `git -C <dir> show
-/// --no-color <sha> -- <path>` via the existing `run_diff` helper (same
-/// DIFF_CAP truncation as working-tree diffs, S4). Root commit renders
-/// fully-added (M4) because `git show` on the first commit diffs against
-/// the empty tree, same as commit_files_of. `sha` validated the same way
+/// --no-color --diff-merges=first-parent <sha> -- <path>` via the existing
+/// `run_diff` helper (same DIFF_CAP truncation as working-tree diffs, S4).
+/// Root commit renders fully-added (M4) because `git show` on the first
+/// commit diffs against the empty tree, same as commit_files_of; a merge is
+/// diffed against its first parent, matching `commit_files_of`'s list (the
+/// flag changes nothing for a non-merge commit). `sha` validated the same way
 /// (M8); `None` on invalid shape or git failure.
 pub fn commit_file_diff_of(dir: &str, sha: &str, path: &str) -> Option<String> {
     if !is_valid_commit_id(sha) {
         return None;
     }
-    run_diff(dir, &["show", "--no-color", sha, "--", path], &[0])
+    run_diff(
+        dir,
+        &[
+            "show",
+            "--no-color",
+            "--diff-merges=first-parent",
+            sha,
+            "--",
+            path,
+        ],
+        &[0],
+    )
 }
 
 /// Summed diff stat over `shas` (task 920, spec D4/schema) — the numbers a
@@ -1506,5 +1741,441 @@ mod tests {
         assert_eq!(stat.files_changed, 0);
         assert_eq!(stat.insertions, 0);
         assert_eq!(stat.deletions, 0);
+    }
+
+    // ---- naru task 2735: paged graph log, refs, commit detail ----
+
+    /// Runs `git -C <dir> <args>` with a fixed identity, asserts success and
+    /// returns trimmed stdout.
+    fn g(dir: &str, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .args(["-C", dir, "-c", "user.email=t@t", "-c", "user.name=t"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn commit_file(dir: &str, name: &str, content: &str, msg: &str) -> String {
+        std::fs::write(std::path::Path::new(dir).join(name), content).unwrap();
+        g(dir, &["add", name]);
+        g(dir, &["commit", "-m", msg]);
+        g(dir, &["rev-parse", "HEAD"])
+    }
+
+    fn find<'a>(log: &'a [GitCommit], hash: &str) -> &'a GitCommit {
+        log.iter().find(|c| c.hash == hash).unwrap()
+    }
+
+    #[test]
+    fn parse_refs_reads_every_decoration_kind() {
+        let r = parse_refs(
+            "HEAD -> refs/heads/main, tag: refs/tags/v1, refs/remotes/origin/main, \
+             refs/heads/feat/x, refs/stash",
+        );
+        let got: Vec<(GitRefKind, &str, bool)> = r
+            .iter()
+            .map(|x| (x.kind, x.name.as_str(), x.is_head))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (GitRefKind::Branch, "main", true),
+                (GitRefKind::Tag, "v1", false),
+                (GitRefKind::Remote, "origin/main", false),
+                (GitRefKind::Branch, "feat/x", false),
+                (GitRefKind::Other, "refs/stash", false),
+            ]
+        );
+        let detached = parse_refs("HEAD, refs/heads/main");
+        assert_eq!(detached[0].kind, GitRefKind::Head);
+        assert_eq!(detached[0].name, "HEAD");
+        assert!(detached[0].is_head);
+        assert!(!detached[1].is_head);
+        assert!(parse_refs("").is_empty());
+    }
+
+    #[test]
+    fn git_commit_json_without_parents_or_refs_still_deserializes() {
+        let old = r#"{"hash":"aaaaaaaa","short_hash":"aaaaaaa","author":"t","date":"2024-01-01T12:00:00Z","subject":"s"}"#;
+        let c: GitCommit = serde_json::from_str(old).unwrap();
+        assert!(c.parents.is_empty());
+        assert!(c.refs.is_empty());
+    }
+
+    /// main: root(v1) -> m1 ; side: root -> s1 ; merge `merge` (2 parents) ;
+    /// octopus `octo` (3 parents) ; plus a remote ref, a stash-like ref and a
+    /// commit only reachable from branch `other`.
+    struct GraphRepo {
+        dir: tempfile::TempDir,
+        root: String,
+        merge: String,
+        octo: String,
+        only_other: String,
+    }
+
+    fn graph_repo() -> GraphRepo {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().to_str().unwrap().to_string();
+        let p = p.as_str();
+        g(p, &["init", "-b", "main"]);
+        let root = commit_file(p, "base.txt", "base\n", "root");
+        g(p, &["tag", "v1"]);
+        g(p, &["checkout", "-b", "side"]);
+        commit_file(p, "side.txt", "side\n", "side work");
+        g(p, &["checkout", "main"]);
+        commit_file(p, "m.txt", "m\n", "main work");
+        g(p, &["merge", "--no-ff", "side", "-m", "merge side"]);
+        let merge = g(p, &["rev-parse", "HEAD"]);
+        for b in ["o1", "o2"] {
+            g(p, &["checkout", "-b", b, "main"]);
+            commit_file(p, &format!("{b}.txt"), "x\n", &format!("{b} work"));
+            g(p, &["checkout", "main"]);
+        }
+        commit_file(p, "m2.txt", "m2\n", "main moves on");
+        g(p, &["merge", "-m", "octopus", "o1", "o2"]);
+        let octo = g(p, &["rev-parse", "HEAD"]);
+        g(p, &["checkout", "-b", "other", "main"]);
+        let only_other = commit_file(p, "other.txt", "o\n", "only on other");
+        g(p, &["checkout", "main"]);
+        g(p, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        g(p, &["update-ref", "refs/stash", &root]);
+        GraphRepo {
+            dir,
+            root,
+            merge,
+            octo,
+            only_other,
+        }
+    }
+
+    #[test]
+    fn log_page_carries_parents_and_every_ref_kind() {
+        let r = graph_repo();
+        let p = r.dir.path().to_str().unwrap();
+        let (log, more) = commit_log_page(p, false, 0);
+        assert!(!more);
+        // Root has no parents; merge has two; octopus has three.
+        assert!(find(&log, &r.root).parents.is_empty());
+        assert_eq!(find(&log, &r.merge).parents.len(), 2);
+        assert_eq!(find(&log, &r.octo).parents.len(), 3);
+        // Tip: HEAD -> main plus the remote ref, both on the octopus commit.
+        let tip = find(&log, &r.octo);
+        assert!(tip.refs.contains(&GitRef {
+            kind: GitRefKind::Branch,
+            name: "main".into(),
+            is_head: true
+        }));
+        assert!(tip.refs.contains(&GitRef {
+            kind: GitRefKind::Remote,
+            name: "origin/main".into(),
+            is_head: false
+        }));
+        // Tag + other on the root commit (stash ref points at it).
+        let root = find(&log, &r.root);
+        assert!(root.refs.contains(&GitRef {
+            kind: GitRefKind::Tag,
+            name: "v1".into(),
+            is_head: false
+        }));
+        assert!(root.refs.contains(&GitRef {
+            kind: GitRefKind::Other,
+            name: "refs/stash".into(),
+            is_head: false
+        }));
+        // Receipt readers never carry refs.
+        let (lines, _) = (commit_log_of(p), ());
+        assert!(lines.iter().all(|c| c.refs.is_empty()));
+        assert_eq!(find(&lines, &r.octo).parents.len(), 3);
+    }
+
+    #[test]
+    fn log_page_all_shows_commits_only_on_another_branch() {
+        let r = graph_repo();
+        let p = r.dir.path().to_str().unwrap();
+        let (head_only, _) = commit_log_page(p, false, 0);
+        assert!(head_only.iter().all(|c| c.hash != r.only_other));
+        let (all, _) = commit_log_page(p, true, 0);
+        assert!(all.iter().any(|c| c.hash == r.only_other));
+    }
+
+    #[test]
+    fn log_page_detached_head_and_linked_worktree_head() {
+        let r = graph_repo();
+        let p = r.dir.path().to_str().unwrap();
+        let wt_dir = tempfile::tempdir().unwrap();
+        let wt = wt_dir.path().join("wt");
+        let wt = wt.to_str().unwrap();
+        g(p, &["worktree", "add", "-b", "wtb", wt, &r.root]);
+        // The linked worktree's own HEAD is its branch, at the root commit.
+        let (log, _) = commit_log_page(wt, false, 0);
+        assert_eq!(log.len(), 1);
+        assert!(log[0].refs.contains(&GitRef {
+            kind: GitRefKind::Branch,
+            name: "wtb".into(),
+            is_head: true
+        }));
+        g(wt, &["checkout", "--detach"]);
+        let (log, _) = commit_log_page(wt, false, 0);
+        assert!(log[0].refs.contains(&GitRef {
+            kind: GitRefKind::Head,
+            name: "HEAD".into(),
+            is_head: true
+        }));
+    }
+
+    #[test]
+    fn log_page_unborn_head_is_empty_for_both_modes() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().to_str().unwrap();
+        g(p, &["init", "-b", "main"]);
+        assert_eq!(commit_log_page(p, false, 0), (Vec::new(), false));
+        assert_eq!(commit_log_page(p, true, 0), (Vec::new(), false));
+    }
+
+    #[test]
+    fn log_page_handles_empty_and_odd_subjects() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().to_str().unwrap();
+        g(p, &["init", "-b", "main"]);
+        g(
+            p,
+            &["commit", "--allow-empty", "--allow-empty-message", "-m", ""],
+        );
+        let odd = "tab\there, \"quotes\" 'single' <b>&amp;</b> \u{1f600} ->  HEAD, tag: x";
+        g(p, &["commit", "--allow-empty", "-m", odd]);
+        let (log, _) = commit_log_page(p, false, 0);
+        assert_eq!(log.len(), 2);
+        assert_eq!(log[0].subject, odd);
+        assert_eq!(log[1].subject, "");
+        assert!(log[1].parents.is_empty());
+        assert_eq!(log[0].parents, vec![log[1].hash.clone()]);
+    }
+
+    #[test]
+    fn log_pages_concatenate_to_the_full_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().to_str().unwrap();
+        g(p, &["init", "-b", "main"]);
+        // 230 commits in one fast-import, linear.
+        let mut stream = String::new();
+        for i in 0..230 {
+            stream.push_str(&format!(
+                "commit refs/heads/main\nmark :{m}\ncommitter t <t@t> {t} +0000\ndata 2\nc{i}\n",
+                m = i + 1,
+                t = 1_700_000_000 + i,
+                i = i % 10
+            ));
+            if i > 0 {
+                stream.push_str(&format!("from :{i}\n"));
+            }
+            stream.push('\n');
+        }
+        let mut child = Command::new("git")
+            .args(["-C", p, "fast-import", "--quiet"])
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        std::io::Write::write_all(child.stdin.as_mut().unwrap(), stream.as_bytes()).unwrap();
+        assert!(child.wait().unwrap().success());
+        let full: Vec<String> = g(p, &["rev-list", "main"])
+            .lines()
+            .map(String::from)
+            .collect();
+        assert_eq!(full.len(), 230);
+
+        let mut got = Vec::new();
+        let mut skip = 0;
+        let mut pages = 0;
+        loop {
+            let (page, more) = commit_log_page(p, false, skip);
+            pages += 1;
+            assert!(page.len() <= LOG_CAP);
+            skip += page.len();
+            got.extend(page.into_iter().map(|c| c.hash));
+            if !more {
+                break;
+            }
+            assert_eq!(skip % LOG_CAP, 0, "a page with more behind it is full");
+        }
+        assert_eq!(pages, 3);
+        assert_eq!(got, full);
+        // Exactly one full page: has_more must be false, not a phantom page.
+        let (page, more) = commit_log_page(p, false, 130);
+        assert_eq!((page.len(), more), (100, false));
+        let (page, more) = commit_log_page(p, false, 0);
+        assert_eq!((page.len(), more), (100, true));
+        // Skipping past the end is an empty page.
+        assert_eq!(commit_log_page(p, false, 500), (Vec::new(), false));
+    }
+
+    #[test]
+    fn merge_commit_files_are_the_first_parent_diff_and_all_diffable() {
+        let r = graph_repo();
+        let p = r.dir.path().to_str().unwrap();
+        let files = commit_files_of(p, &r.merge).unwrap();
+        // main was at main work; the merge brought side.txt onto it.
+        assert_eq!(files.len(), 1, "{files:?}");
+        assert_eq!(files[0].path, "side.txt");
+        assert_eq!(files[0].status, "A");
+        assert_eq!((files[0].added, files[0].deleted), (Some(1), Some(0)));
+        for f in &files {
+            let d = commit_file_diff_of(p, &r.merge, &f.path).unwrap();
+            assert!(d.contains("+side"), "diff was: {d}");
+            assert!(!d.contains("diff --cc"));
+        }
+        let octo_files = commit_files_of(p, &r.octo).unwrap();
+        for f in &octo_files {
+            assert!(!commit_file_diff_of(p, &r.octo, &f.path).unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn commit_files_carry_numstat_for_rename_and_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().to_str().unwrap();
+        g(p, &["init", "-b", "main"]);
+        let body: String = (0..20).map(|i| format!("line {i}\n")).collect();
+        commit_file(p, "old name.txt", &body, "add");
+        std::fs::write(dir.path().join("bin.dat"), [0u8, 1, 2, 0, 255, 0]).unwrap();
+        g(p, &["add", "bin.dat"]);
+        g(p, &["commit", "-m", "bin"]);
+        g(p, &["mv", "old name.txt", "new name.txt"]);
+        std::fs::write(
+            dir.path().join("new name.txt"),
+            format!("{body}extra\nmore\n"),
+        )
+        .unwrap();
+        g(p, &["add", "-A"]);
+        g(p, &["commit", "-m", "rename and edit"]);
+        let sha = g(p, &["rev-parse", "HEAD"]);
+        let files = commit_files_of(p, &sha).unwrap();
+        assert_eq!(files.len(), 1, "{files:?}");
+        assert!(files[0].status.starts_with('R'));
+        assert_eq!(files[0].path, "new name.txt");
+        assert_eq!(files[0].orig_path.as_deref(), Some("old name.txt"));
+        assert_eq!((files[0].added, files[0].deleted), (Some(2), Some(0)));
+        let bin_sha = g(p, &["rev-parse", "HEAD~1"]);
+        let files = commit_files_of(p, &bin_sha).unwrap();
+        assert_eq!(files[0].path, "bin.dat");
+        assert_eq!((files[0].added, files[0].deleted), (None, None));
+    }
+
+    #[test]
+    fn parse_numstat_z_reads_rename_and_binary_entries() {
+        let m = parse_numstat_z("3\t1\ta.txt\0-\t-\timg.png\u{0}2\t0\t\0old\0new\0");
+        assert_eq!(m["a.txt"], (Some(3), Some(1)));
+        assert_eq!(m["img.png"], (None, None));
+        assert_eq!(m["new"], (Some(2), Some(0)));
+        let f = parse_commit_files("M\0a.txt\0R100\0old\0new\0A\0z\0");
+        assert_eq!(f.len(), 3);
+        assert_eq!(f[1].orig_path.as_deref(), Some("old"));
+        assert_eq!(f[1].path, "new");
+    }
+
+    #[test]
+    fn commit_detail_has_multiline_body_and_handles_an_empty_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().to_str().unwrap();
+        g(p, &["init", "-b", "main"]);
+        g(
+            p,
+            &[
+                "commit",
+                "--allow-empty",
+                "-m",
+                "subject line",
+                "-m",
+                "para one\nline two",
+                "-m",
+                "para two",
+            ],
+        );
+        let sha = g(p, &["rev-parse", "HEAD"]);
+        let d = commit_detail_of(p, &sha).unwrap();
+        assert_eq!(d.hash, sha);
+        assert!(sha.starts_with(&d.short_hash));
+        assert!(d.parents.is_empty());
+        assert_eq!(d.subject, "subject line");
+        assert_eq!(d.body, "para one\nline two\n\npara two");
+        assert_eq!((d.author.as_str(), d.author_email.as_str()), ("t", "t@t"));
+        assert_eq!(d.committer_email, "t@t");
+        assert!(d.author_date.contains('T'), "{}", d.author_date);
+        assert!(d.committer_date.contains('T'));
+
+        g(
+            p,
+            &["commit", "--allow-empty", "--allow-empty-message", "-m", ""],
+        );
+        let sha2 = g(p, &["rev-parse", "HEAD"]);
+        let d2 = commit_detail_of(p, &sha2).unwrap();
+        assert_eq!((d2.subject.as_str(), d2.body.as_str()), ("", ""));
+        assert_eq!(d2.parents, vec![sha]);
+    }
+
+    #[test]
+    fn commit_detail_rejects_bad_unknown_and_caps_the_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().to_str().unwrap();
+        g(p, &["init", "-b", "main"]);
+        let big = "é".repeat(BODY_CAP);
+        g(p, &["commit", "--allow-empty", "-m", "s", "-m", &big]);
+        let sha = g(p, &["rev-parse", "HEAD"]);
+        let d = commit_detail_of(p, &sha).unwrap();
+        assert!(d.body.len() <= BODY_CAP + "\n[message truncated]".len());
+        assert!(d.body.ends_with("[message truncated]"));
+        assert_eq!(commit_detail_of(p, "-flag"), None);
+        assert_eq!(commit_detail_of(p, "short"), None);
+        assert_eq!(
+            commit_detail_of(p, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"),
+            None
+        );
+    }
+
+    #[test]
+    fn file_log_page_reports_has_more_truthfully() {
+        let (dir, _a, _b) = synthetic_history_repo();
+        let (log, more) = file_log_page(dir.path().to_str().unwrap(), "a.txt");
+        assert_eq!(log.len(), 2);
+        assert!(!more);
+    }
+
+    #[test]
+    fn a_control_byte_in_an_author_name_does_not_shift_log_or_detail_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().to_str().unwrap();
+        g(p, &["init", "-b", "main"]);
+        g(p, &["commit", "--allow-empty", "-m", "first"]);
+        let name = "a\u{1f}b\u{1f}c";
+        let out = Command::new("git")
+            .args(["-C", p, "-c", "user.email=t@t"])
+            .args(["-c", &format!("user.name={name}")])
+            .args([
+                "commit",
+                "--allow-empty",
+                "-m",
+                "sub\u{1f}ject",
+                "-m",
+                "body",
+            ])
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        let first = g(p, &["rev-parse", "HEAD~1"]);
+        let (log, _) = commit_log_page(p, false, 0);
+        assert_eq!(log[0].subject, "sub\u{1f}ject");
+        assert_eq!(log[0].author, name);
+        assert_eq!(log[0].parents, vec![first.clone()]);
+        assert!(log[0].refs.iter().any(|r| r.name == "main" && r.is_head));
+        let d = commit_detail_of(p, &log[0].hash).unwrap();
+        assert_eq!(d.author, name);
+        assert_eq!(d.subject, "sub\u{1f}ject");
+        assert_eq!(d.parents, vec![first]);
+        assert_eq!(d.body, "body");
     }
 }

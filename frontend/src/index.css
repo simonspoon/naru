@@ -88,6 +88,17 @@
   --text-glow-dim: 0 0 8px var(--cyan-dim);
   --text-glow-red: 0 0 8px rgba(var(--red-rgb), 0.5);
   --text-glow-magenta: 0 0 6px rgba(var(--magenta-rgb), 0.6);
+  /* Commit-graph lane colours (Git tab History): aliases of the themed accents
+     above, so every built-in and custom theme resolves them at use time. The
+     order alternates warm/cool so neighbouring lanes differ. */
+  --lane-0: var(--cyan);
+  --lane-1: var(--amber);
+  --lane-2: var(--violet);
+  --lane-3: var(--green);
+  --lane-4: var(--magenta);
+  --lane-5: var(--red);
+  --lane-6: rgb(var(--violet-deep-rgb));
+  --lane-7: var(--text-h);
   /* Ink on a solid accent fill (badges, the live send button). */
   --on-accent: #04121a;
   --on-accent-alt: #04131a;

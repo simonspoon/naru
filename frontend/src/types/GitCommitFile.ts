@@ -14,4 +14,12 @@ export type GitCommitFile = { status: string, path: string,
 /**
  * Rename/copy source path, else None (same convention as GitFile).
  */
-orig_path: string | null, };
+orig_path: string | null, 
+/**
+ * Lines added (`--numstat`); `None` for a binary file (no line count).
+ */
+added: number | null, 
+/**
+ * Lines deleted (`--numstat`); `None` for a binary file.
+ */
+deleted: number | null, };

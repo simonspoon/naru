@@ -10833,6 +10833,8 @@ mod tests {
                 author: "t".into(),
                 date: "2026-01-01T12:00:00Z".into(),
                 subject: "did the thing".into(),
+                parents: vec![],
+                refs: vec![],
             }],
             stat: DiffStat {
                 files_changed: 2,

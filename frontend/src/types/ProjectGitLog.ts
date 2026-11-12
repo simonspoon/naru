@@ -7,4 +7,9 @@ import type { GitCommit } from "./GitCommit";
  * set + commits null = folder gone / not a git repo; path set + commits
  * = Some([]) = a real repo with zero commits (unborn HEAD). Never an error.
  */
-export type ProjectGitLog = { path: string | null, commits: Array<GitCommit> | null, };
+export type ProjectGitLog = { path: string | null, commits: Array<GitCommit> | null, 
+/**
+ * True when git has more commits past this page (`skip + commits.len()`
+ * is the next `?skip=`). Always false when `commits` is null.
+ */
+has_more: boolean, };

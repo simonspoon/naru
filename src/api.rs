@@ -40,10 +40,10 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::core::{
     AgentSession, ArchiveOutcome, Artifact, ArtifactPatch, ArtifactSummary, AudioTestResult,
     CcDashboard, CcLiveSession, CcScorecard, CcUsage, ConfigServe, Error, FileTreeEntry, GitCommit,
-    GitCommitFile, GitFileDiff, GitRepo, GitRepoView, GitStatus, GitWorktree, InboxItem, InboxKind,
-    LIVE_AUDIO_MAX, LIVE_BOARD_INK_STATE_MAX, LIVE_BOARD_KEEP, LIVE_INK_MAX, LibraryBuiltinAction,
-    LibraryBundle, LibraryImportResult, LibraryKind, LibraryPatch, LibraryScope,
-    LiveBoardHistoryEntry, LiveBoardHistoryPage, LiveBoardInkEntry, LiveBoardKind,
+    GitCommitDetail, GitCommitFile, GitFileDiff, GitRepo, GitRepoView, GitStatus, GitWorktree,
+    InboxItem, InboxKind, LIVE_AUDIO_MAX, LIVE_BOARD_INK_STATE_MAX, LIVE_BOARD_KEEP, LIVE_INK_MAX,
+    LibraryBuiltinAction, LibraryBundle, LibraryImportResult, LibraryKind, LibraryPatch,
+    LibraryScope, LiveBoardHistoryEntry, LiveBoardHistoryPage, LiveBoardInkEntry, LiveBoardKind,
     LiveBoardSummary, LiveContext, LiveNotebookEntry, LiveNotice, LiveOffer, LiveState, LiveStatus,
     LiveTranscript, LiveWindow, ModelRates, NaruVersion, NextResult, Priority, ProjectAgents,
     ProjectFileNames, ProjectFileTree, ProjectGitLog, ProjectGitRepos, ProjectGitStatus,
@@ -171,12 +171,16 @@ struct AppState {
     /// the git tab's worktree selector and the `?worktree=` allowlist on the
     /// view/diff routes below. Same TTL/shape rationale as `git_view_cache`.
     git_worktrees_cache: Arc<Mutex<HashMap<String, (Instant, Option<Vec<GitWorktree>>)>>>,
-    /// Recent commit log per folder, keyed by the directory the log was read
-    /// from — `local_path`, or a selected worktree of it (each worktree has
-    /// its own HEAD, so its log differs). Cached
-    /// (S3) so refetch-on-focus doesn't respawn `git log` every render; same
+    /// One page of the commit log, keyed by `(dir, all, skip)` — the directory
+    /// the log was read from (`local_path`, or a selected worktree of it: each
+    /// worktree has its own HEAD), whether it walks every ref, and the page
+    /// offset. The value is the page plus its `has_more`. Cached (S3) so
+    /// refetch-on-focus doesn't respawn `git log` every render; same
     /// GIT_TTL/eviction-cap pattern as `git_view_cache`.
-    git_log_cache: Arc<Mutex<HashMap<String, (Instant, Vec<GitCommit>)>>>,
+    git_log_cache: Arc<Mutex<HashMap<(String, bool, usize), (Instant, (Vec<GitCommit>, bool))>>>,
+    /// One commit's detail (`GET .../git/commits/{sha}`), keyed by
+    /// `(dir, sha)`. Same GIT_TTL/eviction-cap pattern.
+    git_commit_detail_cache: Arc<Mutex<HashMap<(String, String), (Instant, GitCommitDetail)>>>,
     /// Per-commit changed-file list, keyed by (local_path, sha). Backs both
     /// the files route and the per-commit diff route's path allowlist (M7),
     /// so a commit selected then diffed doesn't re-run `git show
@@ -193,7 +197,7 @@ struct AppState {
     /// Files tab's per-file History pane. Separate map from `git_log_cache`
     /// (whole-repo log, keyed by folder alone) because the key shape differs;
     /// same GIT_TTL/eviction-cap pattern as every other cache here.
-    git_file_log_cache: Arc<Mutex<HashMap<(String, String), (Instant, Vec<GitCommit>)>>>,
+    git_file_log_cache: Arc<Mutex<HashMap<(String, String), (Instant, (Vec<GitCommit>, bool))>>>,
     /// Bumped whenever a spawn invalidates the list cache. A concurrent list
     /// whose subprocess started before the spawn checks this before caching,
     /// so it can't reinsert a pre-spawn snapshot after the invalidation and
@@ -3618,6 +3622,7 @@ pub fn serve(flags: ServeFlags) -> crate::core::Result<()> {
         git_view_cache: Arc::new(Mutex::new(HashMap::new())),
         git_worktrees_cache: Arc::new(Mutex::new(HashMap::new())),
         git_log_cache: Arc::new(Mutex::new(HashMap::new())),
+        git_commit_detail_cache: Arc::new(Mutex::new(HashMap::new())),
         git_commit_files_cache: Arc::new(Mutex::new(HashMap::new())),
         git_file_log_cache: Arc::new(Mutex::new(HashMap::new())),
         git_repos_cache: Arc::new(Mutex::new(HashMap::new())),
@@ -4382,6 +4387,10 @@ fn router(state: AppState) -> Router {
         .route(
             "/api/projects/{id}/git/file-log",
             get(get_project_git_file_log),
+        )
+        .route(
+            "/api/projects/{id}/git/commits/{sha}",
+            get(get_project_git_commit),
         )
         .route(
             "/api/projects/{id}/git/commits/{sha}/files",
@@ -10609,7 +10618,22 @@ async fn get_project_git_diff(
     Ok(Json(GitFileDiff { path: wanted, diff }).into_response())
 }
 
-/// Recent commit log for the project's `local_path` repo, or for one of its
+#[derive(Deserialize)]
+struct GitLogQuery {
+    /// Same worktree selector as `GitViewQuery`.
+    worktree: Option<String>,
+    /// Same repo selector as `GitViewQuery`.
+    repo: Option<String>,
+    /// `true` walks every ref (`git log --all`); default is the selected
+    /// worktree's HEAD.
+    all: Option<bool>,
+    /// Commits to skip (`--skip=N`); a page is 100. Typed, so a non-numeric
+    /// or negative value is rejected by the `Query` extractor (400, before
+    /// any handler code or git runs).
+    skip: Option<u32>,
+}
+
+/// One page of the commit log for the project's `local_path` repo, or for one of its
 /// worktrees when `?worktree=` selects one — a worktree has its **own**
 /// HEAD, so `git log` there walks that worktree's branch, not `local_path`'s
 /// (only the object store is shared). Same selector and allowlist as the
@@ -10627,39 +10651,53 @@ async fn get_project_git_diff(
 async fn get_project_git_log(
     State(state): State<AppState>,
     Path(id): Path<i64>,
-    Query(q): Query<GitViewQuery>,
+    Query(q): Query<GitLogQuery>,
 ) -> ApiResult<Response> {
     let (path, base, repo) = project_git_view_in(&state, id, q.repo.as_deref()).await?;
-    let commits = match (&base, &repo) {
+    let (commits, has_more) = match (&base, &repo) {
         (Some(base), Some(_)) => {
             let (dir, _worktrees) = resolve_git_dir(&state, base, q.worktree.as_deref()).await?;
+            let all = q.all.unwrap_or(false);
+            let skip = q.skip.unwrap_or(0) as usize;
+            let key = (dir.clone(), all, skip);
             let cached = {
                 let cache = state.git_log_cache.lock().unwrap();
                 cache
-                    .get(&dir)
+                    .get(&key)
                     .filter(|(at, _)| at.elapsed() < GIT_TTL)
                     .map(|(_, c)| c.clone())
             };
-            let commits = match cached {
+            let (commits, has_more) = match cached {
                 Some(c) => c,
                 None => {
                     let d = dir.clone();
-                    let c = tokio::task::spawn_blocking(move || git::commit_log_of(&d))
-                        .await
-                        .unwrap_or_default();
+                    let c =
+                        tokio::task::spawn_blocking(move || git::commit_log_page(&d, all, skip))
+                            .await
+                            .unwrap_or_default();
                     let mut cache = state.git_log_cache.lock().unwrap();
                     if cache.len() >= 64 {
                         cache.retain(|_, (at, _)| at.elapsed() < GIT_TTL);
+                        // `skip` is caller-chosen: a walk within the TTL
+                        // would otherwise grow the map without bound.
+                        if cache.len() >= 64 {
+                            cache.clear();
+                        }
                     }
-                    cache.insert(dir.clone(), (Instant::now(), c.clone()));
+                    cache.insert(key, (Instant::now(), c.clone()));
                     c
                 }
             };
-            Some(commits)
+            (Some(commits), has_more)
         }
-        _ => None,
+        _ => (None, false),
     };
-    Ok(Json(ProjectGitLog { path, commits }).into_response())
+    Ok(Json(ProjectGitLog {
+        path,
+        commits,
+        has_more,
+    })
+    .into_response())
 }
 
 #[derive(Deserialize)]
@@ -10703,6 +10741,7 @@ async fn get_project_git_file_log(
         return Ok(Json(ProjectGitLog {
             path,
             commits: None,
+            has_more: false,
         })
         .into_response());
     };
@@ -10721,12 +10760,12 @@ async fn get_project_git_file_log(
             .filter(|(at, _)| at.elapsed() < GIT_TTL)
             .map(|(_, c)| c.clone())
     };
-    let commits = match cached {
+    let (commits, has_more) = match cached {
         Some(c) => c,
         None => {
             let d = dir.clone();
             let rel = wanted.clone();
-            let c = tokio::task::spawn_blocking(move || git::file_log_of(&d, &rel))
+            let c = tokio::task::spawn_blocking(move || git::file_log_page(&d, &rel))
                 .await
                 .unwrap_or_default();
             let mut cache = state.git_file_log_cache.lock().unwrap();
@@ -10740,6 +10779,7 @@ async fn get_project_git_file_log(
     Ok(Json(ProjectGitLog {
         path,
         commits: Some(commits),
+        has_more,
     })
     .into_response())
 }
@@ -10798,6 +10838,56 @@ async fn project_commit_files(
         }
     };
     files.map(|f| (dir, f)).ok_or_else(not_found)
+}
+
+/// One commit's header and full message (`GitCommitDetail`), cached 5s per
+/// `(dir, sha`). Same validation as the sibling commit routes: the shape is
+/// checked by `git::commit_detail_of` before git runs, and a bad/unknown sha
+/// or no repo is 404 `not_found`.
+async fn get_project_git_commit(
+    State(state): State<AppState>,
+    Path((id, sha)): Path<(i64, String)>,
+    Query(q): Query<GitRepoQuery>,
+) -> ApiResult<Response> {
+    let not_found = || ApiError {
+        status: StatusCode::NOT_FOUND,
+        code: "not_found",
+        message: format!("unknown commit: {sha}"),
+    };
+    let (_path, dir, view) = project_git_view_in(&state, id, q.repo.as_deref()).await?;
+    let (Some(dir), Some(_)) = (dir, view) else {
+        return Err(not_found());
+    };
+    let key = (dir.clone(), sha.clone());
+    let cached = {
+        let cache = state.git_commit_detail_cache.lock().unwrap();
+        cache
+            .get(&key)
+            .filter(|(at, _)| at.elapsed() < GIT_TTL)
+            .map(|(_, d)| d.clone())
+    };
+    let detail = match cached {
+        Some(d) => Some(d),
+        None => {
+            let sha_owned = sha.clone();
+            let d = tokio::task::spawn_blocking(move || git::commit_detail_of(&dir, &sha_owned))
+                .await
+                .unwrap_or(None);
+            if let Some(d) = &d {
+                let mut cache = state.git_commit_detail_cache.lock().unwrap();
+                if cache.len() >= 64 {
+                    cache.retain(|_, (at, _)| at.elapsed() < GIT_TTL);
+                    if cache.len() >= 64 {
+                        cache.clear();
+                    }
+                }
+                cache.insert(key, (Instant::now(), d.clone()));
+            }
+            d
+        }
+    };
+    let detail = detail.ok_or_else(not_found)?;
+    Ok(Json(detail).into_response())
 }
 
 /// Files changed in one commit. Read-only external state behind the standard
@@ -15760,6 +15850,7 @@ mod tests {
             git_view_cache: Arc::new(Mutex::new(HashMap::new())),
             git_worktrees_cache: Arc::new(Mutex::new(HashMap::new())),
             git_log_cache: Arc::new(Mutex::new(HashMap::new())),
+            git_commit_detail_cache: Arc::new(Mutex::new(HashMap::new())),
             git_commit_files_cache: Arc::new(Mutex::new(HashMap::new())),
             git_file_log_cache: Arc::new(Mutex::new(HashMap::new())),
             git_repos_cache: Arc::new(Mutex::new(HashMap::new())),
@@ -15817,6 +15908,114 @@ mod tests {
         git_in(dir, &["commit", "-q", "--allow-empty", "-m", msg]);
     }
 
+    /// Naru task 2735: `skip`/`all` page the log, `has_more` is truthful, a
+    /// non-numeric `skip` is rejected by the extractor (400) before any
+    /// handler or git runs, and the commit-detail route 404s a bad sha.
+    #[tokio::test]
+    async fn git_log_pages_and_commit_detail_route() {
+        let (_db, state) = test_state();
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("proj");
+        init_repo(&root, "c0");
+        for i in 1..=104 {
+            git_in(
+                &root,
+                &["commit", "-q", "--allow-empty", "-m", &format!("c{i}")],
+            );
+        }
+        git_in(&root, &["branch", "side", "HEAD~3"]);
+        git_in(&root, &["checkout", "-q", "side"]);
+        git_in(
+            &root,
+            &["commit", "-q", "--allow-empty", "-m", "only on side"],
+        );
+        git_in(&root, &["checkout", "-q", "-"]);
+        let id = new_project(&state, Some(root.to_str().unwrap()));
+        let log = |all: Option<bool>, skip: Option<u32>| {
+            let state = state.clone();
+            let q = GitLogQuery {
+                worktree: None,
+                repo: None,
+                all,
+                skip,
+            };
+            async move {
+                json_body(
+                    get_project_git_log(State(state), Path(id), Query(q))
+                        .await
+                        .unwrap(),
+                )
+                .await
+            }
+        };
+        let p0 = log(None, None).await;
+        assert_eq!(p0["commits"].as_array().unwrap().len(), 100);
+        assert_eq!(p0["has_more"], true);
+        assert_eq!(p0["commits"][0]["subject"], "c104");
+        let p1 = log(None, Some(100)).await;
+        assert_eq!(p1["commits"].as_array().unwrap().len(), 5);
+        assert_eq!(p1["has_more"], false);
+        assert_eq!(p1["commits"][4]["subject"], "c0");
+        // `--all` sees the side-only commit; HEAD's walk does not.
+        let all = log(Some(true), None).await;
+        let subjects: Vec<&str> = all["commits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["subject"].as_str().unwrap())
+            .collect();
+        assert!(subjects.contains(&"only on side"));
+        assert!(
+            !p0["commits"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c["subject"] == "only on side")
+        );
+        // Refs ride on the page; HEAD's branch is marked.
+        let refs = p0["commits"][0]["refs"].as_array().unwrap();
+        assert!(
+            refs.iter()
+                .any(|r| r["kind"] == "branch" && r["is_head"] == true)
+        );
+
+        // A non-numeric skip never reaches the handler: the extractor says 400.
+        let bad: axum::http::Uri = "/x?skip=abc".parse().unwrap();
+        let rej = Query::<GitLogQuery>::try_from_uri(&bad).err().unwrap();
+        assert_eq!(rej.status(), StatusCode::BAD_REQUEST);
+        let neg: axum::http::Uri = "/x?skip=-1".parse().unwrap();
+        assert!(Query::<GitLogQuery>::try_from_uri(&neg).is_err());
+
+        // Detail route.
+        let hash = p0["commits"][0]["hash"].as_str().unwrap().to_string();
+        let resp = get_project_git_commit(
+            State(state.clone()),
+            Path((id, hash.clone())),
+            Query(GitRepoQuery { repo: None }),
+        )
+        .await
+        .unwrap();
+        let d = json_body(resp).await;
+        assert_eq!(d["hash"], hash.as_str());
+        assert_eq!(d["subject"], "c104");
+        assert_eq!(d["body"], "");
+        for bad in [
+            "-flag",
+            "zzzzzzz",
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        ] {
+            let err = get_project_git_commit(
+                State(state.clone()),
+                Path((id, bad.to_string())),
+                Query(GitRepoQuery { repo: None }),
+            )
+            .await
+            .err()
+            .unwrap();
+            assert_eq!(err.status, StatusCode::NOT_FOUND, "{bad}");
+        }
+    }
+
     /// Multi-repo git tab (mesa task 1509): root + two siblings + a nested
     /// gitignored repo are discovered, a repo under node_modules is not,
     /// `?repo=` reads the selected repo and refuses everything unlisted.
@@ -15848,9 +16047,11 @@ mod tests {
 
         let log = |repo: Option<&str>| {
             let state = state.clone();
-            let q = GitViewQuery {
+            let q = GitLogQuery {
                 worktree: None,
                 repo: repo.map(String::from),
+                all: None,
+                skip: None,
             };
             async move { get_project_git_log(State(state), Path(id), Query(q)).await }
         };

@@ -1575,6 +1575,67 @@ pub struct GitCommit {
     pub date: String,
     /// First line of the commit message (`%s`).
     pub subject: String,
+    /// Parent shas (`%P`, full, split on space) — empty for a root commit,
+    /// two or more for a merge. Defaulted so a receipt row stored before this
+    /// field existed still deserializes.
+    #[serde(default)]
+    pub parents: Vec<String>,
+    /// Refs pointing at this commit (`%D` under `--decorate=full`). Only the
+    /// browsing log fills it: receipt/triage logs leave it empty, so a frozen
+    /// receipt never captures branch positions. Defaulted like `parents`.
+    #[serde(default)]
+    pub refs: Vec<GitRef>,
+}
+
+/// What a decoration names (`%D` with `--decorate=full`, so every name is
+/// unambiguous: `refs/heads/` is a branch, `refs/remotes/` a remote branch,
+/// `tag: refs/tags/` a tag).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub enum GitRefKind {
+    /// A detached `HEAD`.
+    Head,
+    Branch,
+    Remote,
+    Tag,
+    /// Anything else (`refs/stash`, `refs/notes/…`) — `name` is the full ref.
+    Other,
+}
+
+/// One ref decorating a commit. `name` is short for branch/remote/tag
+/// (`main`, `origin/main`, `v1`), `"HEAD"` for a detached head, and the full
+/// ref name for `other`. `is_head` marks the ref (or detached HEAD) the
+/// log's worktree has checked out.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct GitRef {
+    pub kind: GitRefKind,
+    pub name: String,
+    pub is_head: bool,
+}
+
+/// `GET /api/projects/{id}/git/commits/{sha}` — one commit's full header and
+/// message for the History detail panel. Untrusted repo text, like `GitCommit`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct GitCommitDetail {
+    pub hash: String,
+    pub short_hash: String,
+    pub parents: Vec<String>,
+    pub author: String,
+    pub author_email: String,
+    /// ISO 8601 strict with offset (`%aI`).
+    pub author_date: String,
+    pub committer: String,
+    pub committer_email: String,
+    /// ISO 8601 strict with offset (`%cI`).
+    pub committer_date: String,
+    /// First line of the message (`%s`).
+    pub subject: String,
+    /// The rest of the message (`%b`): may be empty or multi-line, trailing
+    /// newline trimmed, capped at 64 KiB on a char boundary.
+    pub body: String,
 }
 
 /// One changed path from a single commit (`git show --name-status`, see
@@ -1592,6 +1653,12 @@ pub struct GitCommitFile {
     pub path: String,
     /// Rename/copy source path, else None (same convention as GitFile).
     pub orig_path: Option<String>,
+    /// Lines added (`--numstat`); `None` for a binary file (no line count).
+    #[ts(type = "number | null")]
+    pub added: Option<u32>,
+    /// Lines deleted (`--numstat`); `None` for a binary file.
+    #[ts(type = "number | null")]
+    pub deleted: Option<u32>,
 }
 
 /// Summed line/file counts over a set of commits (`core::git::diff_stat`,
@@ -1703,6 +1770,9 @@ pub struct TaskReceipt {
 pub struct ProjectGitLog {
     pub path: Option<String>,
     pub commits: Option<Vec<GitCommit>>,
+    /// True when git has more commits past this page (`skip + commits.len()`
+    /// is the next `?skip=`). Always false when `commits` is null.
+    pub has_more: bool,
 }
 
 /// The captured outcome of one hook command run (see `core::hooks`). A

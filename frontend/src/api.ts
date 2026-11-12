@@ -56,6 +56,7 @@ import type { DirEntry } from './types/DirEntry'
 import type { DirListing } from './types/DirListing'
 import type { FileContentView } from './types/FileContentView'
 import type { FileTreeEntry } from './types/FileTreeEntry'
+import type { GitCommitDetail } from './types/GitCommitDetail'
 import type { GitCommitFile } from './types/GitCommitFile'
 import type { GitFileDiff } from './types/GitFileDiff'
 import type { InboxItem } from './types/InboxItem'
@@ -521,13 +522,35 @@ export function getProjectGitDiff(
  * worktrees when `worktree` selects one (same selector as getProjectGit — a
  * worktree has its own HEAD, so its log is its own branch's). Empty states are
  * data, never errors: path null = no local_path; path set + commits null =
- * folder gone / not a repo; commits = [] = a real repo with no commits yet. */
+ * folder gone / not a repo; commits = [] = a real repo with no commits yet.
+ * A page is 100 commits: `skip` is the offset of the next page
+ * (`skip + commits.length`) while `has_more`; `all` walks every ref. */
 export function getProjectGitLog(
   id: number,
   worktree?: string,
   repo?: string,
+  opts?: { all?: boolean; skip?: number },
 ): Promise<ProjectGitLog> {
-  return request(`/api/projects/${id}/git/log${gitQuery({ worktree, repo })}`)
+  return request(
+    `/api/projects/${id}/git/log${gitQuery({
+      worktree,
+      repo,
+      all: opts?.all ? 'true' : undefined,
+      skip: opts?.skip ? String(opts.skip) : undefined,
+    })}`,
+  )
+}
+
+/** One commit's header and full message (the History detail panel). 404s on
+ * an unknown/invalid sha, like getProjectGitCommitFiles. */
+export function getProjectGitCommit(
+  id: number,
+  sha: string,
+  repo?: string,
+): Promise<GitCommitDetail> {
+  return request(
+    `/api/projects/${id}/git/commits/${encodeURIComponent(sha)}${gitQuery({ repo })}`,
+  )
 }
 
 /** Commit history for ONE file under the project's local_path — backs the

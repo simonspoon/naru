@@ -1,10 +1,10 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   getProjectGit,
+  getProjectGitCommit,
   getProjectGitCommitDiff,
   getProjectGitCommitFiles,
   getProjectGitDiff,
-  getProjectGitLog,
   getProjectGitRepos,
 } from '../api'
 import type { GitCommit } from '../types/GitCommit'
@@ -16,6 +16,10 @@ import { useLiveContext } from '../liveContext'
 import { LiveFocus } from './LiveFocus'
 import { useFetch } from '../useFetch'
 import { DiffView } from '../components/DiffView'
+import { CommitList } from '../components/CommitGraph'
+import { statTotals, subjectOrPlaceholder, totalsLabel } from '../gitHistory'
+import { usePhoneTier } from '../phoneTier'
+import { useCommitLog } from '../useCommitLog'
 import {
   effectiveRepo,
   hashWithRepo,
@@ -147,18 +151,71 @@ function NotARepoPlaceholder({ path }: { path: string }) {
   )
 }
 
+/** Copy `text` to the clipboard: the async API when there is one (secure
+ * contexts only), else a hidden textarea + execCommand, else report failure so
+ * the caller can say so. The hash stays selectable either way. */
+async function copyText(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text)
+      return true
+    }
+  } catch {
+    // fall through to the legacy path
+  }
+  try {
+    const ta = document.createElement('textarea')
+    ta.value = text
+    ta.setAttribute('readonly', '')
+    ta.style.position = 'fixed'
+    ta.style.opacity = '0'
+    document.body.appendChild(ta)
+    ta.select()
+    const ok = document.execCommand('copy')
+    document.body.removeChild(ta)
+    return ok
+  } catch {
+    return false
+  }
+}
+
+function CopyButton({ text }: { text: string }) {
+  const [state, setState] = useState<'idle' | 'copied' | 'failed'>('idle')
+  useEffect(() => {
+    if (state === 'idle') return
+    const t = setTimeout(() => setState('idle'), 1500)
+    return () => clearTimeout(t)
+  }, [state])
+  return (
+    <button
+      type="button"
+      className="git-copy"
+      aria-label="Copy full commit hash"
+      onClick={() => {
+        copyText(text).then((ok) => setState(ok ? 'copied' : 'failed'))
+      }}
+    >
+      {state === 'copied' ? 'Copied' : state === 'failed' ? 'Copy failed' : 'Copy'}
+    </button>
+  )
+}
+
+const fmtDate = (iso: string) =>
+  Number.isNaN(Date.parse(iso)) ? iso : new Date(iso).toLocaleString()
+
 /**
- * The changed-file list for one selected commit, with a "back to commits"
- * affordance. Reuses the same card-list row shape as the working-tree file
- * list, with commitStatusLabel/commitFileLabel in place of statusLabel/
- * fileLabel (M2).
+ * Detail panel for one selected commit: full message, author/committer, full
+ * sha + Copy, parent links, and the changed-file list (per-file +added −deleted
+ * and a total). A merge's files and diffs are against its first parent.
+ * Every string here comes from repo history and is rendered as a text node.
  */
-function CommitFileList({
+function CommitDetail({
   projectId,
   repo,
   commit,
   selectedPath,
   onSelectPath,
+  onSelectParent,
   onBack,
 }: {
   projectId: number
@@ -166,68 +223,150 @@ function CommitFileList({
   commit: GitCommit
   selectedPath: string | null
   onSelectPath: (path: string) => void
+  onSelectParent: (hash: string) => Promise<boolean>
   onBack: () => void
 }) {
-  const { data, error } = useFetch(
+  const { data: detail, error: detailError } = useFetch(
+    () => getProjectGitCommit(projectId, commit.hash, repo),
+    `git-commit-${projectId}-${repo ?? ''}-${commit.hash}`,
+  )
+  const { data: files, error: filesError } = useFetch(
     () => getProjectGitCommitFiles(projectId, commit.hash, repo),
     `git-commit-files-${projectId}-${repo ?? ''}-${commit.hash}`,
   )
+  // Parents the bounded page hunt could not reach, and the one being hunted.
+  const [missing, setMissing] = useState<Set<string>>(new Set())
+  const [hunting, setHunting] = useState<string | null>(null)
+  const subject = subjectOrPlaceholder(commit.subject)
+  const totals = files ? statTotals(files) : null
+  const showCommitter =
+    detail !== null &&
+    (detail.committer !== detail.author ||
+      detail.committer_email !== detail.author_email ||
+      detail.committer_date !== detail.author_date)
+
   return (
-    <div className="git-file-list">
-      <button type="button" className="git-back" onClick={onBack}>
+    <section className="git-commit-detail" role="region" aria-label="Commit details">
+      <button type="button" className="git-back git-back-narrow" onClick={onBack}>
         ← Commits
       </button>
-      <p className="git-commit-summary">
-        <span className="badge git-status-badge">{commit.short_hash}</span>{' '}
-        {commit.subject}
+      <h3 className={`git-detail-subject${subject.empty ? ' muted' : ''}`}>{subject.text}</h3>
+      {detailError && <p className="error">{detailError}</p>}
+      {detail && detail.body.trim() !== '' && <p className="git-detail-body">{detail.body}</p>}
+      <p className="git-detail-meta">
+        <span title={detail?.author_email}>{detail?.author ?? commit.author}</span>
+        <span className="muted"> · {fmtDate(detail?.author_date ?? commit.date)}</span>
       </p>
-      {error && <p className="error">{error}</p>}
-      {!data && !error && <p className="muted">Loading…</p>}
-      {data && data.length === 0 && (
-        <p className="muted">This commit changed no files.</p>
+      {showCommitter && detail && (
+        <p className="git-detail-meta muted">
+          Committed by <span title={detail.committer_email}>{detail.committer}</span> ·{' '}
+          {fmtDate(detail.committer_date)}
+        </p>
       )}
-      {data && data.length > 0 && (
-        <ul className="card-list">
-          {data.map((f) => (
-            <li
-              key={f.path}
-              className={f.path === selectedPath ? 'selected' : ''}
-              onClick={() => onSelectPath(f.path)}
-            >
-              <span className="badge git-status-badge">{f.status}</span>
-              <span className="git-file-path">{commitFileLabel(f)}</span>
-              <div className="muted git-file-label">
-                {commitStatusLabel(f.status)}
-              </div>
-            </li>
-          ))}
-        </ul>
+      <p className="git-detail-sha">
+        <code className="git-sha-full">{commit.hash}</code>
+        <CopyButton text={commit.hash} />
+      </p>
+      <p className="git-detail-parents">
+        {commit.parents.length === 0 ? (
+          <span className="muted">Root commit</span>
+        ) : (
+          <>
+            <span className="muted">{commit.parents.length > 1 ? 'Parents' : 'Parent'}</span>
+            {commit.parents.map((p) => (
+              <button
+                key={p}
+                type="button"
+                className="git-parent"
+                aria-label={`Parent ${p.slice(0, 7)}`}
+                disabled={missing.has(p) || hunting !== null}
+                title={missing.has(p) ? 'Not loaded yet' : p}
+                onClick={() => {
+                  setHunting(p)
+                  onSelectParent(p).then((ok) => {
+                    if (!ok) setMissing((m) => new Set(m).add(p))
+                    setHunting(null)
+                  })
+                }}
+              >
+                {hunting === p ? 'Loading…' : p.slice(0, 7)}
+              </button>
+            ))}
+          </>
+        )}
+      </p>
+      {commit.parents.length > 1 && (
+        <p className="muted git-detail-note">
+          Merge commit: changes shown against first parent {commit.parents[0].slice(0, 7)}
+        </p>
       )}
-    </div>
+      {filesError && <p className="error">{filesError}</p>}
+      {!files && !filesError && <p className="muted">Loading…</p>}
+      {files && files.length === 0 && <p className="muted">This commit changed no files.</p>}
+      {files && files.length > 0 && totals && (
+        <>
+          <p className="muted git-detail-total">{totalsLabel(totals)}</p>
+          <ul className="git-file-rows">
+            {files.map((f) => (
+              <li key={f.path}>
+                <button
+                  type="button"
+                  className={`git-file-row${f.path === selectedPath ? ' selected' : ''}`}
+                  aria-current={f.path === selectedPath ? 'true' : undefined}
+                  onClick={() => onSelectPath(f.path)}
+                >
+                  <span className="badge git-status-badge" title={commitStatusLabel(f.status)}>
+                    {f.status}
+                  </span>
+                  <span className="git-file-path">{commitFileLabel(f)}</span>
+                  <span className="git-file-stat">
+                    {f.added === null || f.deleted === null ? (
+                      <span className="muted" title="Binary file">-</span>
+                    ) : (
+                      <>
+                        <span className="git-stat-add">+{f.added}</span>{' '}
+                        <span className="git-stat-del">−{f.deleted}</span>
+                      </>
+                    )}
+                  </span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+    </section>
   )
 }
 
 /**
- * The History sub-view: commit list → changed files → diff, in the same
- * two-column git-layout the Working-tree mode uses. Fetches the commit log
- * lazily (only once mounted, i.e. only once History mode is first opened —
- * GitView conditionally mounts this component). Follows the tab's worktree
- * selection: a worktree has its own HEAD, so its history is its own branch's,
- * not the project `local_path` checkout's (mesa task 805). Empty-state ladder
- * mirrors ProjectGitView's exactly, one level deeper (M9).
+ * The History sub-view: a lane-graph commit list (paged, newest first) beside a
+ * detail panel over the selected file's diff. Desktop shows list | detail over
+ * diff; at narrow widths (container query on `.git-history`, so a narrow Custom
+ * pane counts) it drills down list -> detail -> diff, driven by `data-level`,
+ * with the selection kept in component state — never the route.
+ * Follows the tab's worktree/repo selection (mesa task 805); the empty-state
+ * ladder mirrors ProjectGitView's, one level deeper (M9). "Current branch" is
+ * the default; switching to All (or back) resets paging and selection.
  */
 function HistoryPane({
   projectId,
   worktree,
   repo,
+  branch,
 }: {
   projectId: number
   worktree: string | null
   repo: string | undefined
+  branch: string
 }) {
-  const { data: log, error: logError } = useFetch(
-    () => getProjectGitLog(projectId, worktree ?? undefined, repo),
-    `git-log-${projectId}-${repo ?? ''}-${worktree ?? ''}`,
+  const [all, setAll] = useState(false)
+  const phone = usePhoneTier()
+  const { current, previous, loadMore, loadUntil, reload } = useCommitLog(
+    projectId,
+    worktree,
+    repo,
+    all,
   )
   const [selectedCommit, setSelectedCommit] = useState<GitCommit | null>(null)
   const [selectedCommitPath, setSelectedCommitPath] = useState<string | null>(
@@ -249,7 +388,7 @@ function HistoryPane({
   // component is not remounted on project change (nor on a worktree switch)
   // while History mode stays open, so a stale commit selection from one scope
   // must not leak into the next.
-  const scope = `${projectId} ${worktree ?? ''}`
+  const scope = `${projectId} ${repo ?? ''} ${worktree ?? ''}`
   const [prevScope, setPrevScope] = useState(scope)
   if (scope !== prevScope) {
     setPrevScope(scope)
@@ -257,57 +396,148 @@ function HistoryPane({
     setSelectedCommitPath(null)
   }
 
-  if (logError && !log) return <p className="error">{logError}</p>
-  if (!log) return <p className="muted">Loading…</p>
+  // Stable callbacks, so memoised rows do not re-render on every selection.
+  const selectedHashRef = useRef<string | null>(null)
+  useEffect(() => {
+    selectedHashRef.current = selectedCommit?.hash ?? null
+  })
+  const onSelectRow = useCallback((c: GitCommit) => {
+    if (c.hash === selectedHashRef.current) return
+    setSelectedCommit(c)
+    setSelectedCommitPath(null)
+  }, [])
+  const onLoadMore = useCallback(() => {
+    loadMore()
+  }, [loadMore])
 
-  // Quiet empty states (M9) — data shapes, not errors.
-  if (log.path === null) return <NoLocalPathPlaceholder projectId={projectId} />
-  if (log.commits === null) return <NotARepoPlaceholder path={log.path} />
-  if (log.commits.length === 0) return <p className="muted">No commits yet.</p>
+  const setMode = (next: boolean) => {
+    if (next === all) return
+    setAll(next)
+    setSelectedCommit(null)
+    setSelectedCommitPath(null)
+  }
+
+  const state = current ?? previous
+  if (state && state.path === null && state.commits === null && state.error === null) {
+    return <NoLocalPathPlaceholder projectId={projectId} />
+  }
+  if (state && state.path !== null && state.commits === null && state.error === null) {
+    return <NotARepoPlaceholder path={state.path} />
+  }
+
+  const toolbar = (
+    <div className="git-history-toolbar">
+      <div className="git-mode-toggle" role="group" aria-label="Branches shown">
+        <button
+          type="button"
+          className={all ? '' : 'active'}
+          aria-pressed={!all}
+          onClick={() => setMode(false)}
+        >
+          Current branch
+        </button>
+        <button
+          type="button"
+          className={all ? 'active' : ''}
+          aria-pressed={all}
+          onClick={() => setMode(true)}
+        >
+          All branches
+        </button>
+      </div>
+    </div>
+  )
+
+  const commits = state?.commits ?? null
+  let body
+  if (state && state.error !== null && commits === null) {
+    body = (
+      <div>
+        <p className="error">{state.error}</p>
+        <button type="button" onClick={reload}>
+          Retry
+        </button>
+      </div>
+    )
+  } else if (!state || commits === null) {
+    body = <p className="muted">Loading…</p>
+  } else if (commits.length === 0) {
+    body = (
+      <p className="muted">{all ? 'No commits yet.' : `No commits yet on ${branch}.`}</p>
+    )
+  } else {
+    const level = selectedCommit === null ? 'list' : selectedCommitPath === null ? 'detail' : 'diff'
+    body = (
+      <div className="git-history-layout" data-level={level}>
+        <CommitList
+          commits={commits}
+          selectedHash={selectedCommit?.hash ?? null}
+          phone={phone}
+          dim={current === null}
+          hasMore={state.hasMore}
+          loadingMore={state.loadingMore}
+          moreError={state.moreError}
+          onSelect={onSelectRow}
+          onLoadMore={onLoadMore}
+        />
+        <div className="git-history-right">
+          {selectedCommit === null ? (
+            <div className="git-diff-pane git-history-empty">
+              <p className="muted">Select a commit to see its details.</p>
+            </div>
+          ) : (
+            <>
+              <CommitDetail
+                key={selectedCommit.hash}
+                projectId={projectId}
+                repo={repo}
+                commit={selectedCommit}
+                selectedPath={selectedCommitPath}
+                onSelectPath={setSelectedCommitPath}
+                onSelectParent={async (hash) => {
+                  const found = await loadUntil(hash)
+                  if (!found) return false
+                  setSelectedCommit(found)
+                  setSelectedCommitPath(null)
+                  return true
+                }}
+                onBack={() => {
+                  setSelectedCommit(null)
+                  setSelectedCommitPath(null)
+                }}
+              />
+              {selectedCommitPath !== null && (
+                <button
+                  type="button"
+                  className="git-back git-back-narrow git-back-diff"
+                  onClick={() => setSelectedCommitPath(null)}
+                >
+                  ← {selectedCommit.short_hash}
+                </button>
+              )}
+              <div className="git-diff-pane git-history-diff">
+                {selectedCommitPath !== null ? (
+                  <CommitDiffPane
+                    projectId={projectId}
+                    repo={repo}
+                    sha={selectedCommit.hash}
+                    path={selectedCommitPath}
+                  />
+                ) : (
+                  <p className="muted">Select a file to see its diff.</p>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    )
+  }
 
   return (
-    <div className="git-layout">
-      {selectedCommit === null ? (
-        <ul className="card-list git-file-list">
-          {log.commits.map((c) => (
-            <li key={c.hash} onClick={() => setSelectedCommit(c)}>
-              <span className="badge git-status-badge">{c.short_hash}</span>
-              <span className="git-file-path">{c.subject}</span>
-              <div className="muted git-file-label">
-                {c.author} · {c.date}
-              </div>
-            </li>
-          ))}
-        </ul>
-      ) : (
-        <CommitFileList
-          projectId={projectId}
-          repo={repo}
-          commit={selectedCommit}
-          selectedPath={selectedCommitPath}
-          onSelectPath={setSelectedCommitPath}
-          onBack={() => {
-            setSelectedCommit(null)
-            setSelectedCommitPath(null)
-          }}
-        />
-      )}
-      <div className="git-diff-pane">
-        {selectedCommit !== null && selectedCommitPath !== null ? (
-          <CommitDiffPane
-            projectId={projectId}
-            repo={repo}
-            sha={selectedCommit.hash}
-            path={selectedCommitPath}
-          />
-        ) : (
-          <p className="muted">
-            {selectedCommit === null
-              ? 'Select a commit to see its changed files.'
-              : 'Select a file to see its diff.'}
-          </p>
-        )}
-      </div>
+    <div className="git-history">
+      {toolbar}
+      {body}
     </div>
   )
 }
@@ -488,6 +718,7 @@ function GitRepoPane({
           projectId={projectId}
           worktree={selectedWorktree}
           repo={repo}
+          branch={status.branch}
         />
       ) : files.length === 0 ? (
         <p className="muted">Working tree clean — no changed files.</p>
