@@ -92,7 +92,35 @@ nothing.
   `local_path`'s, validated by the same `worktrees` allowlist as the view/diff
   routes (`resolve_git_dir`) — an unlisted value is 404 `not_found`. `path` in
   the response is always the project's own `local_path`. Cached 5s per
-  `(folder actually read, all, skip)` (`AppState.git_log_cache`).
+  `(folder actually read, all, skip, filters)` (`AppState.git_log_cache`).
+  - **Search filters** (naru task 2736): `?q=` (commit message), `?author=`
+    (name or email), `?path=` (a file or folder), `?since=` / `?until=`
+    (`YYYY-MM-DD`, inclusive days) narrow the log **on the server, over the
+    whole history**, and page with `skip` like the plain log
+    (`git::LogFilter`). Message and author are `--fixed-strings
+    --regexp-ignore-case`, so `.*`, `-x` or shell characters are literal
+    text; each value is its own argv entry after its flag (`--grep <q>`,
+    `--author <a>`), never interpolated, so a value starting with `-` is the
+    text searched for. Message and author together must both match. The path
+    goes after `--` with `GIT_LITERAL_PATHSPECS=1` (`*` and `:(…)` magic are
+    plain characters); it is checked by `git::valid_log_path` — relative, no
+    `..` segment, no backslash or control character, `./` and a trailing `/`
+    dropped — but need not exist on disk (a deleted file has history).
+    **Renames are not followed** (no `--follow`, see `file-log` below): a
+    renamed file's older commits are found under its old path. Dates are
+    checked by `git::valid_log_date` and sent as `<day> 00:00:00` /
+    `<day> 23:59:59` (a bare date makes git use the current time of day),
+    in the server's local time, against the **committer** date (git's own
+    `--since`/`--until`). A blank value is no filter; a bad date or path is
+    422 `validation` before git runs. No match is `commits: []`, not an
+    error.
+  - **Bounded.** A page is still 100 commits (the result cap), and a
+    filtered log run is killed after **10 s** (`git::LOG_TIMEOUT`; an
+    unfiltered page reads at most 101 commits past `skip` and has no limit) — a search with no match on
+    a 100k-commit repo walks everything. The response then carries
+    `timed_out: true` with the commits found by then (the last record is
+    dropped: it may be torn) and `has_more: false`. `ProjectGitLog.timed_out` is always false
+    for `file-log`.
   - **`GitCommit`** = `{hash, short_hash, author, date, subject, parents,
     refs}`. `parents` are full shas (`%P`; empty for a root, 2 for a merge,
     3+ for an octopus). `refs: GitRef[]` come from `%D` under
@@ -270,3 +298,52 @@ fetching; `components/CommitGraph.tsx` draws the list.
   pane too) it drills down list -> detail -> diff with back buttons
   ("← Commits", "← <short sha>"); the selection is component state, never the
   route. No `dangerouslySetInnerHTML`: all repo text is a text node.
+
+## Search and keys (naru task 2736)
+
+Logic is in `frontend/src/gitSearch.ts` (pure, `gitSearch.test.ts`).
+
+- **History filter bar** above the commit list: a message search box, and
+  behind **Filters** the author, path, since/until dates and **Go to
+  commit**. Typing applies 300 ms after the last key (Enter applies at once);
+  removing a filter applies at once. Active filters show as removable chips
+  (plus "Clear all"), and a count line says `N commits`, `100+ commits` while
+  more pages match, or that the search stopped at the 10 s limit. No match
+  is a quiet "No commits match these filters." with a Clear button. The
+  filters are part of `useCommitLog`'s key, so a reply for an older search
+  is dropped when a newer one was typed (the server's git run still finishes
+  or times out; it is not cancelled). Filters survive the branch scope switch.
+  A filtered list draws no lanes (each row a lone node in one column): most
+  rows' parents are not in it, so a lane graph would open a lane per row.
+- **Go to commit** takes a full or short sha (7–64 hex, checked before any
+  request): a loaded row with that unique prefix is selected, otherwise
+  `GET /git/commits/{sha}` resolves it from the whole repo and its detail
+  opens even though the row is not in the list. Unknown: "No commit … in this
+  repo."
+- **File filters**: a box above the working-tree list and above a commit's
+  file list (shown when there is more than one file) narrows by path or
+  rename source, case-insensitive substring, client-side.
+- A path filter the server would refuse (absolute, `..`, empty segment) is
+  not sent; the bar says why (`validPathFilter`, mirroring
+  `git::valid_log_path`).
+- **Keyboard**, bound by `onKeyDown` on the tab's own root (`.git-view`), so
+  it acts only while focus is inside the Git tab — a Custom-layout pane that
+  does not hold focus never sees a key:
+
+  | Key | Does |
+  |---|---|
+  | `↓` `↑` or `j` `k` | Move through the focused list (commits, files, working tree); in a focused diff, scroll it |
+  | `Enter` | Open the focused commit or file (the row's own click); focus then moves to the commit's first file, or to the diff |
+  | `Esc` or `←` | Back a level: diff → its file row, commit detail → its commit row; in the working tree, diff → its file. In a diff only `Esc` (`←` is left to the page) |
+  | `/` | Focus the search box (History) or the file filter (Working tree) |
+  | `[` `]` | Previous / next changed file of the open list, opening it; focus stays where it is |
+  | `?` | Show / hide the key list (also the `?` button by the mode toggle) |
+
+  A key the tab handles stops there (`preventDefault` + `stopPropagation`),
+  so the global spatial nav (`h/j/k/l`, arrows, `docs/keyboard.md`) does not
+  also move focus; one it does not handle — `←` on the commit list, an arrow
+  with no list focused — goes on to the spatial nav. No modifier chord is
+  taken. Keys are ignored while typing in a field; from a Git filter box
+  `Esc` or `↓` hands focus to its list. `shouldIgnoreShortcut` is consulted
+  (modals, workflow canvas). Rows are `<button>`s (Tab reaches them) and use
+  the app's shared `:focus-visible` ring.

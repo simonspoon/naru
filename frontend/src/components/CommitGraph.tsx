@@ -140,6 +140,8 @@ const CommitRow = memo(function CommitRow({
         style={{ height }}
         aria-current={selected ? 'true' : undefined}
         aria-label={rowLabel(commit, exact)}
+        data-git-item=""
+        data-hash={commit.hash}
         onClick={() => onSelect(commit)}
       >
         <GraphCell
@@ -179,6 +181,7 @@ export function CommitList({
   moreError,
   onSelect,
   onLoadMore,
+  unlinked = false,
 }: {
   commits: GitCommit[]
   selectedHash: string | null
@@ -189,14 +192,18 @@ export function CommitList({
   moreError: string | null
   onSelect: (c: GitCommit) => void
   onLoadMore: () => void
+  /** A filtered list: a row's parents are mostly not in it, so draw each
+   * commit as a lone node in one column instead of a lane per row. */
+  unlinked?: boolean
 }) {
   const height = phone ? 44 : 34
   const maxLanes = phone ? 4 : DEFAULT_MAX_LANES
   const rows = useMemo(() => {
     const m = new Map<string, GraphRow>()
-    for (const r of layout(commits, { maxLanes })) m.set(r.hash, r)
+    const input = unlinked ? commits.map((c) => ({ ...c, parents: [] })) : commits
+    for (const r of layout(input, { maxLanes })) m.set(r.hash, r)
     return m
-  }, [commits, maxLanes])
+  }, [commits, maxLanes, unlinked])
   const width = useMemo(() => {
     let lanes = 1
     for (const r of rows.values()) if (r.lanes > lanes) lanes = r.lanes
@@ -249,7 +256,7 @@ export function CommitList({
       ref={listRef}
       style={{ ['--git-row-h' as string]: `${height}px` }}
     >
-      <ul className="git-commit-list">
+      <ul className="git-commit-list" data-git-list="commits">
         {commits.map((c) => (
           <CommitRow
             key={c.hash}

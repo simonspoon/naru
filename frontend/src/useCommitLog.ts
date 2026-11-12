@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { getProjectGitLog } from './api'
 import { PARENT_HUNT_PAGES, focusRefreshable, mergePage } from './gitHistory'
+import { filtersKey, type LogFilters } from './gitSearch'
 import type { GitCommit } from './types/GitCommit'
 
 /** The loaded history of one (project, repo, worktree, all-branches) scope. */
@@ -16,6 +17,8 @@ export type CommitLogState = {
   rawCount: number
   pages: number
   hasMore: boolean
+  /** The search was stopped by the server's timeout (no more pages). */
+  timedOut: boolean
   /** First-load error (commits stay null). */
   error: string | null
   /** Failed Load more. */
@@ -40,9 +43,11 @@ export function useCommitLog(
   worktree: string | null,
   repo: string | undefined,
   all: boolean,
+  filters: LogFilters,
 ) {
   const scope = `${projectId}|${repo ?? ''}|${worktree ?? ''}`
-  const key = `${scope}|${all ? 'all' : 'cur'}`
+  // Filters are part of the key, so a reply for an older search is dropped.
+  const key = `${scope}|${all ? 'all' : 'cur'}|${filtersKey(filters)}`
   const [st, setSt] = useState<CommitLogState | null>(null)
   const [nonce, setNonce] = useState(0)
   const stRef = useRef<CommitLogState | null>(null)
@@ -59,7 +64,7 @@ export function useCommitLog(
     inflight.current = null
     let cancelled = false
     const fetchFirst = () =>
-      getProjectGitLog(projectId, worktree ?? undefined, repo, { all })
+      getProjectGitLog(projectId, worktree ?? undefined, repo, { all, filters })
     const base = { key, scope, rawCount: 0, pages: 1, moreError: null, loadingMore: false }
     fetchFirst().then(
       (log) => {
@@ -71,6 +76,7 @@ export function useCommitLog(
           commits: log.commits === null ? null : mergePage([], log.commits),
           rawCount: n,
           hasMore: log.has_more,
+          timedOut: log.timed_out,
           error: null,
         })
       },
@@ -81,6 +87,7 @@ export function useCommitLog(
           path: null,
           commits: null,
           hasMore: false,
+          timedOut: false,
           error: e instanceof Error ? e.message : String(e),
         })
       },
@@ -103,6 +110,7 @@ export function useCommitLog(
             commits: mergePage([], log.commits),
             rawCount: log.commits.length,
             hasMore: log.has_more,
+            timedOut: log.timed_out,
           })
         },
         () => {},
@@ -130,7 +138,11 @@ export function useCommitLog(
       return !c || c.key !== k || keyRef.current !== k || c.rawCount !== skip
     }
     try {
-      const log = await getProjectGitLog(projectId, worktree ?? undefined, repo, { all, skip })
+      const log = await getProjectGitLog(projectId, worktree ?? undefined, repo, {
+        all,
+        skip,
+        filters,
+      })
       if (stale()) return false
       const cur = stRef.current!
       const page = log.commits ?? []
@@ -141,6 +153,7 @@ export function useCommitLog(
         pages: cur.pages + 1,
         // An empty page ends the walk even if the server claims more (no spin).
         hasMore: log.has_more && page.length > 0,
+        timedOut: log.timed_out,
         loadingMore: false,
         moreError: null,
       }
@@ -156,7 +169,7 @@ export function useCommitLog(
       setSt(stRef.current)
       return false
     }
-  }, [projectId, worktree, repo, all])
+  }, [projectId, worktree, repo, all, filters])
 
   /** Load the next page; a call while one is in flight awaits that one. */
   const loadMore = useCallback((): Promise<boolean> => {

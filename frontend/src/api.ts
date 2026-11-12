@@ -88,6 +88,7 @@ import type { ModelRates } from './types/ModelRates'
 import type { ProjectFileNames } from './types/ProjectFileNames'
 import type { ProjectFileSearch } from './types/ProjectFileSearch'
 import type { ProjectFileTree } from './types/ProjectFileTree'
+import type { LogFilters } from './gitSearch'
 import type { ProjectGitLog } from './types/ProjectGitLog'
 import type { ProjectGitRepos } from './types/ProjectGitRepos'
 import type { ProjectGitStatus } from './types/ProjectGitStatus'
@@ -524,19 +525,27 @@ export function getProjectGitDiff(
  * data, never errors: path null = no local_path; path set + commits null =
  * folder gone / not a repo; commits = [] = a real repo with no commits yet.
  * A page is 100 commits: `skip` is the offset of the next page
- * (`skip + commits.length`) while `has_more`; `all` walks every ref. */
+ * (`skip + commits.length`) while `has_more`; `all` walks every ref.
+ * `filters` narrow the whole history on the server (naru task 2736). */
 export function getProjectGitLog(
   id: number,
   worktree?: string,
   repo?: string,
-  opts?: { all?: boolean; skip?: number },
+  opts?: { all?: boolean; skip?: number; filters?: LogFilters },
 ): Promise<ProjectGitLog> {
+  // Blank filters are dropped by gitQuery; the server reads them as absent too.
+  const f = opts?.filters
   return request(
     `/api/projects/${id}/git/log${gitQuery({
       worktree,
       repo,
       all: opts?.all ? 'true' : undefined,
       skip: opts?.skip ? String(opts.skip) : undefined,
+      q: f?.q.trim(),
+      author: f?.author.trim(),
+      path: f?.path.trim(),
+      since: f?.since.trim(),
+      until: f?.until.trim(),
     })}`,
   )
 }

@@ -29,6 +29,7 @@ page's.
 | `Alt+[` `Alt+]` | — | Files tab | Previous / next tab in the focused pane |
 | `Shift+F10` / menu key | — | Files tab, focused tab | Opens the tab menu (close others / to the right / saved / all); arrows move, Escape closes (task 2730) |
 | `+` `-` `0` `1` | — | Files tab, focused image | Zoom in / out, fit, 100% (task 2731, `docs/files-tab.md`) |
+| `j` `k` `↑` `↓` `Enter` `Esc` `←` `/` `[` `]` `?` | — | Git tab, focus inside it | List movement, open, back, search, previous / next file, key list (task 2736, `docs/git-tab.md`); a handled key stops before the spatial nav |
 
 The **Action** column is the keymap action id: a row that has one is
 **rebindable** from Settings → Keyboard shortcuts, and the chord shown is only

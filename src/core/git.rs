@@ -5,7 +5,9 @@
 //! detached folder) is `None`, never an error surfaced to the client.
 
 use std::collections::{HashMap, HashSet};
+use std::io::Read;
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use crate::core::types::{
     DiffStat, GitCommit, GitCommitDetail, GitCommitFile, GitFile, GitRef, GitRefKind, GitRepo,
@@ -400,16 +402,144 @@ pub fn commit_log_of(dir: &str) -> Vec<GitCommit> {
     run_log(dir, None, &[], LOG_CAP, false)
 }
 
+/// History search filters (naru task 2736). Every field narrows the log on
+/// the server, over the whole history, not just a loaded page. Text and
+/// author are **fixed strings, case-insensitive** (`-F -i`), so regex and
+/// shell characters are literal; each value is one argv entry after its flag,
+/// so one starting with `-` is never read as an option. `path` is a literal
+/// pathspec (`GIT_LITERAL_PATHSPECS=1`, so `*` and `:(magic)` are plain
+/// characters) after `--`; renames are not followed (no `--follow`, see
+/// `file_log_of`). `since`/`until` are `YYYY-MM-DD` days, inclusive, in the
+/// server's local time, matched against the **committer** date (git's own
+/// `--since`/`--until`). Build one with the `valid_*` checks below; an empty
+/// filter is the plain log.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct LogFilter {
+    pub text: Option<String>,
+    pub author: Option<String>,
+    pub path: Option<String>,
+    pub since: Option<String>,
+    pub until: Option<String>,
+}
+
+impl LogFilter {
+    pub fn is_empty(&self) -> bool {
+        self.text.is_none()
+            && self.author.is_none()
+            && self.path.is_none()
+            && self.since.is_none()
+            && self.until.is_none()
+    }
+
+    fn args(&self) -> Vec<String> {
+        let mut a = Vec::new();
+        if self.text.is_some() || self.author.is_some() {
+            a.push("--fixed-strings".to_string());
+            a.push("--regexp-ignore-case".to_string());
+        }
+        if let Some(t) = &self.text {
+            a.push("--grep".to_string());
+            a.push(t.clone());
+        }
+        if let Some(t) = &self.author {
+            a.push("--author".to_string());
+            a.push(t.clone());
+        }
+        // A bare date makes git take the CURRENT time of day; pin the edges.
+        if let Some(d) = &self.since {
+            a.push("--since".to_string());
+            a.push(format!("{d} 00:00:00"));
+        }
+        if let Some(d) = &self.until {
+            a.push("--until".to_string());
+            a.push(format!("{d} 23:59:59"));
+        }
+        a
+    }
+}
+
+/// A `YYYY-MM-DD` day (what `<input type="date">` sends), month 1-12 and day
+/// 1-31. Anything else is refused before git runs.
+pub fn valid_log_date(s: &str) -> bool {
+    let b = s.as_bytes();
+    if b.len() != 10 || b[4] != b'-' || b[7] != b'-' {
+        return false;
+    }
+    if !b
+        .iter()
+        .enumerate()
+        .all(|(i, c)| i == 4 || i == 7 || c.is_ascii_digit())
+    {
+        return false;
+    }
+    let month: u32 = s[5..7].parse().unwrap_or(0);
+    let day: u32 = s[8..10].parse().unwrap_or(0);
+    (1..=12).contains(&month) && (1..=31).contains(&day)
+}
+
+/// The path filter as a repo-relative pathspec: a leading `./` and trailing
+/// `/` are dropped; `Ok(None)` for empty or `.` (no filter). Refused (`Err`,
+/// with the message for the client):
+/// an absolute path, a `..` component, a backslash or a control character —
+/// the path names something inside the repo's history, and need not exist on
+/// disk now (a deleted file still has history).
+pub fn valid_log_path(raw: &str) -> Result<Option<String>, &'static str> {
+    const REFUSED: &str = "path must be relative to the repo, without '..'";
+    let mut p = raw;
+    while let Some(rest) = p.strip_prefix("./") {
+        p = rest;
+    }
+    let p = p.trim_end_matches('/');
+    if p.is_empty() || p == "." {
+        return Ok(None);
+    }
+    if p.starts_with('/') || p.contains('\\') || p.chars().any(char::is_control) {
+        return Err(REFUSED);
+    }
+    if p.split('/').any(|seg| seg == ".." || seg.is_empty()) {
+        return Err(REFUSED);
+    }
+    Ok(Some(p.to_string()))
+}
+
+/// How long one History log request may run before git is killed (a search
+/// with no match walks the whole history). What was found by then is kept.
+pub const LOG_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// One page of the History log: the commits, whether git has more past the
+/// page, and whether [`LOG_TIMEOUT`] cut the walk short (then `has_more` is
+/// false: there is no offset to resume from that git would agree with).
+pub struct LogPage {
+    pub commits: Vec<GitCommit>,
+    pub has_more: bool,
+    pub timed_out: bool,
+}
+
 /// One page of the History view's log: up to [`LOG_CAP`] commits starting
 /// `skip` commits in, with each commit's `refs` filled, plus whether git has
 /// more past the page. `all` walks every ref (`git log --all`) instead of
-/// `dir`'s HEAD. Asks git for one extra commit to learn `has_more`. Git's
-/// DEFAULT order (reverse chronological) on purpose: `--topo-order`,
-/// `--date-order` and `--graph` force a walk of the whole history when the
-/// repo has no commit-graph file, and a page must stay bounded on a huge
-/// repo. Same empty-on-any-failure contract as [`commit_log_of`] (unborn HEAD
+/// `dir`'s HEAD; `filter` narrows it (see [`LogFilter`]). Asks git for one
+/// extra commit to learn `has_more`. Git's DEFAULT order (reverse
+/// chronological) on purpose: `--topo-order`, `--date-order` and `--graph`
+/// force a walk of the whole history when the repo has no commit-graph file,
+/// and a page must stay bounded on a huge repo. A filter that matches little
+/// can still walk everything, so the run is bounded by [`LOG_TIMEOUT`]. Same
+/// empty-on-any-failure contract as [`commit_log_of`] (unborn HEAD
 /// included).
-pub fn commit_log_page(dir: &str, all: bool, skip: usize) -> (Vec<GitCommit>, bool) {
+pub fn commit_log_page(dir: &str, all: bool, skip: usize, filter: &LogFilter) -> LogPage {
+    // Only a search is bounded: an unfiltered page reads at most 101 commits
+    // past `skip`, as before task 2736.
+    let timeout = (!filter.is_empty()).then_some(LOG_TIMEOUT);
+    commit_log_page_within(dir, all, skip, filter, timeout)
+}
+
+fn commit_log_page_within(
+    dir: &str,
+    all: bool,
+    skip: usize,
+    filter: &LogFilter,
+    timeout: Option<Duration>,
+) -> LogPage {
     let mut extra = Vec::new();
     if all {
         extra.push("--all".to_string());
@@ -417,7 +547,79 @@ pub fn commit_log_page(dir: &str, all: bool, skip: usize) -> (Vec<GitCommit>, bo
     if skip > 0 {
         extra.push(format!("--skip={skip}"));
     }
-    page(run_log(dir, None, &extra, LOG_CAP + 1, true))
+    extra.extend(filter.args());
+    let mut cmd = log_command(dir, filter.path.as_deref(), &extra, LOG_CAP + 1, true);
+    cmd.env("GIT_LITERAL_PATHSPECS", "1");
+    let Some((stdout, ok, timed_out)) = output_within(cmd, timeout) else {
+        return LogPage {
+            commits: Vec::new(),
+            has_more: false,
+            timed_out: false,
+        };
+    };
+    if !ok && !timed_out {
+        return LogPage {
+            commits: Vec::new(),
+            has_more: false,
+            timed_out: false,
+        };
+    }
+    let mut commits = parse_log(&String::from_utf8_lossy(&stdout));
+    if timed_out {
+        // A killed git may have stopped mid-record, and with
+        // `--pretty=format:` a whole last record looks the same: drop it.
+        commits.pop();
+        commits.truncate(LOG_CAP);
+        return LogPage {
+            commits,
+            has_more: false,
+            timed_out: true,
+        };
+    }
+    let (commits, has_more) = page(commits);
+    LogPage {
+        commits,
+        has_more,
+        timed_out: false,
+    }
+}
+
+/// Runs `cmd` with stdout captured, killing it after `timeout` (`None` = no
+/// limit). Returns the stdout read so far, whether it exited successfully,
+/// and whether it was killed; `None` when it could not be spawned.
+fn output_within(mut cmd: Command, timeout: Option<Duration>) -> Option<(Vec<u8>, bool, bool)> {
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut out = child.stdout.take()?;
+    // Drain on a thread so a full pipe never stalls the child.
+    let reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = out.read_to_end(&mut buf);
+        buf
+    });
+    let deadline = timeout.map(|t| Instant::now() + t);
+    let (ok, timed_out) = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break (status.success(), false),
+            Ok(None) if deadline.is_some_and(|d| Instant::now() >= d) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break (false, true);
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break (false, false);
+            }
+        }
+    };
+    let buf = reader.join().unwrap_or_default();
+    Some((buf, ok, timed_out))
 }
 
 /// Splits git's `LOG_CAP + 1` answer into the page and its `has_more`.
@@ -550,6 +752,27 @@ fn run_log(
     limit: usize,
     with_refs: bool,
 ) -> Vec<GitCommit> {
+    let out = log_command(dir, pathspec, extra, limit, with_refs)
+        .stdin(Stdio::null())
+        .output();
+    let Ok(out) = out else {
+        return Vec::new();
+    };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    parse_log(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// The `git log` command [`run_log`] and [`commit_log_page`] run: `extra`
+/// after the format, `pathspec` alone after `--`.
+fn log_command(
+    dir: &str,
+    pathspec: Option<&str>,
+    extra: &[String],
+    limit: usize,
+    with_refs: bool,
+) -> Command {
     let format = if with_refs {
         "--pretty=format:%H%x00%h%x00%an%x00%aI%x00%P%x00%D%x00%s"
     } else {
@@ -566,14 +789,7 @@ fn run_log(
     if let Some(rel) = pathspec {
         cmd.arg("--").arg(rel);
     }
-    let out = cmd.stdin(Stdio::null()).output();
-    let Ok(out) = out else {
-        return Vec::new();
-    };
-    if !out.status.success() {
-        return Vec::new();
-    }
-    parse_log(&String::from_utf8_lossy(&out.stdout))
+    cmd
 }
 
 /// Kept pure like parse_status/parse_view: splits `%x00`-joined fields per
@@ -955,6 +1171,13 @@ fn parse_numstat(text: &str) -> (u32, u32, Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An unfiltered History page as `(commits, has_more)`.
+    fn plain_page(dir: &str, all: bool, skip: usize) -> (Vec<GitCommit>, bool) {
+        let p = commit_log_page(dir, all, skip, &LogFilter::default());
+        assert!(!p.timed_out);
+        (p.commits, p.has_more)
+    }
 
     #[test]
     fn parses_branch_with_upstream_and_changes() {
@@ -1772,6 +1995,190 @@ mod tests {
         log.iter().find(|c| c.hash == hash).unwrap()
     }
 
+    /// Naru task 2736: a repo with authors, dates, paths and messages that
+    /// look like flags and regexes, for the History search filters.
+    fn search_repo() -> (tempfile::TempDir, String) {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().to_str().unwrap().to_string();
+        g(&p, &["init", "-q", "-b", "main"]);
+        std::fs::create_dir_all(tmp.path().join("src/ui")).unwrap();
+        let commit = |name: &str, msg: &str, author: &str, date: &str| {
+            std::fs::write(tmp.path().join(name), msg).unwrap();
+            g(&p, &["add", name]);
+            let out = Command::new("git")
+                .args(["-C", &p, "-c", "user.email=t@t", "-c", "user.name=t"])
+                .args(["commit", "-q", "-m", msg, "--author", author])
+                .env("GIT_AUTHOR_DATE", date)
+                .env("GIT_COMMITTER_DATE", date)
+                .output()
+                .unwrap();
+            assert!(out.status.success());
+        };
+        commit(
+            "a.txt",
+            "Add login page",
+            "Alice Smith <a@x>",
+            "2024-01-10T12:00:00",
+        );
+        commit(
+            "src/ui/b.ts",
+            "fix -x flag parsing",
+            "Bob Jones <b@x>",
+            "2024-02-15T12:00:00",
+        );
+        commit(
+            "src/c.rs",
+            "match .* literally",
+            "Alice Smith <a@x>",
+            "2024-03-20T12:00:00",
+        );
+        commit(
+            "a.txt",
+            "LOGIN redirect",
+            "Carol <c@x>",
+            "2024-04-25T12:00:00",
+        );
+        commit("x*y.txt", "star file", "Carol <c@x>", "2024-05-30T12:00:00");
+        (tmp, p)
+    }
+
+    fn subjects_for(p: &str, f: LogFilter) -> Vec<String> {
+        let page = commit_log_page(p, false, 0, &f);
+        assert!(!page.timed_out);
+        page.commits.into_iter().map(|c| c.subject).collect()
+    }
+
+    #[test]
+    fn log_filter_by_message_is_fixed_string_and_case_insensitive() {
+        let (_t, p) = search_repo();
+        let f = |t: &str| LogFilter {
+            text: Some(t.into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            subjects_for(&p, f("login")),
+            ["LOGIN redirect", "Add login page"]
+        );
+        // A value that looks like a flag is the text searched for.
+        assert_eq!(subjects_for(&p, f("-x")), ["fix -x flag parsing"]);
+        // Regex characters are literal: `.*` matches only the commit holding them.
+        assert_eq!(subjects_for(&p, f(".*")), ["match .* literally"]);
+        assert!(subjects_for(&p, f("no such words")).is_empty());
+        assert_eq!(subjects_for(&p, LogFilter::default()).len(), 5);
+    }
+
+    #[test]
+    fn log_filter_by_author_and_combined_with_message() {
+        let (_t, p) = search_repo();
+        let by = |a: &str, t: Option<&str>| LogFilter {
+            author: Some(a.into()),
+            text: t.map(String::from),
+            ..Default::default()
+        };
+        assert_eq!(
+            subjects_for(&p, by("alice", None)),
+            ["match .* literally", "Add login page"]
+        );
+        // Author and message must both match.
+        assert_eq!(
+            subjects_for(&p, by("ALICE", Some("login"))),
+            ["Add login page"]
+        );
+        assert!(subjects_for(&p, by("bob", Some("login"))).is_empty());
+        assert!(subjects_for(&p, by(".*", None)).is_empty());
+    }
+
+    #[test]
+    fn log_filter_by_path_takes_files_and_folders_literally() {
+        let (_t, p) = search_repo();
+        let at = |path: &str| LogFilter {
+            path: Some(path.into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            subjects_for(&p, at("a.txt")),
+            ["LOGIN redirect", "Add login page"]
+        );
+        assert_eq!(
+            subjects_for(&p, at("src")),
+            ["match .* literally", "fix -x flag parsing"]
+        );
+        assert_eq!(subjects_for(&p, at("src/ui")), ["fix -x flag parsing"]);
+        // `*` is a literal character, not a glob.
+        assert_eq!(subjects_for(&p, at("x*y.txt")), ["star file"]);
+        assert!(subjects_for(&p, at("*.txt")).is_empty());
+        assert!(subjects_for(&p, at("gone/never.txt")).is_empty());
+    }
+
+    #[test]
+    fn log_filter_by_date_range_is_inclusive_days() {
+        let (_t, p) = search_repo();
+        let range = |since: Option<&str>, until: Option<&str>| LogFilter {
+            since: since.map(String::from),
+            until: until.map(String::from),
+            ..Default::default()
+        };
+        assert_eq!(
+            subjects_for(&p, range(Some("2024-02-15"), Some("2024-03-20"))),
+            ["match .* literally", "fix -x flag parsing"]
+        );
+        assert_eq!(subjects_for(&p, range(Some("2024-04-01"), None)).len(), 2);
+        assert_eq!(
+            subjects_for(&p, range(None, Some("2024-01-10"))),
+            ["Add login page"]
+        );
+        assert!(subjects_for(&p, range(Some("2025-01-01"), None)).is_empty());
+    }
+
+    #[test]
+    fn log_filter_pages_and_validators() {
+        let (_t, p) = search_repo();
+        // Paging still applies under a filter.
+        let f = LogFilter {
+            author: Some("carol".into()),
+            ..Default::default()
+        };
+        let page = commit_log_page(&p, false, 1, &f);
+        assert_eq!(page.commits.len(), 1);
+        assert_eq!(page.commits[0].subject, "LOGIN redirect");
+        assert!(!page.has_more);
+
+        assert!(valid_log_date("2024-02-29"));
+        for bad in [
+            "2024-2-1",
+            "2024-13-01",
+            "2024-01-32",
+            "-2024-01-0",
+            "2024/01/01",
+            "yesterday",
+        ] {
+            assert!(!valid_log_date(bad), "{bad}");
+        }
+        assert_eq!(valid_log_path("./src/ui/"), Ok(Some("src/ui".into())));
+        assert_eq!(valid_log_path("."), Ok(None));
+        assert_eq!(valid_log_path(""), Ok(None));
+        assert_eq!(valid_log_path("-x"), Ok(Some("-x".into())));
+        for bad in ["/etc", "../x", "a/../b", "a//b", "a\\b", "a\nb"] {
+            assert!(valid_log_path(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn output_within_kills_a_slow_child_and_keeps_what_it_printed() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "echo first; exec sleep 5"]);
+        let start = Instant::now();
+        let (out, ok, timed_out) = output_within(cmd, Some(Duration::from_millis(300))).unwrap();
+        assert!(timed_out && !ok);
+        assert!(start.elapsed() < Duration::from_secs(3));
+        assert_eq!(String::from_utf8_lossy(&out), "first\n");
+        let mut fast = Command::new("sh");
+        fast.args(["-c", "echo done"]);
+        let (out, ok, timed_out) = output_within(fast, None).unwrap();
+        assert!(ok && !timed_out);
+        assert_eq!(out, b"done\n");
+    }
+
     #[test]
     fn parse_refs_reads_every_decoration_kind() {
         let r = parse_refs(
@@ -1858,7 +2265,7 @@ mod tests {
     fn log_page_carries_parents_and_every_ref_kind() {
         let r = graph_repo();
         let p = r.dir.path().to_str().unwrap();
-        let (log, more) = commit_log_page(p, false, 0);
+        let (log, more) = plain_page(p, false, 0);
         assert!(!more);
         // Root has no parents; merge has two; octopus has three.
         assert!(find(&log, &r.root).parents.is_empty());
@@ -1898,9 +2305,9 @@ mod tests {
     fn log_page_all_shows_commits_only_on_another_branch() {
         let r = graph_repo();
         let p = r.dir.path().to_str().unwrap();
-        let (head_only, _) = commit_log_page(p, false, 0);
+        let (head_only, _) = plain_page(p, false, 0);
         assert!(head_only.iter().all(|c| c.hash != r.only_other));
-        let (all, _) = commit_log_page(p, true, 0);
+        let (all, _) = plain_page(p, true, 0);
         assert!(all.iter().any(|c| c.hash == r.only_other));
     }
 
@@ -1913,7 +2320,7 @@ mod tests {
         let wt = wt.to_str().unwrap();
         g(p, &["worktree", "add", "-b", "wtb", wt, &r.root]);
         // The linked worktree's own HEAD is its branch, at the root commit.
-        let (log, _) = commit_log_page(wt, false, 0);
+        let (log, _) = plain_page(wt, false, 0);
         assert_eq!(log.len(), 1);
         assert!(log[0].refs.contains(&GitRef {
             kind: GitRefKind::Branch,
@@ -1921,7 +2328,7 @@ mod tests {
             is_head: true
         }));
         g(wt, &["checkout", "--detach"]);
-        let (log, _) = commit_log_page(wt, false, 0);
+        let (log, _) = plain_page(wt, false, 0);
         assert!(log[0].refs.contains(&GitRef {
             kind: GitRefKind::Head,
             name: "HEAD".into(),
@@ -1934,8 +2341,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().to_str().unwrap();
         g(p, &["init", "-b", "main"]);
-        assert_eq!(commit_log_page(p, false, 0), (Vec::new(), false));
-        assert_eq!(commit_log_page(p, true, 0), (Vec::new(), false));
+        assert_eq!(plain_page(p, false, 0), (Vec::new(), false));
+        assert_eq!(plain_page(p, true, 0), (Vec::new(), false));
     }
 
     #[test]
@@ -1949,7 +2356,7 @@ mod tests {
         );
         let odd = "tab\there, \"quotes\" 'single' <b>&amp;</b> \u{1f600} ->  HEAD, tag: x";
         g(p, &["commit", "--allow-empty", "-m", odd]);
-        let (log, _) = commit_log_page(p, false, 0);
+        let (log, _) = plain_page(p, false, 0);
         assert_eq!(log.len(), 2);
         assert_eq!(log[0].subject, odd);
         assert_eq!(log[1].subject, "");
@@ -1993,7 +2400,7 @@ mod tests {
         let mut skip = 0;
         let mut pages = 0;
         loop {
-            let (page, more) = commit_log_page(p, false, skip);
+            let (page, more) = plain_page(p, false, skip);
             pages += 1;
             assert!(page.len() <= LOG_CAP);
             skip += page.len();
@@ -2006,12 +2413,12 @@ mod tests {
         assert_eq!(pages, 3);
         assert_eq!(got, full);
         // Exactly one full page: has_more must be false, not a phantom page.
-        let (page, more) = commit_log_page(p, false, 130);
+        let (page, more) = plain_page(p, false, 130);
         assert_eq!((page.len(), more), (100, false));
-        let (page, more) = commit_log_page(p, false, 0);
+        let (page, more) = plain_page(p, false, 0);
         assert_eq!((page.len(), more), (100, true));
         // Skipping past the end is an empty page.
-        assert_eq!(commit_log_page(p, false, 500), (Vec::new(), false));
+        assert_eq!(plain_page(p, false, 500), (Vec::new(), false));
     }
 
     #[test]
@@ -2167,7 +2574,7 @@ mod tests {
             .unwrap();
         assert!(out.status.success());
         let first = g(p, &["rev-parse", "HEAD~1"]);
-        let (log, _) = commit_log_page(p, false, 0);
+        let (log, _) = plain_page(p, false, 0);
         assert_eq!(log[0].subject, "sub\u{1f}ject");
         assert_eq!(log[0].author, name);
         assert_eq!(log[0].parents, vec![first.clone()]);

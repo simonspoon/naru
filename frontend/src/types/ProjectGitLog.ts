@@ -12,4 +12,10 @@ export type ProjectGitLog = { path: string | null, commits: Array<GitCommit> | n
  * True when git has more commits past this page (`skip + commits.len()`
  * is the next `?skip=`). Always false when `commits` is null.
  */
-has_more: boolean, };
+has_more: boolean, 
+/**
+ * True when the search ran past `git::LOG_TIMEOUT` and was stopped:
+ * `commits` is what was found by then and `has_more` is false (naru task
+ * 2736). Always false for `file-log`.
+ */
+timed_out: boolean, };

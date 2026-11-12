@@ -177,7 +177,7 @@ struct AppState {
     /// offset. The value is the page plus its `has_more`. Cached (S3) so
     /// refetch-on-focus doesn't respawn `git log` every render; same
     /// GIT_TTL/eviction-cap pattern as `git_view_cache`.
-    git_log_cache: Arc<Mutex<HashMap<(String, bool, usize), (Instant, (Vec<GitCommit>, bool))>>>,
+    git_log_cache: Arc<Mutex<HashMap<GitLogKey, (Instant, GitLogCached)>>>,
     /// One commit's detail (`GET .../git/commits/{sha}`), keyed by
     /// `(dir, sha)`. Same GIT_TTL/eviction-cap pattern.
     git_commit_detail_cache: Arc<Mutex<HashMap<(String, String), (Instant, GitCommitDetail)>>>,
@@ -10618,6 +10618,11 @@ async fn get_project_git_diff(
     Ok(Json(GitFileDiff { path: wanted, diff }).into_response())
 }
 
+/// `git_log_cache` key: the folder actually read, `all`, `skip`, filters.
+type GitLogKey = (String, bool, usize, git::LogFilter);
+/// One cached page: commits, `has_more`, `timed_out`.
+type GitLogCached = (Vec<GitCommit>, bool, bool);
+
 #[derive(Deserialize)]
 struct GitLogQuery {
     /// Same worktree selector as `GitViewQuery`.
@@ -10631,6 +10636,56 @@ struct GitLogQuery {
     /// or negative value is rejected by the `Query` extractor (400, before
     /// any handler code or git runs).
     skip: Option<u32>,
+    /// History search (naru task 2736, `git::LogFilter`): commit message
+    /// text, fixed-string and case-insensitive.
+    #[serde(default)]
+    q: Option<String>,
+    /// Author name or email, fixed-string and case-insensitive.
+    #[serde(default)]
+    author: Option<String>,
+    /// A repo-relative file or folder (`git::valid_log_path`).
+    #[serde(default)]
+    path: Option<String>,
+    /// `YYYY-MM-DD`, inclusive (`git::valid_log_date`).
+    #[serde(default)]
+    since: Option<String>,
+    #[serde(default)]
+    until: Option<String>,
+}
+
+impl GitLogQuery {
+    /// The search filters, validated before any git runs: a blank value is
+    /// no filter; a bad date or path is 422 `validation`.
+    fn filter(&self) -> ApiResult<git::LogFilter> {
+        let bad = |message: &str| ApiError {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            code: "validation",
+            message: message.to_string(),
+        };
+        let text = |v: &Option<String>| {
+            v.as_deref()
+                .filter(|t| !t.trim().is_empty())
+                .map(String::from)
+        };
+        let date = |v: &Option<String>, msg: &str| -> ApiResult<Option<String>> {
+            match v.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
+                None => Ok(None),
+                Some(d) if git::valid_log_date(d) => Ok(Some(d.to_string())),
+                Some(_) => Err(bad(msg)),
+            }
+        };
+        let path = match self.path.as_deref() {
+            None => None,
+            Some(p) => git::valid_log_path(p).map_err(bad)?,
+        };
+        Ok(git::LogFilter {
+            text: text(&self.q),
+            author: text(&self.author),
+            path,
+            since: date(&self.since, "since must be a YYYY-MM-DD date")?,
+            until: date(&self.until, "until must be a YYYY-MM-DD date")?,
+        })
+    }
 }
 
 /// One page of the commit log for the project's `local_path` repo, or for one of its
@@ -10653,13 +10708,14 @@ async fn get_project_git_log(
     Path(id): Path<i64>,
     Query(q): Query<GitLogQuery>,
 ) -> ApiResult<Response> {
+    let filter = q.filter()?;
     let (path, base, repo) = project_git_view_in(&state, id, q.repo.as_deref()).await?;
-    let (commits, has_more) = match (&base, &repo) {
+    let (commits, has_more, timed_out) = match (&base, &repo) {
         (Some(base), Some(_)) => {
             let (dir, _worktrees) = resolve_git_dir(&state, base, q.worktree.as_deref()).await?;
             let all = q.all.unwrap_or(false);
             let skip = q.skip.unwrap_or(0) as usize;
-            let key = (dir.clone(), all, skip);
+            let key = (dir.clone(), all, skip, filter.clone());
             let cached = {
                 let cache = state.git_log_cache.lock().unwrap();
                 cache
@@ -10667,19 +10723,22 @@ async fn get_project_git_log(
                     .filter(|(at, _)| at.elapsed() < GIT_TTL)
                     .map(|(_, c)| c.clone())
             };
-            let (commits, has_more) = match cached {
+            let (commits, has_more, timed_out) = match cached {
                 Some(c) => c,
                 None => {
                     let d = dir.clone();
-                    let c =
-                        tokio::task::spawn_blocking(move || git::commit_log_page(&d, all, skip))
-                            .await
-                            .unwrap_or_default();
+                    let c = tokio::task::spawn_blocking(move || {
+                        let p = git::commit_log_page(&d, all, skip, &filter);
+                        (p.commits, p.has_more, p.timed_out)
+                    })
+                    .await
+                    .unwrap_or_default();
                     let mut cache = state.git_log_cache.lock().unwrap();
                     if cache.len() >= 64 {
                         cache.retain(|_, (at, _)| at.elapsed() < GIT_TTL);
-                        // `skip` is caller-chosen: a walk within the TTL
-                        // would otherwise grow the map without bound.
+                        // `skip` and the filters are caller-chosen: a walk
+                        // within the TTL would otherwise grow the map without
+                        // bound.
                         if cache.len() >= 64 {
                             cache.clear();
                         }
@@ -10688,14 +10747,15 @@ async fn get_project_git_log(
                     c
                 }
             };
-            (Some(commits), has_more)
+            (Some(commits), has_more, timed_out)
         }
-        _ => (None, false),
+        _ => (None, false, false),
     };
     Ok(Json(ProjectGitLog {
         path,
         commits,
         has_more,
+        timed_out,
     })
     .into_response())
 }
@@ -10742,6 +10802,7 @@ async fn get_project_git_file_log(
             path,
             commits: None,
             has_more: false,
+            timed_out: false,
         })
         .into_response());
     };
@@ -10780,6 +10841,7 @@ async fn get_project_git_file_log(
         path,
         commits: Some(commits),
         has_more,
+        timed_out: false,
     })
     .into_response())
 }
@@ -15938,6 +16000,11 @@ mod tests {
                 repo: None,
                 all,
                 skip,
+                q: None,
+                author: None,
+                path: None,
+                since: None,
+                until: None,
             };
             async move {
                 json_body(
@@ -15985,6 +16052,36 @@ mod tests {
         assert_eq!(rej.status(), StatusCode::BAD_REQUEST);
         let neg: axum::http::Uri = "/x?skip=-1".parse().unwrap();
         assert!(Query::<GitLogQuery>::try_from_uri(&neg).is_err());
+
+        // Naru task 2736: search filters ride the same route; a bad date or
+        // path is 422 before git runs, a blank one is no filter.
+        let search = |uri: &str| {
+            let state = state.clone();
+            let q = Query::<GitLogQuery>::try_from_uri(&uri.parse().unwrap()).unwrap();
+            async move { get_project_git_log(State(state), Path(id), q).await }
+        };
+        let hit = json_body(search("/x?q=C10").await.unwrap()).await;
+        let hits: Vec<&str> = hit["commits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["subject"].as_str().unwrap())
+            .collect();
+        assert_eq!(hits, ["c104", "c103", "c102", "c101", "c100", "c10"]);
+        assert_eq!(hit["timed_out"], false);
+        let none = json_body(search("/x?q=nothing%20here").await.unwrap()).await;
+        assert_eq!(none["commits"].as_array().unwrap().len(), 0);
+        let blank = json_body(search("/x?q=%20&author=&since=").await.unwrap()).await;
+        assert_eq!(blank["commits"].as_array().unwrap().len(), 100);
+        for bad in [
+            "/x?since=yesterday",
+            "/x?until=2024-13-01",
+            "/x?path=../etc",
+            "/x?path=/etc",
+        ] {
+            let err = search(bad).await.err().unwrap();
+            assert_eq!(err.status, StatusCode::UNPROCESSABLE_ENTITY, "{bad}");
+        }
 
         // Detail route.
         let hash = p0["commits"][0]["hash"].as_str().unwrap().to_string();
@@ -16052,6 +16149,11 @@ mod tests {
                 repo: repo.map(String::from),
                 all: None,
                 skip: None,
+                q: None,
+                author: None,
+                path: None,
+                since: None,
+                until: None,
             };
             async move { get_project_git_log(State(state), Path(id), Query(q)).await }
         };

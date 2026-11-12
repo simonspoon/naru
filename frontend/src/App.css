@@ -14814,7 +14814,10 @@ span.orbit-spark {
 
 .git-history-toolbar {
   display: flex;
-  justify-content: flex-end;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0 0.75rem;
 }
 
 .git-history-layout {
@@ -15226,5 +15229,191 @@ button.git-file-row.selected {
     .git-graph-list {
       max-height: 75dvh;
     }
+  }
+}
+
+/* ---- Git tab search, file filters and keys (naru task 2736,
+   docs/git-tab.md "Search and keys"). ---- */
+.git-search {
+  flex: 1 1 22rem;
+  min-width: 0;
+  margin: 0 0 0.75rem;
+}
+
+.git-search-row {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.git-search-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.git-search-more.active {
+  border-color: var(--cyan);
+}
+
+.git-search-fields {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.5rem 0.75rem;
+  margin-top: 0.5rem;
+}
+
+.git-search-fields label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.75rem;
+}
+
+.git-search-fields input {
+  width: 11rem;
+  max-width: 100%;
+}
+
+.git-search-note {
+  flex-basis: 100%;
+  margin: 0;
+  font-size: 0.75rem;
+}
+
+.git-filter-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-top: 0.5rem;
+}
+
+.git-filter-chip,
+.git-filter-clear {
+  font-size: 0.75rem;
+  padding: 0.15rem 0.5rem;
+}
+
+.git-filter-chip span:first-child {
+  overflow-wrap: anywhere;
+}
+
+.git-search-count {
+  margin: 0 0 0.5rem;
+  font-size: 0.8rem;
+}
+
+.git-history-empty-search {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.git-file-filter {
+  display: block;
+  width: 19rem;
+  max-width: 100%;
+  box-sizing: border-box;
+  margin: 0 0 0.5rem;
+}
+
+.git-commit-detail .git-file-filter {
+  width: 100%;
+}
+
+/* Working-tree rows: the <button> is the focus target; the <li> keeps the
+   card look and its click. */
+button.git-tree-row {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-weight: 400;
+  text-align: left;
+}
+
+button.git-tree-row .git-file-label {
+  display: block;
+}
+
+.git-mode-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.git-keys {
+  position: relative;
+}
+
+.git-keys-button {
+  min-width: 2rem;
+  font-family: var(--font-mono);
+}
+
+.git-keys-pop {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 0.35rem);
+  z-index: 5;
+  width: max-content;
+  max-width: min(24rem, 90vw);
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--border-bright);
+  border-radius: var(--r-md);
+  background: var(--panel);
+  font-size: 0.8rem;
+}
+
+.git-keys-pop table {
+  border-collapse: collapse;
+}
+
+.git-keys-pop th {
+  text-align: left;
+  font-weight: 400;
+  padding: 0.2rem 0.75rem 0.2rem 0;
+  white-space: nowrap;
+}
+
+.git-keys-pop td {
+  padding: 0.2rem 0;
+}
+
+.git-keys-pop kbd {
+  padding: 0.1rem 0.35rem;
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+}
+
+.git-keys-pop p {
+  margin: 0.5rem 0 0;
+  font-size: 0.72rem;
+}
+
+@media (max-width: 860px) {
+  .git-file-filter {
+    width: 100%;
+  }
+}
+
+@media (max-width: 600px) {
+  .git-search-fields label,
+  .git-search-fields input {
+    width: 100%;
+  }
+
+  .git-filter-input,
+  .git-filter-chip,
+  .git-filter-clear,
+  .git-search-more,
+  .git-jump-go,
+  .git-keys-button {
+    min-height: 44px;
   }
 }

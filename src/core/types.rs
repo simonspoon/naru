@@ -1773,6 +1773,11 @@ pub struct ProjectGitLog {
     /// True when git has more commits past this page (`skip + commits.len()`
     /// is the next `?skip=`). Always false when `commits` is null.
     pub has_more: bool,
+    /// True when the search ran past `git::LOG_TIMEOUT` and was stopped:
+    /// `commits` is what was found by then and `has_more` is false (naru task
+    /// 2736). Always false for `file-log`.
+    #[serde(default)]
+    pub timed_out: bool,
 }
 
 /// The captured outcome of one hook command run (see `core::hooks`). A
