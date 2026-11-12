@@ -96,6 +96,19 @@ export function recordRecent(
   return [path, ...recent.filter((p) => p !== path)].slice(0, max)
 }
 
+/** `recent` after `from` (a file or a folder) moved to `to`: every path at or
+ *  under it follows, a path that now appears twice keeps its first place. */
+export function remapRecent(
+  recent: readonly string[],
+  from: string,
+  to: string,
+): string[] {
+  const moved = recent.map((p) =>
+    p === from || p.startsWith(`${from}/`) ? to + p.slice(from.length) : p,
+  )
+  return moved.filter((p, i) => moved.indexOf(p) === i)
+}
+
 /**
  * What the box lists before anything is typed: the recently opened files, most
  * recent first, then any other open tab, then the rest of the project in walk

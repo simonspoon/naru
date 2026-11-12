@@ -696,6 +696,37 @@ export function createProjectFile(
 }
 
 /**
+ * Creates an empty directory at `path` (naru task 2745). Same errors as
+ * creating a file: 404 for a parent that doesn't resolve, 422 for a bad name
+ * (or one the tree hides, like `node_modules`), 409 when the name is taken.
+ * Returns the new `FileTreeEntry`.
+ */
+export function createProjectDir(
+  id: number,
+  path: string,
+): Promise<FileTreeEntry> {
+  return request(`/api/projects/${id}/files/dir`, jsonInit('POST', { path }))
+}
+
+/**
+ * Moves one tree entry into the directory `dir` (tree-relative, `''` = the
+ * project root), keeping its name (naru task 2745). Never overwrites or
+ * merges: 409 when the name is taken there. 404 for a missing source or
+ * destination, 422 for an illegal move (into itself, already in that folder,
+ * the project root, across filesystems). Returns the entry at its new path.
+ */
+export function moveProjectFileEntry(
+  id: number,
+  path: string,
+  dir: string,
+): Promise<FileTreeEntry> {
+  return request(
+    `/api/projects/${id}/files/entry/move`,
+    jsonInit('POST', { path, dir }),
+  )
+}
+
+/**
  * Uploads one file into the directory `dir` (tree-relative, `''` = the project
  * root) as `name` (naru task 2732). The bytes ride the JSON body as standard
  * base64 with no data-URL prefix — the request wrapper's Content-Type keeps

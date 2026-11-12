@@ -39,6 +39,7 @@ import {
   loadRecentFiles,
   rankPaths,
   recordRecent,
+  remapRecent,
   saveRecentFiles,
 } from '../quickOpen'
 import type { ProjectFileNames } from '../types/ProjectFileNames'
@@ -118,6 +119,7 @@ import {
 import { mediaKindForPath } from '../fileMedia'
 import { resolveMarkdownImageSrc } from '../markdownAssets'
 import { newFilePath } from '../newFile'
+import { TREE_MOVE_TYPE, moveTarget, normalizeDestDir } from '../treeMove'
 import {
   SKIPPED,
   dropHint,
@@ -133,6 +135,7 @@ import {
 import { loadOpenFiles, saveOpenFiles } from '../openFiles'
 import {
   ApiError,
+  createProjectDir,
   createProjectFile,
   deleteProjectFileEntry,
   getProjectFiles,
@@ -142,6 +145,7 @@ import {
   listProjectFileNames,
   projectFileDownloadUrl,
   projectFileRawUrl,
+  moveProjectFileEntry,
   renameProjectFileEntry,
   searchProjectFiles,
   updateProjectFilesContent,
@@ -2758,12 +2762,15 @@ type DirState =
  * field, which closes whatever was there.
  *
  * `create.parent` is the directory the naming row belongs to (`''` = the project
- * root). `rename`/`delete` name an existing entry, and carry `is_dir` because
+ * root); `create.folder` makes it a new-folder row (naru task 2745) rather than a
+ * new-file one. `move` is the "Move to…" input (task 2745), a typed destination
+ * folder. `rename`/`move`/`delete` name an existing entry, and carry `is_dir` because
  * both read differently for a folder — a rename of a directory re-points a
  * subtree of tabs, and a delete of one takes its contents with it.
  */
 type TreeAction =
-  | { kind: 'create'; parent: string }
+  | { kind: 'create'; parent: string; folder: boolean }
+  | { kind: 'move'; path: string; name: string; isDir: boolean }
   | { kind: 'rename'; path: string; name: string; isDir: boolean }
   | { kind: 'delete'; path: string; name: string; isDir: boolean }
 
@@ -2779,18 +2786,26 @@ interface TreeOps {
   /** The folder an OS file drag would upload into right now (naru task 2732),
    *  `''` for the project root, or null when no such drag is over the tab. */
   dropDir: string | null
-  onCreateStart: (parent: string) => void
+  /** The folder an internal tree-row drag would move into right now (naru task
+   *  2745), `''` for the project root, or null. Only a legal, non-no-op target. */
+  moveDir: string | null
+  onCreateStart: (parent: string, folder: boolean) => void
   onCreateSubmit: (name: string) => void
   onRenameStart: (entry: FileTreeEntry) => void
   onRenameSubmit: (name: string) => void
   onDeleteStart: (entry: FileTreeEntry) => void
+  onMoveStart: (entry: FileTreeEntry) => void
+  onMoveSubmit: (dir: string) => void
   onDeleteConfirm: () => void
   onCancel: () => void
   /** Task 2733: Download on a file row, and the dragstart that lets Chromium
    *  save the file to the desktop. `downloadError` is the failed row's
    *  `{path, message}`. */
   onDownload: (entry: FileTreeEntry) => void
-  onFileDragStart: (e: ReactDragEvent, path: string) => void
+  /** One dragstart for a tree row (naru task 2745): the internal move marker,
+   *  plus a file row's drag-out payloads (task 2733). */
+  onRowDragStart: (e: ReactDragEvent, entry: FileTreeEntry) => void
+  onRowDragEnd: () => void
   downloadError: { path: string; message: string } | null
 }
 
@@ -2801,10 +2816,13 @@ function NewFileButton({
   parent,
   label,
   ops,
+  folder = false,
 }: {
   parent: string
   label: string
   ops: TreeOps
+  /** The new-folder variant (naru task 2745): same row, `⊞` instead of `+`. */
+  folder?: boolean
 }) {
   return (
     <button
@@ -2814,10 +2832,10 @@ function NewFileButton({
       title={label}
       onClick={(e) => {
         e.stopPropagation()
-        ops.onCreateStart(parent)
+        ops.onCreateStart(parent, folder)
       }}
     >
-      +
+      {folder ? '⊞' : '+'}
     </button>
   )
 }
@@ -2895,6 +2913,18 @@ function TreeRowButtons({ entry, ops }: { entry: FileTreeEntry; ops: TreeOps }) 
       </button>
       <button
         type="button"
+        className="files-tree-add"
+        aria-label={`Move ${what} ${entry.path} to…`}
+        title={`Move ${entry.name} to…`}
+        onClick={(e) => {
+          e.stopPropagation()
+          ops.onMoveStart(entry)
+        }}
+      >
+        ↪
+      </button>
+      <button
+        type="button"
         className="files-tree-add files-tree-danger"
         aria-label={`Delete ${what} ${entry.path}`}
         title={`Delete ${entry.name}`}
@@ -2914,6 +2944,7 @@ function TreeRowButtons({ entry, ops }: { entry: FileTreeEntry; ops: TreeOps }) 
  * only the submitted name. */
 function NewFileRow({ depth, ops }: { depth: number; ops: TreeOps }) {
   const [name, setName] = useState('')
+  const folder = ops.action?.kind === 'create' && ops.action.folder
   const indent = { paddingLeft: `${depth * 1.1 + 0.5}rem` }
   return (
     <>
@@ -2922,9 +2953,9 @@ function NewFileRow({ depth, ops }: { depth: number; ops: TreeOps }) {
           autoFocus
           className="files-tree-new-input"
           value={name}
-          placeholder="new-file.ts"
+          placeholder={folder ? 'new-folder' : 'new-file.ts'}
           spellCheck={false}
-          aria-label="New file name"
+          aria-label={folder ? 'New folder name' : 'New file name'}
           onChange={(e) => setName(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === 'Enter') {
@@ -3003,6 +3034,60 @@ function RenameInput({ current, ops }: { current: string; ops: TreeOps }) {
       // browser's own blur would cancel the row the request belongs to.
       onBlur={ops.onCancel}
     />
+  )
+}
+
+/**
+ * The "Move to…" input (naru task 2745), on a row of its own under the entry —
+ * unlike the rename input it does not replace the label, since the label is
+ * not what is being edited. Prefilled with the entry's current folder (`''` =
+ * the project root) and fully selected; Enter submits, Escape and blur cancel,
+ * the rename input's rules. The message under it is the shared slot.
+ */
+function MoveToRow({
+  depth,
+  action,
+  ops,
+}: {
+  depth: number
+  action: { path: string; name: string }
+  ops: TreeOps
+}) {
+  const [dir, setDir] = useState(dirname(action.path))
+  const indent = { paddingLeft: `${depth * 1.1 + 0.5}rem` }
+  return (
+    <>
+      <li className="files-tree-new" style={indent} onClick={(e) => e.stopPropagation()}>
+        <input
+          autoFocus
+          className="files-tree-new-input"
+          value={dir}
+          placeholder="folder (blank = project root)"
+          spellCheck={false}
+          aria-label={`Move ${action.name} to folder`}
+          onFocus={(e) => e.currentTarget.select()}
+          onChange={(e) => setDir(e.target.value)}
+          onKeyDown={(e) => {
+            e.stopPropagation()
+            if (e.key === 'Enter') {
+              e.preventDefault()
+              ops.onMoveSubmit(dir)
+            }
+            if (e.key === 'Escape') {
+              e.preventDefault()
+              ops.onCancel()
+            }
+          }}
+          // Never `disabled` mid-request, as the naming row: blur cancels.
+          onBlur={ops.onCancel}
+        />
+      </li>
+      {ops.error !== null && (
+        <li className="files-tree-note error" style={indent}>
+          {ops.error}
+        </li>
+      )}
+    </>
   )
 }
 
@@ -3088,6 +3173,9 @@ function TreeRowAction({
   if (action.kind === 'delete') {
     return <DeleteConfirmRow depth={depth} action={action} ops={ops} />
   }
+  if (action.kind === 'move') {
+    return <MoveToRow depth={depth} action={action} ops={ops} />
+  }
   if (action.kind === 'rename' && ops.error !== null) {
     return (
       <li
@@ -3140,10 +3228,13 @@ function TreeNode({
         <li
           className={`files-tree-dir${
             ops.dropDir === entry.path ? ' upload-target' : ''
-          }`}
+          }${ops.moveDir === entry.path ? ' move-target' : ''}`}
           style={indent}
           data-upload-path={entry.path}
           data-upload-row="dir"
+          draggable={!renaming}
+          onDragStart={(e) => ops.onRowDragStart(e, entry)}
+          onDragEnd={ops.onRowDragEnd}
           onClick={() => onToggle(entry)}
         >
           <span className={`files-tree-toggle ${isOpen ? 'open' : ''}`}>
@@ -3158,6 +3249,12 @@ function TreeNode({
                 parent={entry.path}
                 label={`New file in ${entry.path}`}
                 ops={ops}
+              />
+              <NewFileButton
+                parent={entry.path}
+                label={`New folder in ${entry.path}`}
+                ops={ops}
+                folder
               />
               <TreeRowButtons entry={entry} ops={ops} />
             </>
@@ -3223,7 +3320,8 @@ function TreeNode({
         data-upload-path={entry.path}
         data-upload-row="file"
         draggable={!renaming}
-        onDragStart={(e) => ops.onFileDragStart(e, entry.path)}
+        onDragStart={(e) => ops.onRowDragStart(e, entry)}
+        onDragEnd={ops.onRowDragEnd}
         onClick={() => onSelectFile(entry.path)}
       >
         {renaming ? (
@@ -3622,6 +3720,13 @@ function SearchPanel({
  * `drop` for exactly that read. A ref would work too; a module-level slot is
  * simpler and there is only ever one drag in flight in one window. */
 let dragging: TabSource | null = null
+
+/** The tree row being dragged to a new folder (naru task 2745), for the length
+ * of one drag — the same module-scope reasoning as `dragging` above. It is a
+ * separate slot, never `dragging`: a tab drag and a tree-row drag must not be
+ * able to take each other's drop (the strips read only `dragging`, the tree
+ * only this), and neither is an OS file drag. */
+let treeDragging: { path: string; isDir: boolean } | null = null
 
 /** Where a drop indicator is currently showing: a strip and the gap in it. */
 interface DropMark {
@@ -4449,6 +4554,11 @@ export function FilesView({ projectId }: { projectId: number }) {
   // marks the batch so a second one can't interleave with it, and holds the
   // resolver of the Replace question the loop is awaiting.
   const [dropDir, setDropDir] = useState<string | null>(null)
+  // Moving a tree row by drag (naru task 2745). `moveDir` is the legal folder
+  // the drag is over right now (`''` = root); `hoverExpand` is the collapsed
+  // folder being hovered and the timer that will open it.
+  const [moveDir, setMoveDir] = useState<string | null>(null)
+  const hoverExpand = useRef<{ path: string; timer: number } | null>(null)
   const [upload, setUpload] = useState<{
     progress: { name: string; index: number; total: number } | null
     replace: string | null
@@ -4867,6 +4977,7 @@ export function FilesView({ projectId }: { projectId: number }) {
     setTreeActionError(null)
     setDownloadError(null)
     setDropDir(null)
+    setMoveDir(null)
     setUpload({ progress: null, replace: null, note: null, done: null })
     setPendingClose(null)
     setPendingBulk(null)
@@ -5162,8 +5273,8 @@ export function FilesView({ projectId }: { projectId: number }) {
 
   /** Opens the naming row under `parent` (`''` = the project root), expanding
    *  that directory first so the row has somewhere to appear. */
-  function startCreate(parent: string) {
-    openTreeAction({ kind: 'create', parent })
+  function startCreate(parent: string, folder: boolean) {
+    openTreeAction({ kind: 'create', parent, folder })
     if (parent === '') return
     setExpanded((prev) => new Set(prev).add(parent))
     ensureChildren(parent)
@@ -5175,8 +5286,8 @@ export function FilesView({ projectId }: { projectId: number }) {
    *  409/422/404 lands in the same place. */
   async function submitCreate(name: string) {
     if (treeAction?.kind !== 'create' || treeBusy) return
-    const parent = treeAction.parent
-    const decided = newFilePath(parent, name)
+    const { parent, folder } = treeAction
+    const decided = newFilePath(parent, name, folder ? 'folder' : 'file')
     if (!decided.ok) {
       setTreeActionError(decided.reason)
       return
@@ -5184,6 +5295,14 @@ export function FilesView({ projectId }: { projectId: number }) {
     setTreeBusy(true)
     setTreeActionError(null)
     try {
+      if (folder) {
+        // A new folder is just a new row: no tab opens and the phone tree
+        // stays up. The parent was expanded when the row opened.
+        await createProjectDir(projectId, decided.path)
+        setTreeAction(null)
+        reloadLevel(parent)
+        return
+      }
       await createProjectFile(projectId, decided.path)
       setTreeAction(null)
       reloadLevel(parent)
@@ -5195,11 +5314,67 @@ export function FilesView({ projectId }: { projectId: number }) {
       setTreeOpen(false)
     } catch (e) {
       setTreeActionError(
-        e instanceof ApiError ? e.message : 'Failed to create file.',
+        e instanceof ApiError
+          ? e.message
+          : folder
+            ? 'Failed to create folder.'
+            : 'Failed to create file.',
       )
     } finally {
       setTreeBusy(false)
     }
+  }
+
+  /**
+   * Everything keyed by a path that follows an entry from `from` to `to` — a
+   * rename (mesa task 877) and a move (naru task 2745) are the same event to
+   * the state that hangs off the path.
+   *
+   * A moved directory's cached children and expanded flags are all filed
+   * under the old path. The cache entries are simply dead — nothing can ask
+   * for that level again — but the expanded flags still mean something: the
+   * user has those folders open, so they are re-keyed onto the new prefix
+   * *and re-fetched*. Re-keying alone is what shipped wrong first: a row
+   * that is expanded with no cache entry is neither 'loading' nor a level
+   * with entries, so a renamed folder sat open and blank until it was
+   * collapsed and opened again.
+   *
+   * The per-file state is keyed by path, so it moves too — an unsaved draft
+   * above all — before the tabs do: `commit` drops whatever is filed under a
+   * path that is no longer open. A destination that already has state of its
+   * own (a stale tab for the new name) keeps it. The quick-open recents follow
+   * as well.
+   */
+  function applyPathMove(from: string, to: string, isDir: boolean) {
+    if (isDir) {
+      const rekey = (key: string) => to + key.slice(from.length)
+      const under = (key: string) => key === from || key.startsWith(`${from}/`)
+      const reopened = [...expanded].filter(under).map(rekey)
+      setChildrenCache((prev) => {
+        const next = new Map(prev)
+        for (const key of prev.keys()) {
+          if (under(key)) next.delete(key)
+        }
+        return next
+      })
+      setExpanded((prev) => {
+        const next = new Set<string>()
+        for (const key of prev) next.add(under(key) ? rekey(key) : key)
+        return next
+      })
+      for (const dir of reopened) loadDir(dir)
+    }
+    setOpen((prev) => {
+      const fileUi = new Map<string, FileUiState>()
+      for (const [key, ui] of prev.fileUi) {
+        const moved =
+          key === from || key.startsWith(`${from}/`) ? to + key.slice(from.length) : key
+        if (moved === key || !prev.fileUi.has(moved)) fileUi.set(moved, ui)
+      }
+      return { ...prev, fileUi }
+    })
+    commit((prev) => renameSubtree(prev, from, to))
+    saveRecentFiles(projectId, remapRecent(loadRecentFiles(projectId), from, to))
   }
 
   /**
@@ -5237,48 +5412,7 @@ export function FilesView({ projectId }: { projectId: number }) {
       const entry = await renameProjectFileEntry(projectId, path, name.trim())
       setTreeAction(null)
       reloadLevel(parent)
-      // A renamed directory's cached children and expanded flags are all filed
-      // under the old path. The cache entries are simply dead — nothing can ask
-      // for that level again — but the expanded flags still mean something: the
-      // user has those folders open, so they are re-keyed onto the new prefix
-      // *and re-fetched*. Re-keying alone is what shipped wrong first: a row
-      // that is expanded with no cache entry is neither 'loading' nor a level
-      // with entries, so a renamed folder sat open and blank until it was
-      // collapsed and opened again.
-      if (isDir) {
-        const rekey = (key: string) => entry.path + key.slice(path.length)
-        const under = (key: string) => key === path || key.startsWith(`${path}/`)
-        const reopened = [...expanded].filter(under).map(rekey)
-        setChildrenCache((prev) => {
-          const next = new Map(prev)
-          for (const key of prev.keys()) {
-            if (under(key)) next.delete(key)
-          }
-          return next
-        })
-        setExpanded((prev) => {
-          const next = new Set<string>()
-          for (const key of prev) next.add(under(key) ? rekey(key) : key)
-          return next
-        })
-        for (const dir of reopened) loadDir(dir)
-      }
-      // The per-file state is keyed by path, so it moves with the rename — an
-      // unsaved draft above all — before the tabs do: `commit` drops whatever
-      // is filed under a path that is no longer open. A destination that
-      // already has state of its own (a stale tab for the new name) keeps it.
-      setOpen((prev) => {
-        const fileUi = new Map<string, FileUiState>()
-        for (const [key, ui] of prev.fileUi) {
-          const moved =
-            key === path || key.startsWith(`${path}/`)
-              ? entry.path + key.slice(path.length)
-              : key
-          if (moved === key || !prev.fileUi.has(moved)) fileUi.set(moved, ui)
-        }
-        return { ...prev, fileUi }
-      })
-      commit((prev) => renameSubtree(prev, path, entry.path))
+      applyPathMove(path, entry.path, isDir)
     } catch (e) {
       setTreeActionError(
         e instanceof ApiError ? e.message : 'Failed to rename.',
@@ -5286,6 +5420,77 @@ export function FilesView({ projectId }: { projectId: number }) {
     } finally {
       setTreeBusy(false)
     }
+  }
+
+  /**
+   * Moves `path` into `destDir` (naru task 2745), from a drop or the "Move to…"
+   * input (`fromRow`). `treeMove.ts` decides first: the current folder (or a
+   * folder onto itself) is a silent cancel, a folder into itself an inline
+   * refusal — in both cases no request. A drop closes any open row up front, so
+   * a pending rename/delete can never be left pointing at a path that no longer
+   * exists, and its failure has nowhere to show but the tree's own note at the
+   * top (`treeActionError` with no action open).
+   *
+   * Success is a rename to `<destDir>/<name>` as far as path-keyed state is
+   * concerned (`applyPathMove`), then both levels it touched are re-read and
+   * the destination is opened so the entry is visible where it landed.
+   */
+  async function moveEntry(
+    path: string,
+    isDir: boolean,
+    destDir: string,
+    fromRow = false,
+  ) {
+    if (treeBusy) return
+    // A drop closes any open row; the "Move to…" input stays up so a server
+    // refusal (409 name taken) shows under it.
+    if (!fromRow) cancelTreeAction()
+    const decided = moveTarget(path, destDir)
+    if (decided.kind === 'noop') {
+      cancelTreeAction()
+      return
+    }
+    if (decided.kind === 'refused') {
+      setTreeActionError(decided.reason)
+      return
+    }
+    setTreeBusy(true)
+    try {
+      const entry = await moveProjectFileEntry(projectId, path, destDir)
+      cancelTreeAction()
+      reloadLevel(dirname(path))
+      reloadLevel(destDir)
+      if (destDir !== '') {
+        // Every folder on the way down, so a typed destination under a
+        // collapsed folder still shows the entry where it landed.
+        const parts = destDir.split('/')
+        const chain = parts.map((_, i) => parts.slice(0, i + 1).join('/'))
+        setExpanded((prev) => new Set([...prev, ...chain]))
+        for (const dir of chain.slice(0, -1)) ensureChildren(dir)
+      }
+      applyPathMove(path, entry.path, isDir)
+    } catch (e) {
+      setTreeActionError(e instanceof ApiError ? e.message : 'Failed to move.')
+    } finally {
+      setTreeBusy(false)
+    }
+  }
+
+  /** Enter on the "Move to…" input. A bad typed path is an inline message in
+   *  the open row; the rest is `moveEntry`, which closes the row. */
+  function submitMove(typed: string) {
+    if (treeAction?.kind !== 'move' || treeBusy) return
+    const dest = normalizeDestDir(typed)
+    if (!dest.ok) {
+      setTreeActionError(dest.reason)
+      return
+    }
+    const decided = moveTarget(treeAction.path, dest.dir)
+    if (decided.kind === 'refused') {
+      setTreeActionError(decided.reason)
+      return
+    }
+    void moveEntry(treeAction.path, treeAction.isDir, dest.dir, true)
   }
 
   /** "delete" — the prompt's one destructive answer (mesa task 877). A
@@ -5438,14 +5643,17 @@ export function FilesView({ projectId }: { projectId: number }) {
   // drag over the Files tab is `preventDefault()`ed, target or not, or the
   // browser would navigate to the dropped file.
   function overUpload(e: ReactDragEvent) {
-    if (!isOsFileDrag(e.dataTransfer.types, dragging !== null)) return
+    // A row that unmounts mid-drag never fires `dragend`; a drag that does not
+    // carry the tree marker proves the slot is stale.
+    if (treeDragging !== null && !e.dataTransfer.types.includes(TREE_MOVE_TYPE)) endTreeDrag()
+    if (!isOsFileDrag(e.dataTransfer.types, dragging !== null || treeDragging !== null)) return
     e.preventDefault()
     e.dataTransfer.dropEffect = 'copy'
     setDropDir(dropTarget(e.target))
   }
 
   function dropUpload(e: ReactDragEvent) {
-    if (!isOsFileDrag(e.dataTransfer.types, dragging !== null)) return
+    if (!isOsFileDrag(e.dataTransfer.types, dragging !== null || treeDragging !== null)) return
     e.preventDefault()
     setDropDir(null)
     // Read now: the item list is emptied once the handler returns.
@@ -5457,11 +5665,71 @@ export function FilesView({ projectId }: { projectId: number }) {
     void uploadFiles(dropTarget(e.target), dropped.files, dropped.folders)
   }
 
+  /** Ends an internal tree-row drag, wherever it ended: dropped, cancelled,
+   *  or abandoned. Clears the slot, the highlight and any hover-expand timer. */
+  function endTreeDrag() {
+    treeDragging = null
+    setMoveDir(null)
+    clearHoverExpand()
+  }
+
+  function clearHoverExpand() {
+    if (hoverExpand.current !== null) window.clearTimeout(hoverExpand.current.timer)
+    hoverExpand.current = null
+  }
+
+  // An internal tree-row drag over the tree (naru task 2745). Reads only
+  // `treeDragging`, so a tab drag or an OS file drag is ignored here (the
+  // latter is `overUpload`'s). `dragenter` and `dragover` both, as elsewhere.
+  function overMove(e: ReactDragEvent) {
+    const source = treeDragging
+    if (source === null || search.open) return
+    e.preventDefault()
+    const dest = dropTarget(e.target)
+    const decided = moveTarget(source.path, dest).kind
+    if (decided !== 'move') {
+      // Never highlighted. A no-op refuses the drop outright; an illegal
+      // target takes it, so `moveEntry` can say why nothing moved.
+      e.dataTransfer.dropEffect = decided === 'noop' ? 'none' : 'move'
+      setMoveDir(null)
+      clearHoverExpand()
+      return
+    }
+    e.dataTransfer.dropEffect = 'move'
+    setMoveDir(dest)
+    // Resting on a collapsed folder opens it, so a deep target is reachable
+    // in one drag. One timer, for the folder under the pointer.
+    const row = e.target instanceof Element ? e.target.closest('[data-upload-row="dir"]') : null
+    const hovered = row instanceof HTMLElement ? (row.dataset.uploadPath ?? '') : null
+    if (hoverExpand.current?.path === hovered) return
+    clearHoverExpand()
+    if (hovered !== null && hovered === dest && !expanded.has(hovered)) {
+      hoverExpand.current = {
+        path: hovered,
+        timer: window.setTimeout(() => {
+          hoverExpand.current = null
+          setExpanded((prev) => new Set(prev).add(hovered))
+          ensureChildren(hovered)
+        }, 600),
+      }
+    }
+  }
+
+  function dropMove(e: ReactDragEvent) {
+    const source = treeDragging
+    if (source === null || search.open) return
+    e.preventDefault()
+    const dest = dropTarget(e.target)
+    endTreeDrag()
+    void moveEntry(source.path, source.isDir, dest)
+  }
+
   const treeOps: TreeOps = {
     action: treeAction,
     error: treeActionError,
     busy: treeBusy,
     dropDir,
+    moveDir,
     onCreateStart: startCreate,
     onCreateSubmit: submitCreate,
     onRenameStart: (entry) =>
@@ -5479,6 +5747,14 @@ export function FilesView({ projectId }: { projectId: number }) {
         name: entry.name,
         isDir: entry.is_dir,
       }),
+    onMoveStart: (entry) =>
+      openTreeAction({
+        kind: 'move',
+        path: entry.path,
+        name: entry.name,
+        isDir: entry.is_dir,
+      }),
+    onMoveSubmit: submitMove,
     onDeleteConfirm: confirmDeleteEntry,
     onCancel: cancelTreeAction,
     onDownload: (entry) => {
@@ -5487,8 +5763,18 @@ export function FilesView({ projectId }: { projectId: number }) {
         if (message !== null) setDownloadError({ path: entry.path, message })
       })
     },
-    onFileDragStart: (e, path) =>
-      setDragOutData(e.dataTransfer, location.origin, projectId, path),
+    // One dragstart per row: a file row keeps its drag-out payloads (copy to
+    // the desktop) and `setDragOutData` leaves `effectAllowed` at `copyMove`,
+    // which also permits the internal move; a folder row has nothing to hand
+    // the desktop, so it is move-only.
+    onRowDragStart: (e, entry) => {
+      cancelTreeAction()
+      treeDragging = { path: entry.path, isDir: entry.is_dir }
+      if (entry.is_dir) e.dataTransfer.effectAllowed = 'move'
+      else setDragOutData(e.dataTransfer, location.origin, projectId, entry.path)
+      e.dataTransfer.setData(TREE_MOVE_TYPE, entry.path)
+    },
+    onRowDragEnd: endTreeDrag,
     downloadError,
   }
 
@@ -5719,10 +6005,20 @@ export function FilesView({ projectId }: { projectId: number }) {
             rule that hides either, so the flag cannot leak downward. */}
         <div
           className={`files-tree-pane${treeCollapsed ? ' collapsed' : ''}${
+            moveDir === '' ? ' move-root' : ''
+          }${
             treeResizing ? ' resizing' : ''
           }${treeOpen ? '' : ' files-tree-collapsed'}`}
           ref={treeRef}
           style={{ '--files-tree-width': `${treeWidth}px` } as CSSProperties}
+          onDragEnter={overMove}
+          onDragOver={overMove}
+          onDragLeave={(e) => {
+            if (e.relatedTarget instanceof Node && e.currentTarget.contains(e.relatedTarget)) return
+            setMoveDir(null)
+            clearHoverExpand()
+          }}
+          onDrop={dropMove}
         >
           {/* Header rail above the tree: the root's own `+` beside the
               collapse toggle, since the root has no row of its own to hang
@@ -5732,6 +6028,12 @@ export function FilesView({ projectId }: { projectId: number }) {
               parent=""
               label="New file in the project root"
               ops={treeOps}
+            />
+            <NewFileButton
+              parent=""
+              label="New folder in the project root"
+              ops={treeOps}
+              folder
             />
             <UploadButton onPick={(files) => void uploadFiles('', files, 0)} />
             {/* The mouse route to the same panel Cmd/Ctrl+Shift+F opens, and
@@ -5806,6 +6108,10 @@ export function FilesView({ projectId }: { projectId: number }) {
             />
           ) : (
           <ul className="files-tree">
+            {/* A failed drag-move has no open row to show its message in. */}
+            {treeActionError !== null && treeAction === null && (
+              <li className="files-tree-note error">{treeActionError}</li>
+            )}
             {treeOps.action?.kind === 'create' &&
               treeOps.action.parent === '' && (
                 <NewFileRow depth={0} ops={treeOps} />

@@ -4453,6 +4453,15 @@ fn router(state: AppState) -> Router {
         // gate like the attachments upload; `require_agent_access` like every
         // other write under `local_path`; and its own body limit, so an
         // over-cap file is `core::files`' JSON 422 rather than a bare 413.
+        // Moving an entry to another directory of the tree, and creating an
+        // empty folder in it (naru task 2745). The move is a sibling of the
+        // rename rather than a field on it, so the rename's body still cannot
+        // express a move. Both are `require_agent_access` mutations.
+        .route(
+            "/api/projects/{id}/files/entry/move",
+            post(move_project_file_entry),
+        )
+        .route("/api/projects/{id}/files/dir", post(create_project_dir))
         .route(
             "/api/projects/{id}/files/upload",
             post(upload_project_file).layer(DefaultBodyLimit::max(FILES_UPLOAD_BODY_LIMIT)),
@@ -11808,6 +11817,139 @@ async fn delete_project_file_entry(
 }
 
 #[derive(Deserialize)]
+struct FilesDirCreate {
+    path: String,
+}
+
+/// Files tab new folder (naru task 2745) — `POST /api/projects/{id}/files/dir`,
+/// body `{path}`, echoing the `FileTreeEntry` of the empty directory created.
+/// `create_project_file` for a folder: the same [`require_agent_access`] gate,
+/// the same error mapping (`NotFound` → 404, `Validation` → 422, `Conflict` →
+/// 409) and the same tree-cache eviction for the level it landed in. Its own
+/// route rather than a flag on the content POST, whose response is a file's
+/// content view.
+async fn create_project_dir(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(body): Json<FilesDirCreate>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let not_found = || ApiError {
+        status: StatusCode::NOT_FOUND,
+        code: "not_found",
+        message: format!("folder not found: {}", body.path),
+    };
+    let (path, is_dir) = project_files_root(&state, id).await?;
+    let (Some(root), true) = (path, is_dir) else {
+        return Err(not_found());
+    };
+    let create_root = root.clone();
+    let create_rel = body.path.clone();
+    let created =
+        tokio::task::spawn_blocking(move || files::create_tree_dir(&create_root, &create_rel))
+            .await
+            .unwrap_or(Err(files::CreateFileError::NotFound));
+    let entry = match created {
+        Ok(entry) => entry,
+        Err(files::CreateFileError::NotFound) => return Err(not_found()),
+        Err(files::CreateFileError::Validation(message)) => {
+            return Err(ApiError {
+                status: StatusCode::UNPROCESSABLE_ENTITY,
+                code: "validation",
+                message: message.into(),
+            });
+        }
+        Err(files::CreateFileError::Conflict) => {
+            return Err(ApiError {
+                status: StatusCode::CONFLICT,
+                code: "conflict",
+                message: format!("already exists: {}", body.path),
+            });
+        }
+    };
+    evict_files_tree_level(&state, &root, &entry.path);
+    Ok(Json(entry).into_response())
+}
+
+#[derive(Deserialize)]
+struct FilesEntryMove {
+    path: String,
+    dir: String,
+}
+
+/// Files tab move (naru task 2745) — `POST /api/projects/{id}/files/entry/move`,
+/// body `{path, dir}`, echoing the `FileTreeEntry` the entry became. `dir` is
+/// the destination DIRECTORY (`""` for the root), never a destination path: the
+/// entry keeps its name.
+///
+/// A sibling route rather than an optional field on the rename PATCH, so that
+/// route's body and its "cannot express a move" guarantee stay exactly as they
+/// were (see `core::files::move_path`). Same [`require_agent_access`] gate and
+/// Content-Type gate as every other write under `local_path`.
+///
+/// `NotFound` → 404 (either end doesn't resolve or isn't a listed directory,
+/// the source is missing, or the rename failed), `Validation` → 422 (the root
+/// as source, already in that folder, a folder into itself), `Conflict` → 409
+/// (the name is taken in `dir`; nothing is overwritten or merged),
+/// `CrossDevice` → 422. Both the level the entry left and the one it joined
+/// are evicted from the tree cache.
+async fn move_project_file_entry(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(body): Json<FilesEntryMove>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let not_found = || ApiError {
+        status: StatusCode::NOT_FOUND,
+        code: "not_found",
+        message: format!("file or folder not found: {} -> {}", body.path, body.dir),
+    };
+    let validation = |message: &str| ApiError {
+        status: StatusCode::UNPROCESSABLE_ENTITY,
+        code: "validation",
+        message: message.into(),
+    };
+    let (path, is_dir) = project_files_root(&state, id).await?;
+    let (Some(root), true) = (path, is_dir) else {
+        return Err(not_found());
+    };
+    let move_root = root.clone();
+    let move_rel = body.path.clone();
+    let move_dir = body.dir.clone();
+    let moved =
+        tokio::task::spawn_blocking(move || files::move_path(&move_root, &move_rel, &move_dir))
+            .await
+            .unwrap_or(Err(files::MovePathError::NotFound));
+    let entry = match moved {
+        Ok(entry) => entry,
+        Err(files::MovePathError::NotFound) => return Err(not_found()),
+        Err(files::MovePathError::Validation(message)) => return Err(validation(message)),
+        Err(files::MovePathError::CrossDevice) => {
+            return Err(validation(
+                "cannot move to a folder on a different filesystem",
+            ));
+        }
+        Err(files::MovePathError::Conflict) => {
+            return Err(ApiError {
+                status: StatusCode::CONFLICT,
+                code: "conflict",
+                message: format!(
+                    "already exists: {}",
+                    body.path.rsplit('/').next().unwrap_or(&body.path)
+                ),
+            });
+        }
+    };
+    evict_files_tree_level(&state, &root, &body.path);
+    evict_files_tree_level(&state, &root, &entry.path);
+    Ok(Json(entry).into_response())
+}
+
+#[derive(Deserialize)]
 struct FsDirsQuery {
     path: Option<String>,
 }
@@ -16912,6 +17054,293 @@ mod tests {
         let cache = state.files_tree_cache.lock().unwrap();
         assert_eq!(cache.len(), 1);
         assert!(cache.keys().all(|(_, rel)| rel.is_empty()));
+    }
+
+    // --- Files tab: POST /files/dir + /files/entry/move (naru task 2745) ----
+
+    async fn move_entry(
+        state: &AppState,
+        peer: SocketAddr,
+        id: i64,
+        path: &str,
+        dir: &str,
+    ) -> ApiResult<Response> {
+        move_project_file_entry(
+            State(state.clone()),
+            ConnectInfo(peer),
+            loopback_agent_headers(),
+            Path(id),
+            Json(FilesEntryMove {
+                path: path.to_string(),
+                dir: dir.to_string(),
+            }),
+        )
+        .await
+    }
+
+    async fn create_dir_entry(
+        state: &AppState,
+        peer: SocketAddr,
+        id: i64,
+        path: &str,
+    ) -> ApiResult<Response> {
+        create_project_dir(
+            State(state.clone()),
+            ConnectInfo(peer),
+            loopback_agent_headers(),
+            Path(id),
+            Json(FilesDirCreate {
+                path: path.to_string(),
+            }),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn move_files_entry_moves_a_file_and_a_directory_and_echoes_them() {
+        let (dir, state) = test_state();
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(root.join("src/nested")).unwrap();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join("a.txt"), "a").unwrap();
+        std::fs::write(root.join("src/nested/deep.txt"), "still here").unwrap();
+        let root_str = root.to_str().unwrap().to_string();
+        let id = new_project(&state, Some(&root_str));
+
+        let resp = move_entry(&state, loopback(), id, "a.txt", "docs")
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+        assert_eq!(body["name"], "a.txt");
+        assert_eq!(body["path"], "docs/a.txt");
+        assert_eq!(body["is_dir"], false);
+        assert!(!root.join("a.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(root.join("docs/a.txt")).unwrap(),
+            "a"
+        );
+
+        let body = json_body(
+            move_entry(&state, loopback(), id, "src", "docs")
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(body["path"], "docs/src");
+        assert_eq!(body["is_dir"], true);
+        assert_eq!(
+            std::fs::read_to_string(root.join("docs/src/nested/deep.txt")).unwrap(),
+            "still here"
+        );
+
+        // And back out to the root.
+        let body = json_body(
+            move_entry(&state, loopback(), id, "docs/a.txt", "")
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(body["path"], "a.txt");
+    }
+
+    #[tokio::test]
+    async fn move_files_entry_maps_not_found_validation_and_conflict() {
+        let (dir, state) = test_state();
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(root.join("src/deep")).unwrap();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::create_dir_all(root.join("node_modules")).unwrap();
+        std::fs::create_dir_all(dir.path().join("outside")).unwrap();
+        std::fs::write(dir.path().join("secret.txt"), "top secret").unwrap();
+        std::fs::write(root.join("a.txt"), "a").unwrap();
+        std::fs::write(root.join("docs/a.txt"), "keep me").unwrap();
+        let root_str = root.to_str().unwrap().to_string();
+        let id = new_project(&state, Some(&root_str));
+
+        for (path, dest, expect_status, expect_code) in [
+            // Traversal on either path.
+            ("../secret.txt", "docs", StatusCode::NOT_FOUND, "not_found"),
+            ("a.txt", "../outside", StatusCode::NOT_FOUND, "not_found"),
+            ("a.txt", "src/../..", StatusCode::NOT_FOUND, "not_found"),
+            ("nope.txt", "docs", StatusCode::NOT_FOUND, "not_found"),
+            // Not an existing listed directory.
+            ("a.txt", "missing", StatusCode::NOT_FOUND, "not_found"),
+            ("src", "a.txt", StatusCode::NOT_FOUND, "not_found"),
+            ("a.txt", "node_modules", StatusCode::NOT_FOUND, "not_found"),
+            ("node_modules", "docs", StatusCode::NOT_FOUND, "not_found"),
+            // The project folder itself is not an entry of its own tree.
+            ("", "docs", StatusCode::UNPROCESSABLE_ENTITY, "validation"),
+            (".", "docs", StatusCode::UNPROCESSABLE_ENTITY, "validation"),
+            // Into itself, into its own subtree, and where it already is.
+            ("src", "src", StatusCode::UNPROCESSABLE_ENTITY, "validation"),
+            (
+                "src",
+                "src/deep",
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "validation",
+            ),
+            ("a.txt", "", StatusCode::UNPROCESSABLE_ENTITY, "validation"),
+            ("a.txt", "docs", StatusCode::CONFLICT, "conflict"),
+        ] {
+            let err = move_entry(&state, loopback(), id, path, dest)
+                .await
+                .unwrap_err();
+            assert_eq!(err.status, expect_status, "{path:?} -> {dest:?}");
+            assert_eq!(err.code, expect_code, "{path:?} -> {dest:?}");
+        }
+        assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "a");
+        assert_eq!(
+            std::fs::read_to_string(root.join("docs/a.txt")).unwrap(),
+            "keep me"
+        );
+        assert!(root.join("src/deep").is_dir());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("secret.txt")).unwrap(),
+            "top secret"
+        );
+        assert_eq!(
+            std::fs::read_dir(dir.path().join("outside"))
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn create_files_dir_creates_a_folder_and_maps_its_errors() {
+        let (dir, state) = test_state();
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("a.txt"), "a").unwrap();
+        let root_str = root.to_str().unwrap().to_string();
+        let id = new_project(&state, Some(&root_str));
+
+        let resp = create_dir_entry(&state, loopback(), id, "src/new")
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+        assert_eq!(body["name"], "new");
+        assert_eq!(body["path"], "src/new");
+        assert_eq!(body["is_dir"], true);
+        assert!(root.join("src/new").is_dir());
+
+        for (path, expect_status, expect_code) in [
+            ("../escaped", StatusCode::NOT_FOUND, "not_found"),
+            ("missing/new", StatusCode::NOT_FOUND, "not_found"),
+            ("a.txt/new", StatusCode::NOT_FOUND, "not_found"),
+            ("", StatusCode::UNPROCESSABLE_ENTITY, "validation"),
+            ("src/..", StatusCode::UNPROCESSABLE_ENTITY, "validation"),
+            (
+                "node_modules",
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "validation",
+            ),
+            ("src", StatusCode::CONFLICT, "conflict"),
+            ("a.txt", StatusCode::CONFLICT, "conflict"),
+        ] {
+            let err = create_dir_entry(&state, loopback(), id, path)
+                .await
+                .unwrap_err();
+            assert_eq!(err.status, expect_status, "{path:?}");
+            assert_eq!(err.code, expect_code, "{path:?}");
+        }
+        assert!(!dir.path().join("escaped").exists());
+        assert!(!root.join("node_modules").exists());
+    }
+
+    #[tokio::test]
+    async fn files_dir_and_move_reject_a_non_loopback_peer_in_default_mode() {
+        let (dir, state) = test_state();
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join("a.txt"), "hi").unwrap();
+        let root_str = root.to_str().unwrap().to_string();
+        let id = new_project(&state, Some(&root_str));
+
+        let err = move_entry(&state, lan_peer(), id, "a.txt", "docs")
+            .await
+            .unwrap_err();
+        assert!(err.status.is_client_error());
+        let err = create_dir_entry(&state, lan_peer(), id, "new")
+            .await
+            .unwrap_err();
+        assert!(err.status.is_client_error());
+        assert!(root.join("a.txt").exists());
+        assert!(!root.join("docs/a.txt").exists());
+        assert!(!root.join("new").exists());
+    }
+
+    #[tokio::test]
+    async fn files_dir_and_move_are_not_found_without_a_local_path() {
+        let (_dir, state) = test_state();
+        let id = new_project(&state, None);
+
+        let err = move_entry(&state, loopback(), id, "a.txt", "docs")
+            .await
+            .unwrap_err();
+        assert_eq!(err.status, StatusCode::NOT_FOUND);
+        let err = create_dir_entry(&state, loopback(), id, "new")
+            .await
+            .unwrap_err();
+        assert_eq!(err.status, StatusCode::NOT_FOUND);
+    }
+
+    /// A move changes two levels and a new folder one; the 5s tree cache must
+    /// not outlive either.
+    #[tokio::test]
+    async fn files_dir_and_move_evict_the_tree_cache_for_every_level_they_change() {
+        let (dir, state) = test_state();
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join("src/a.rs"), "x").unwrap();
+        let root_str = root.to_str().unwrap().to_string();
+        let id = new_project(&state, Some(&root_str));
+
+        let names = |state: AppState, level: Option<&str>| {
+            let level = level.map(str::to_string);
+            async move {
+                let resp = get_project_files(
+                    State(state),
+                    Path(id),
+                    Query(FilesTreeQuery { path: level }),
+                )
+                .await
+                .unwrap();
+                json_body(resp).await["tree"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|e| e["name"].as_str().unwrap().to_string())
+                    .collect::<Vec<_>>()
+            }
+        };
+        for level in [None, Some("src"), Some("docs")] {
+            names(state.clone(), level).await;
+        }
+        assert_eq!(state.files_tree_cache.lock().unwrap().len(), 3);
+
+        move_entry(&state, loopback(), id, "src/a.rs", "docs")
+            .await
+            .unwrap();
+        {
+            let cache = state.files_tree_cache.lock().unwrap();
+            assert!(!cache.contains_key(&(root_str.clone(), "src".to_string())));
+            assert!(!cache.contains_key(&(root_str.clone(), "docs".to_string())));
+            assert!(cache.contains_key(&(root_str.clone(), String::new())));
+        }
+        assert!(names(state.clone(), Some("src")).await.is_empty());
+        assert_eq!(names(state.clone(), Some("docs")).await, vec!["a.rs"]);
+
+        create_dir_entry(&state, loopback(), id, "assets")
+            .await
+            .unwrap();
+        assert_eq!(
+            names(state.clone(), None).await,
+            vec!["assets", "docs", "src"]
+        );
     }
 
     // --- Files tab: PATCH/DELETE /files/entry (mesa task 877) ---------------

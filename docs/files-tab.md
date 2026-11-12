@@ -1731,10 +1731,9 @@ showed.
 `new_name` is a **name, never a path**. A rename therefore cannot move anything,
 and the promise is enforced by `single_component` rather than merely intended: a
 `sub/x.txt`, a `../x.txt` or a bare `..` is `Validation` and nothing touches
-disk. Moving an entry is a separate feature with its own open questions — which
-directory the destination is picked from, and what happens to the tabs open under
-the old prefix when it lands somewhere the tree may not even have fetched — and
-none of those are answered by loosening this check.
+disk. Moving an entry is a separate write with its own route and its own containment
+argument ("Moving an entry and creating a folder" below); it was not added by
+loosening this check.
 
 Three more decisions:
 
@@ -1948,6 +1947,167 @@ a whole directory, the split collapse, emptying both panes of a split without
 stranding one, and the no-op). Everything left — the reveal-on-hover, the
 preselected basename, the prompt's focus routing — is khora's, per CLAUDE.md's
 standing split.
+
+## Moving an entry and creating a folder (naru task 2745)
+
+The tree's last two IDE gaps: an entry can be moved to another folder of the
+same project (by drag, or by a typed "Move to..." for the keyboard and the
+phone), and a folder can be created where a file already could. `core::files`
+gains `move_path` and `create_tree_dir`, the API two POST routes. Both echo the
+existing `FileTreeEntry`, so there is no new ts-rs type, no migration, no
+`Store` method and no CLI surface (an agent in a terminal has `mv` and `mkdir`).
+
+This is the write the rename section above left out on purpose, so the
+containment argument is restated here for two paths instead of one.
+
+### The containment story, with two paths
+
+- `pub fn move_path(root, rel, dest_dir) -> Result<FileTreeEntry, MovePathError>`
+  moves the entry at `rel` into the directory `dest_dir` (`""` or `.` for the
+  root) and answers the entry it became.
+- **The caller names a destination DIRECTORY, never a destination path.** The
+  entry keeps its name. So the new location is `dest.join(name)`, where `dest`
+  came out of `safe_path` and `name` is the single component `resolve_entry`
+  already held to `single_component` — `create_file`'s rule exactly. No string
+  the caller wrote is ever joined to a path unchecked, and there is no second
+  name to validate.
+- **Both ends go through `safe_path`.** The source is resolved by
+  `resolve_entry`, unchanged: the PARENT through `safe_path`, the entry itself
+  by name, so a symlink is moved as the link it is and never as its target. The
+  destination is resolved by `listed_dir`, which calls `safe_path` and then
+  holds the answer to one more rule.
+- **Both directories must be ones the tree lists** — `listed_dir`, applied to
+  the source's parent and to the destination. The path `safe_path` returns
+  must equal `root` plus `rel`'s own components, each a plain name that is not
+  in `EXCLUDED_DIRS`. Canonicalizing changes a path only by resolving `.`/`..`
+  or by following a symlink, so that one equality refuses a symlinked directory
+  (which `tree_level` lists as a file leaf, never as a place to put things —
+  whether it points outside the root or inside it), an excluded directory
+  anywhere along the path, and every spelling of a real directory other than
+  the one its rows carry (`src/../docs`, `./docs`, `docs/`, `/docs`). The entry
+  itself may not be an excluded name either. A move never reaches into, or
+  drops something into, a place the tree does not show. All of these are
+  `NotFound`: as far as the tree is concerned there is no such folder.
+- **`rename_path` is untouched.** Its `name` is still one component, its route
+  still cannot express a move, and its tests did not change. That is why the
+  move is a sibling route rather than an optional `dir` on the rename PATCH: a
+  body that *may* carry a destination would turn "this route cannot move
+  anything" from something `single_component` enforces into something that
+  depends on which fields were sent.
+
+The refusals:
+
+- **The root as source** is `Validation` — `resolve_entry`'s rule, as for a
+  rename or a delete.
+- **A folder into itself or anything under it** is `Validation`. It is tested
+  on canonical paths: the destination already is one, and a real directory can
+  be canonicalized without changing what it names, so a different spelling of
+  the same folder on a case-insensitive filesystem is still caught.
+  `Path::starts_with` compares whole components, so `src2` is not inside `src`.
+- **Already in that folder** is `Validation`. The UI never sends it (a drop on
+  the current parent is a no-op with no request); the server says so rather
+  than reporting the entry as a conflict with itself.
+- **A taken name is `Conflict`** and nothing is overwritten or merged — a
+  folder landing on a folder of the same name is a conflict too. The test is
+  `symlink_metadata()`, as for every destination here, so a dangling symlink is
+  a name taken. On a filesystem that folds case or unicode normalisation
+  (macOS), that lookup finds the differently spelled entry, so `Readme.md` onto
+  `README.md` and `café` in its two normal forms conflict instead of clobbering.
+  Like the rename, the checks and the `fs::rename` are separate steps. Something
+  else writing in the folder at the same moment can get between them: a name
+  that appears in the destination is not caught, and neither is a directory
+  swapped for a symlink after it was resolved. Every write on this tab has that
+  window; closing it needs directory-handle syscalls this module does not use.
+- **Another filesystem is `CrossDevice`.** The move is one `fs::rename`, which
+  is atomic and cannot cross a mount. That error is reported (422) and never
+  papered over with a copy and a delete, which would not be atomic and could
+  leave half a folder in each place.
+
+`pub fn create_tree_dir(root, rel) -> Result<FileTreeEntry, CreateFileError>`
+is `create_file` for a folder: the parent through `safe_path`, the final
+component through `single_component`, `fs::create_dir` (one level, never
+`create_dir_all`), a taken name `Conflict`. It is not `create_dir`, which
+serves the unscoped new-project folder picker and has no root to be contained
+within. One rule of its own: an `EXCLUDED_DIRS` name is `Validation`, because
+the folder would be created and then never listed.
+
+### The routes
+
+`POST /api/projects/{id}/files/entry/move` (body `{path, dir}`) and
+`POST /api/projects/{id}/files/dir` (body `{path}`), both echoing the
+`FileTreeEntry`.
+
+- Both carry `require_agent_access` and sit inside the Content-Type gate, like
+  every other write under `local_path`.
+- Error mapping is the rename's: `NotFound` → 404, `Validation(reason)` → 422
+  with the reason verbatim, `Conflict` → 409 `already exists: <name>`.
+  `CrossDevice` is a 422 `validation`.
+- **A move evicts two `files_tree_cache` levels**, the one the entry left and
+  the one it joined; a new folder evicts the one it landed in.
+
+### The tree's controls
+
+- **New folder is the new-file row with a flag.** A `⊞` sits after every `+`
+  (each folder row, and the tree header for the root) and wears
+  `.files-tree-add`. `TreeAction`'s `create` kind gained `folder: boolean`, so
+  it is the same inline naming row and "at most one inline row" stays true by
+  construction. `newFile.ts` validates the name for both (its optional `noun`
+  only words the message), and the server's 404/422/409 land in the same slot.
+  On success the level is re-read; no tab opens.
+- **"Move to..." is a fourth `TreeAction` kind**, `move`, behind a `↪` after
+  the rename `✎` on every row. It opens an input on a row of its own under the
+  entry (the name stays on screen; this edits where it lives, not what it is
+  called), prefilled with the current parent folder and fully selected. Blank
+  or `/` is the project root. Enter submits, Escape and blur cancel.
+  `treeMove.ts`'s `normalizeDestDir` refuses `.`/`..` components and
+  backslashes before any request; a destination equal to the current folder is
+  a plain cancel. This is the route for the keyboard and for the phone tier,
+  where there is no drag.
+- **Every row is draggable, with one `dragstart`.** `onRowDragStart` fills the
+  module slot `treeDragging` (`dataTransfer` data cannot be read during
+  `dragover`, the tab strip's reason for its own `dragging` slot), sets the
+  `application/x-naru-tree-path` type, and for a file row also calls
+  `setDragOutData`, so the same drag still copies to the desktop
+  (`effectAllowed` stays `copyMove`). A folder row is move-only. `dragend` and
+  `drop` both clear the slot, the highlight and the hover timer.
+- **Three drags, told apart by which slot is set.** The tab strips and the
+  split zones read only `dragging`; the move handlers read only
+  `treeDragging`; the upload handlers call `isOsFileDrag(types, dragging !==
+  null || treeDragging !== null)`, so a tree-row drag never raises the upload
+  overlay and an OS file drag never moves anything.
+- **Drop targets are the upload's** (`dropTarget()`): a folder row is that
+  folder, a file row its parent, anywhere else in the tree pane the project
+  root. A legal target gets `.move-target`; a collapsed folder rested on for
+  600 ms opens. `treeMove.ts`'s `moveTarget` decides before any request: the
+  entry's current folder (or a folder onto itself) is a no-op, with
+  `dropEffect` `none` and no request; a folder into its own subtree is not
+  highlighted, and dropping there shows the refusal in the tree's note without
+  asking the server.
+- **After a move, path-keyed state moves as for a rename.** `submitRename`'s
+  re-keying became `applyPathMove(from, to, isDir)`, shared by both:
+  `FileUiState` (so an unsaved draft follows), the tabs through
+  `renameSubtree` and `commit()` (both panes of a split), `childrenCache` and
+  `expanded` with a `loadDir` for each re-keyed level, and the Go to file
+  recents (`quickOpen.ts`'s `remapRecent`). Then the level the entry left and
+  the one it joined are both re-read and the destination is expanded. A drop
+  closes any open inline row first, so a pending rename or delete cannot be
+  left pointing at a path that moved.
+
+### Gates
+
+`core::files` unit tests cover a file and a folder moved (into a folder, and
+back to the root spelled `""` and `.`), every refusal above, traversal and
+absolute paths on either end with the directory beside the root asserted
+untouched, excluded directories as either end, the case/normalisation conflict
+(asserted whichever way the filesystem under test behaves), and the
+`#[cfg(unix)]` symlink cases: a link moved as a name, and a symlinked directory
+refused as a destination and as a source's parent. `src/api.rs` covers the
+handlers (echoes, the error table, a non-loopback peer refused with disk
+untouched, the no-`local_path` rung, both evictions). `scripts/files-check.sh`
+section 6c drives both routes over HTTP and section 7 asserts the 415 and the
+success per serve mode. `treeMove.test.ts` covers the legality check and
+the typed-destination normaliser, `quickOpen.test.ts` the recents mapping and
+`fileTabs.test.ts` a move across directories with both split panes.
 
 ## Delimited files as tables (mesa task 1110)
 

@@ -37,9 +37,18 @@
 #      `overwrite` is sent, the 422s (unusable name, a folder's name, bad
 #      base64, over the cap, over the body limit — all JSON), and the 404s for
 #      a traversal, absolute, missing or non-directory `dir`;
+#   6c. `POST /api/projects/{id}/files/dir` and `.../files/entry/move` (naru
+#      task 2745) — a new empty folder (409 taken, 422 unusable or hidden name,
+#      404 traversal), and moving a file or a folder into another folder of the
+#      tree: the echoed entry, both levels fresh on the next read (the cache
+#      eviction), 409 on a taken name with nothing overwritten or merged, 422
+#      for the root, a folder into itself and a no-op, and 404 for a traversal
+#      on EITHER path, a missing end, a file as destination and an excluded
+#      folder as either end;
 #   7. both serve modes — raw, search and names are reads, reachable in default AND
-#      `--lan`, while the content PATCH, both entry writes and the upload keep their
-#      `require_agent_access` + Content-Type gates in both.
+#      `--lan`, while the content PATCH, both entry writes, the upload, the new
+#      folder and the move keep their `require_agent_access` + Content-Type
+#      gates in both.
 #
 #   8. `GET /api/projects/{id}/files/watch` (naru task 1875) — the NDJSON
 #      change stream: a `ready` line first, a `change` line carrying "" within
@@ -594,6 +603,98 @@ rm -f "$TMP/over-cap" "$TMP/over-limit"
 ok "POST .../files/upload over the cap or over the body limit: 422 validation, as JSON"
 
 # =====================================================================
+# 6c. new folder + move one tree entry (naru task 2745)
+# =====================================================================
+
+api 200 POST "/api/projects/$PROJ/files/dir" '{"path":"mv"}'
+[ "$(jqb .name)" = "mv" ] || fail "new folder: echoed name, got $(jqb .name)"
+[ "$(jqb .path)" = "mv" ] || fail "new folder: echoed path"
+[ "$(jqb .is_dir)" = "true" ] || fail "new folder: is_dir must be true"
+[ -d "$REPO/mv" ] || fail "new folder: it must exist on disk"
+api 200 POST "/api/projects/$PROJ/files/dir" '{"path":"mv/sub"}'
+[ "$(jqb .path)" = "mv/sub" ] || fail "new nested folder: echoed path"
+ok "POST .../files/dir: 200 and the new FileTreeEntry, at the root and nested"
+
+api 409 POST "/api/projects/$PROJ/files/dir" '{"path":"mv"}'
+[ "$(jqb .error.code)" = "conflict" ] || fail "new folder on a taken name: error.code"
+api 409 POST "/api/projects/$PROJ/files/dir" '{"path":"taken.txt"}'
+for BADDIR in '' 'mv/' 'mv/..' '.git' 'mv/target'; do
+  api 422 POST "/api/projects/$PROJ/files/dir" "{\"path\":\"$BADDIR\"}"
+  [ "$(jqb .error.code)" = "validation" ] || fail "new folder '$BADDIR': error.code"
+done
+api 404 POST "/api/projects/$PROJ/files/dir" '{"path":"../escaped-dir"}'
+[ ! -e "$TMP/escaped-dir" ] || fail "new folder traversal: nothing may be created above the root"
+api 404 POST "/api/projects/$PROJ/files/dir" '{"path":"nope/new"}'
+[ ! -e "$REPO/.git" ] && [ ! -e "$REPO/mv/target" ] || fail "new folder: a hidden name must not be created"
+ok "POST .../files/dir: 409 taken, 422 unusable or hidden name, 404 traversal or missing parent"
+
+# Warm both levels first: a move has to evict the one it left AND the one it
+# joined, or the next read lists the entry in the wrong place.
+api 200 POST "/api/projects/$PROJ/files/content" '{"path":"mv-a.txt"}'
+api 200 GET "/api/projects/$PROJ/files"
+api 200 GET "/api/projects/$PROJ/files?path=mv"
+api 200 POST "/api/projects/$PROJ/files/entry/move" '{"path":"mv-a.txt","dir":"mv"}'
+[ "$(jqb .name)" = "mv-a.txt" ] || fail "move file: echoed name"
+[ "$(jqb .path)" = "mv/mv-a.txt" ] || fail "move file: echoed path, got $(jqb .path)"
+[ "$(jqb .is_dir)" = "false" ] || fail "move file: is_dir must be false"
+[ -f "$REPO/mv/mv-a.txt" ] && [ ! -e "$REPO/mv-a.txt" ] || fail "move file: disk must follow"
+api 200 GET "/api/projects/$PROJ/files"
+jqb '.tree[].name' | grep -qx 'mv-a.txt' && fail "move file: the level it left must not list it"
+api 200 GET "/api/projects/$PROJ/files?path=mv"
+jqb '.tree[].name' | grep -qx 'mv-a.txt' || fail "move file: the level it joined must list it"
+ok "POST .../files/entry/move on a file: 200, moved on disk, both levels fresh on the next read"
+
+mkdir -p "$REPO/mvfolder/nested"
+printf 'moved along\n' > "$REPO/mvfolder/nested/deep.txt"
+api 200 POST "/api/projects/$PROJ/files/entry/move" '{"path":"mvfolder","dir":"mv/sub"}'
+[ "$(jqb .path)" = "mv/sub/mvfolder" ] || fail "move folder: echoed path, got $(jqb .path)"
+[ "$(jqb .is_dir)" = "true" ] || fail "move folder: is_dir must be true"
+api 200 GET "/api/projects/$PROJ/files/content?path=mv/sub/mvfolder/nested/deep.txt"
+[ "$(jqb .content)" = "moved along" ] || fail "move folder: its contents must move with it"
+api 200 POST "/api/projects/$PROJ/files/entry/move" '{"path":"mv/sub/mvfolder","dir":""}'
+[ "$(jqb .path)" = "mvfolder" ] || fail "move folder to the root: echoed path"
+ok "POST .../files/entry/move on a folder: 200 with its contents, into a folder and back to the root"
+
+printf 'the other one\n' > "$REPO/mv-a.txt"
+api 409 POST "/api/projects/$PROJ/files/entry/move" '{"path":"mv/mv-a.txt","dir":""}'
+[ "$(jqb .error.code)" = "conflict" ] || fail "move onto a taken name: error.code"
+[ "$(cat "$REPO/mv-a.txt")" = "the other one" ] || fail "move conflict: the existing file must be untouched"
+[ -f "$REPO/mv/mv-a.txt" ] || fail "move conflict: the source must stay where it was"
+mkdir -p "$REPO/mv/mvfolder"
+api 409 POST "/api/projects/$PROJ/files/entry/move" '{"path":"mvfolder","dir":"mv"}'
+[ -f "$REPO/mvfolder/nested/deep.txt" ] && [ ! -e "$REPO/mv/mvfolder/nested" ] ||
+  fail "move conflict: two folders must never be merged"
+ok "POST .../files/entry/move onto a taken name: 409 conflict, nothing overwritten or merged"
+
+# The root is not an entry; a folder cannot go into itself; a no-op is refused.
+for MOVE in '"path":"","dir":"mv"' '"path":".","dir":"mv"' \
+  '"path":"mv","dir":"mv"' '"path":"mv","dir":"mv/sub"' '"path":"mv-a.txt","dir":""'; do
+  api 422 POST "/api/projects/$PROJ/files/entry/move" "{$MOVE}"
+  [ "$(jqb .error.code)" = "validation" ] || fail "move {$MOVE}: error.code"
+done
+[ -d "$REPO/mv/sub" ] || fail "move into itself: the folder must be untouched"
+ok "POST .../files/entry/move of the root, into itself or to where it already is: 422 validation"
+
+# Containment on BOTH paths, and a destination has to be a folder the tree lists.
+for MOVE in '"path":"../outside.png","dir":"mv"' '"path":"mv-a.txt","dir":".."' \
+  '"path":"mv-a.txt","dir":"mv/../.."' "\"path\":\"mv-a.txt\",\"dir\":\"$TMP\"" \
+  '"path":"nope.txt","dir":"mv"' '"path":"mv-a.txt","dir":"nope"' \
+  '"path":"mv-a.txt","dir":"taken.txt"' '"path":"mv-a.txt","dir":"node_modules"' \
+  '"path":"node_modules/dep.js","dir":"mv"'; do
+  api 404 POST "/api/projects/$PROJ/files/entry/move" "{$MOVE}"
+  [ "$(jqb .error.code)" = "not_found" ] || fail "move {$MOVE}: error.code"
+done
+[ -f "$TMP/outside.png" ] || fail "move traversal: the file above the root must be untouched"
+[ ! -e "$TMP/mv-a.txt" ] || fail "move traversal: nothing may land above the root"
+[ ! -e "$REPO/mv/outside.png" ] || fail "move traversal: nothing may be pulled in from above the root"
+[ ! -e "$REPO/node_modules/mv-a.txt" ] && [ -f "$REPO/node_modules/dep.js" ] ||
+  fail "move: an excluded folder is neither a destination nor a source"
+ok "POST .../files/entry/move with a traversal, a missing end or an unlisted folder: 404 not_found"
+
+# Leave the fixtures as the sections below expect them.
+rm -rf "$REPO/mv" "$REPO/mvfolder" "$REPO/mv-a.txt"
+
+# =====================================================================
 # 7. both serve modes
 # =====================================================================
 #
@@ -687,6 +788,29 @@ check_modes() { # check_modes <label>
   [ "$(cat "$REPO/gate-upload.txt")" = "hi" ] || fail "$label: upload content"
   rm "$REPO/gate-upload.txt"
   ok "$label: POST .../files/upload with JSON from a local page succeeds"
+
+  # The new folder and the move (naru task 2745): the same pairing again, with
+  # a round trip that leaves the fixtures as they were.
+  status=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+    -H 'Content-Type: text/plain' --data '{"path":"gate-dir"}' \
+    "$BASE/api/projects/$PROJ/files/dir")
+  [ "$status" = "415" ] ||
+    fail "$label: POST .../files/dir without a JSON Content-Type must be 415, got $status"
+  [ ! -e "$REPO/gate-dir" ] || fail "$label: a refused new folder must never touch disk"
+  api 200 POST "/api/projects/$PROJ/files/dir" '{"path":"gate-dir"}'
+  status=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+    -H 'Content-Type: text/plain' --data '{"path":"notes.md","dir":"gate-dir"}' \
+    "$BASE/api/projects/$PROJ/files/entry/move")
+  [ "$status" = "415" ] ||
+    fail "$label: POST .../files/entry/move without a JSON Content-Type must be 415, got $status"
+  [ -f "$REPO/notes.md" ] || fail "$label: a refused move must never touch disk"
+  ok "$label: POST .../files/dir and .../files/entry/move without a JSON Content-Type are refused (415)"
+  api 200 POST "/api/projects/$PROJ/files/entry/move" '{"path":"notes.md","dir":"gate-dir"}'
+  [ "$(jqb .path)" = "gate-dir/notes.md" ] || fail "$label: move echo path"
+  api 200 POST "/api/projects/$PROJ/files/entry/move" '{"path":"gate-dir/notes.md","dir":""}'
+  api 200 DELETE "/api/projects/$PROJ/files/entry?path=gate-dir"
+  [ -f "$REPO/notes.md" ] && [ ! -e "$REPO/gate-dir" ] || fail "$label: move round trip"
+  ok "$label: POST .../files/dir and .../files/entry/move with JSON from a local page succeed"
 }
 
 check_modes "default mode"

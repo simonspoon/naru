@@ -5177,6 +5177,9 @@ body.live-panel-ratio-resizing {
 @media (hover: none) {
   .files-tree-add {
     opacity: 1;
+    /* A folder row can carry six glyphs (new file, new folder, rename, move,
+       delete…); tighter gaps keep them on a narrow tree. */
+    margin-left: 0.15rem;
   }
 }
 
@@ -5196,6 +5199,17 @@ body.live-panel-ratio-resizing {
 
 .files-layout.upload-root .files-tree-pane,
 .files-layout.upload-root .files-panes {
+  box-shadow: inset 0 0 0 1px var(--cyan), inset 0 0 12px var(--cyan-dim);
+}
+
+/* Moving a tree row by drag (naru task 2745): the folder it would land in, or
+   the whole tree pane for the project root. Same accent as an upload target. */
+.files-tree li.move-target {
+  background: var(--cyan-dim);
+  box-shadow: inset 0 0 0 1px var(--cyan);
+}
+
+.files-tree-pane.move-root {
   box-shadow: inset 0 0 0 1px var(--cyan), inset 0 0 12px var(--cyan-dim);
 }
 

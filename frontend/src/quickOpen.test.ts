@@ -5,6 +5,7 @@ import {
   matchTier,
   rankPaths,
   recordRecent,
+  remapRecent,
   saveRecentFiles,
 } from './quickOpen'
 
@@ -73,6 +74,22 @@ describe('recordRecent', () => {
   it('moves a path to the front without duplicating it, capped', () => {
     expect(recordRecent(['a', 'b', 'c'], 'b')).toEqual(['b', 'a', 'c'])
     expect(recordRecent(['a', 'b'], 'z', 2)).toEqual(['z', 'a'])
+  })
+})
+
+describe('remapRecent', () => {
+  it('re-points a moved file and everything under a moved folder', () => {
+    expect(
+      remapRecent(['src/a.ts', 'src/deep/b.ts', 'src2/c.ts', 'd.ts'], 'src', 'lib/src'),
+    ).toEqual(['lib/src/a.ts', 'lib/src/deep/b.ts', 'src2/c.ts', 'd.ts'])
+    expect(remapRecent(['a.ts', 'b.ts'], 'a.ts', 'x/a.ts')).toEqual(['x/a.ts', 'b.ts'])
+  })
+
+  it('keeps the first place when a path ends up listed twice', () => {
+    expect(remapRecent(['a.ts', 'b.ts', 'x/a.ts'], 'a.ts', 'x/a.ts')).toEqual([
+      'x/a.ts',
+      'b.ts',
+    ])
   })
 })
 

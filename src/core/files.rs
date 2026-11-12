@@ -948,10 +948,10 @@ impl From<EntryError> for RenamePathError {
 /// relative path, and the `is_dir` [`tree_level`] would list it with.
 ///
 /// **Within the same directory only.** `new_name` is one name, never a path, so
-/// this is a rename and not a move — moving an entry is a separate feature with
-/// its own question (which directory, and what happens to the tabs open under
-/// the old prefix), and the single-component check is what makes the narrower
-/// promise enforceable rather than merely intended. Both names go through
+/// this is a rename and not a move — moving an entry is [`move_path`], a
+/// separate write with its own containment argument, and the single-component
+/// check is what makes the narrower promise here enforceable rather than merely
+/// intended. Both names go through
 /// [`single_component`]; the containment story is [`resolve_entry`]'s, i.e.
 /// [`create_file`]'s.
 ///
@@ -1034,6 +1034,168 @@ pub fn delete_path(root: &str, rel: &str) -> Result<FileTreeEntry, DeletePathErr
     };
     removed.map_err(|_| DeletePathError::NotFound)?;
     Ok(destroyed)
+}
+
+/// Resolves `rel` (`""` or `.` for the root) to a directory the tree itself
+/// could have listed, for the two ends of [`move_path`]. It goes through
+/// [`safe_path`] like every other request path, and then holds the answer to
+/// one more rule: the resolved path must be exactly `root` + `rel`'s own
+/// components, each a plain name that is not in [`EXCLUDED_DIRS`].
+/// Canonicalizing changes a path only by resolving `.`/`..` or following a
+/// symlink, so that equality is what refuses a symlinked directory — which
+/// [`tree_level`] lists as a file leaf, never as somewhere to put things — and
+/// any spelling of a real directory other than the one its rows carry.
+fn listed_dir(root: &str, rel: &str) -> Option<PathBuf> {
+    let mut expected = safe_path(root, ".")?;
+    if rel.is_empty() || rel == "." {
+        return expected.is_dir().then_some(expected);
+    }
+    let resolved = safe_path(root, rel)?;
+    for part in rel.split('/') {
+        if single_component(part) != Ok(part) || EXCLUDED_DIRS.contains(&part) {
+            return None;
+        }
+        expected.push(part);
+    }
+    (resolved == expected && resolved.is_dir()).then_some(resolved)
+}
+
+/// Why [`move_path`] rejected the request — [`RenamePathError`]'s three-way
+/// split plus one refusal of its own:
+///   - `NotFound`: the source's parent or the destination doesn't resolve
+///     through [`safe_path`], is not a directory the tree lists (a symlinked or
+///     excluded one), the source entry doesn't exist or is itself an excluded
+///     name, or the `fs::rename` failed.
+///   - `Validation(reason)`: the source is the root itself or not a usable
+///     path, it is already in the destination, or the destination is the
+///     source or inside it.
+///   - `Conflict`: something already holds the entry's name in the destination.
+///   - `CrossDevice`: the two directories are on different filesystems.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MovePathError {
+    NotFound,
+    Validation(&'static str),
+    Conflict,
+    CrossDevice,
+}
+
+impl From<EntryError> for MovePathError {
+    fn from(err: EntryError) -> Self {
+        match err {
+            EntryError::NotFound => MovePathError::NotFound,
+            EntryError::Validation(reason) => MovePathError::Validation(reason),
+        }
+    }
+}
+
+/// Moves the entry at `rel` — a file, a directory or a symlink — into the
+/// directory `dest_dir` (`""` or `.` for the root), keeping its name (naru
+/// task 2745), and returns the entry it became.
+///
+/// A move has two request paths, and **both go through [`safe_path`]**: the
+/// source's parent by [`resolve_entry`] (so a symlink is still moved as the
+/// name it is, never as its target), and the destination by [`listed_dir`].
+/// The caller names a destination DIRECTORY and never a destination path, so
+/// the new location is `dest.join(name)` with `name` the single component
+/// `resolve_entry` already checked — [`create_file`]'s containment rule, with
+/// no path the caller wrote ever joined unchecked. [`rename_path`] is untouched
+/// and still cannot move anything.
+///
+/// Both directories must also be ones the tree lists (see [`listed_dir`]), and
+/// the entry itself may not be an [`EXCLUDED_DIRS`] name: a move never reaches
+/// into, or drops something into, a place the tree does not show.
+///
+/// A directory may not be moved into itself or anything under it. That is
+/// tested on canonical paths — the destination is one already, and a real
+/// directory can be canonicalized without changing what it names — so a
+/// different spelling of the same folder on a case-insensitive filesystem is
+/// still caught.
+///
+/// A taken name is `Conflict` and nothing is replaced or merged, tested with
+/// `symlink_metadata()` like every other destination check here; on a
+/// case-insensitive or normalization-insensitive filesystem that lookup finds
+/// the differently spelled entry, so those conflict too. The move is one
+/// `fs::rename`, so it is atomic, and a destination on another filesystem is
+/// `CrossDevice` — reported, never papered over with a copy and a delete.
+pub fn move_path(root: &str, rel: &str, dest_dir: &str) -> Result<FileTreeEntry, MovePathError> {
+    let entry = resolve_entry(root, rel)?;
+    if EXCLUDED_DIRS.contains(&entry.name) {
+        return Err(MovePathError::NotFound);
+    }
+    let parent = listed_dir(root, entry.parent_rel).ok_or(MovePathError::NotFound)?;
+    let dest_rel = if dest_dir == "." { "" } else { dest_dir };
+    let dest = listed_dir(root, dest_rel).ok_or(MovePathError::NotFound)?;
+    if dest == parent {
+        return Err(MovePathError::Validation("already in that folder"));
+    }
+    if entry.is_dir {
+        let source = fs::canonicalize(&entry.target).map_err(|_| MovePathError::NotFound)?;
+        if dest.starts_with(&source) {
+            return Err(MovePathError::Validation(
+                "cannot move a folder into itself",
+            ));
+        }
+    }
+    let target = dest.join(entry.name);
+    if target.symlink_metadata().is_ok() {
+        return Err(MovePathError::Conflict);
+    }
+    fs::rename(&entry.target, &target).map_err(|e| match e.kind() {
+        std::io::ErrorKind::AlreadyExists => MovePathError::Conflict,
+        std::io::ErrorKind::CrossesDevices => MovePathError::CrossDevice,
+        _ => MovePathError::NotFound,
+    })?;
+    Ok(FileTreeEntry {
+        name: entry.name.to_string(),
+        path: entry_path(dest_rel, entry.name),
+        is_dir: entry.is_dir,
+    })
+}
+
+/// Creates ONE empty directory at `rel` underneath `root` (naru task 2745) —
+/// [`create_file`] for a folder, with its containment rule unchanged: the
+/// PARENT is resolved through [`safe_path`] and must be a directory, and the
+/// final component is held to [`single_component`]. `fs::create_dir`, never
+/// `create_dir_all`: one level only, and a taken name is `Conflict`.
+///
+/// Not [`create_dir`], which serves the unscoped new-project folder picker and
+/// has no root to be contained within.
+///
+/// An [`EXCLUDED_DIRS`] name is `Validation`: the folder would be created and
+/// then never listed, so the row the caller asked for could not appear.
+pub fn create_tree_dir(root: &str, rel: &str) -> Result<FileTreeEntry, CreateFileError> {
+    let (parent_rel, name) = match rel.rsplit_once('/') {
+        Some((parent, name)) => (parent, name),
+        None => ("", rel),
+    };
+    let name = single_component(name).map_err(CreateFileError::Validation)?;
+    if EXCLUDED_DIRS.contains(&name) {
+        return Err(CreateFileError::Validation(
+            "the file tree hides folders with that name",
+        ));
+    }
+    let anchor = if parent_rel.is_empty() {
+        "."
+    } else {
+        parent_rel
+    };
+    let parent = safe_path(root, anchor).ok_or(CreateFileError::NotFound)?;
+    if !parent.is_dir() {
+        return Err(CreateFileError::NotFound);
+    }
+    let target = parent.join(name);
+    if target.symlink_metadata().is_ok() {
+        return Err(CreateFileError::Conflict);
+    }
+    fs::create_dir(&target).map_err(|e| match e.kind() {
+        std::io::ErrorKind::AlreadyExists => CreateFileError::Conflict,
+        _ => CreateFileError::NotFound,
+    })?;
+    Ok(FileTreeEntry {
+        name: name.to_string(),
+        path: entry_path(parent_rel, name),
+        is_dir: true,
+    })
 }
 
 /// Largest file [`upload_file`] will write, in decoded bytes: the attachments
@@ -2947,6 +3109,333 @@ mod tests {
         // The link still points at the untouched original.
         assert_eq!(fs::read_to_string(&target).unwrap(), "top secret");
         assert!(outside.join("secret.txt").exists());
+    }
+
+    // --- move_path + create_tree_dir (naru task 2745) --------------------
+
+    /// `proj/{a.txt, src/{lib.rs, deep/x.txt}, docs/}` under a temp dir, with
+    /// room beside `proj` for things that must stay outside it.
+    fn seed_move_tree() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("proj");
+        fs::create_dir_all(root.join("src/deep")).unwrap();
+        fs::create_dir_all(root.join("docs")).unwrap();
+        fs::write(root.join("a.txt"), "a").unwrap();
+        fs::write(root.join("src/lib.rs"), "lib").unwrap();
+        fs::write(root.join("src/deep/x.txt"), "x").unwrap();
+        (dir, root)
+    }
+
+    #[test]
+    fn move_path_moves_a_file_between_directories_and_echoes_its_new_entry() {
+        let (_dir, root) = seed_move_tree();
+        let r = root.to_str().unwrap();
+
+        let entry = move_path(r, "a.txt", "src/deep").unwrap();
+        assert_eq!(entry.name, "a.txt");
+        assert_eq!(entry.path, "src/deep/a.txt");
+        assert!(!entry.is_dir);
+        assert!(!root.join("a.txt").exists());
+        assert_eq!(
+            fs::read_to_string(root.join("src/deep/a.txt")).unwrap(),
+            "a"
+        );
+
+        // Back out to the root, spelled both ways.
+        let entry = move_path(r, "src/deep/a.txt", "").unwrap();
+        assert_eq!(entry.path, "a.txt");
+        let entry = move_path(r, "src/lib.rs", ".").unwrap();
+        assert_eq!(entry.path, "lib.rs");
+        assert!(root.join("lib.rs").exists());
+    }
+
+    #[test]
+    fn move_path_moves_a_directory_with_its_contents() {
+        let (_dir, root) = seed_move_tree();
+        let r = root.to_str().unwrap();
+
+        let entry = move_path(r, "src", "docs").unwrap();
+        assert_eq!(entry.path, "docs/src");
+        assert!(entry.is_dir);
+        assert!(!root.join("src").exists());
+        assert_eq!(read_file(r, "docs/src/deep/x.txt").unwrap().content, "x");
+    }
+
+    #[test]
+    fn move_path_rejects_the_root_a_noop_and_a_folder_into_itself() {
+        let (_dir, root) = seed_move_tree();
+        let r = root.to_str().unwrap();
+
+        for source in ["", "  ", "."] {
+            assert!(matches!(
+                move_path(r, source, "docs"),
+                Err(MovePathError::Validation(_))
+            ));
+        }
+        // Already there.
+        assert_eq!(
+            move_path(r, "a.txt", ""),
+            Err(MovePathError::Validation("already in that folder"))
+        );
+        assert_eq!(
+            move_path(r, "src/lib.rs", "src"),
+            Err(MovePathError::Validation("already in that folder"))
+        );
+        // Onto itself, and into its own subtree.
+        for dest in ["src", "src/deep"] {
+            assert_eq!(
+                move_path(r, "src", dest),
+                Err(MovePathError::Validation(
+                    "cannot move a folder into itself"
+                ))
+            );
+        }
+        // A sibling that merely shares the prefix is a different folder.
+        fs::create_dir_all(root.join("src2")).unwrap();
+        assert_eq!(move_path(r, "src", "src2").unwrap().path, "src2/src");
+        assert!(root.join("src2/src/deep/x.txt").exists());
+    }
+
+    #[test]
+    fn move_path_conflicts_on_a_taken_name_and_never_overwrites_or_merges() {
+        let (_dir, root) = seed_move_tree();
+        let r = root.to_str().unwrap();
+        fs::write(root.join("docs/a.txt"), "the other a").unwrap();
+        fs::create_dir_all(root.join("docs/src")).unwrap();
+        fs::write(root.join("docs/src/keep.txt"), "keep").unwrap();
+
+        assert_eq!(move_path(r, "a.txt", "docs"), Err(MovePathError::Conflict));
+        assert_eq!(fs::read_to_string(root.join("a.txt")).unwrap(), "a");
+        assert_eq!(
+            fs::read_to_string(root.join("docs/a.txt")).unwrap(),
+            "the other a"
+        );
+        // A directory landing on a directory is a conflict, not a merge.
+        assert_eq!(move_path(r, "src", "docs"), Err(MovePathError::Conflict));
+        assert!(root.join("src/lib.rs").exists());
+        assert!(root.join("docs/src/keep.txt").exists());
+        assert!(!root.join("docs/src/lib.rs").exists());
+    }
+
+    /// On a filesystem that folds case or unicode normalisation (macOS), a
+    /// differently spelled name in the destination is the same name: the move
+    /// conflicts instead of clobbering it. Where the filesystem keeps them
+    /// apart they are two files and the move is an ordinary one.
+    #[test]
+    fn move_path_conflicts_on_a_name_the_filesystem_treats_as_taken() {
+        // (source name, name already in the destination)
+        for (name, taken) in [
+            ("Readme.md", "README.md"),
+            ("caf\u{e9}.txt", "cafe\u{301}.txt"),
+        ] {
+            let (_dir, root) = seed_move_tree();
+            let r = root.to_str().unwrap();
+            fs::write(root.join("docs").join(taken), "original").unwrap();
+            let folds = root.join("docs").join(name).symlink_metadata().is_ok();
+            fs::write(root.join(name), "incoming").unwrap();
+
+            let moved = move_path(r, name, "docs");
+            if folds {
+                assert_eq!(moved, Err(MovePathError::Conflict));
+                assert_eq!(fs::read_to_string(root.join(name)).unwrap(), "incoming");
+            } else {
+                assert_eq!(moved.unwrap().path, format!("docs/{name}"));
+            }
+            assert_eq!(
+                fs::read_to_string(root.join("docs").join(taken)).unwrap(),
+                "original"
+            );
+        }
+    }
+
+    #[test]
+    fn move_path_not_found_for_traversal_absolute_and_missing_on_either_end() {
+        let (dir, root) = seed_move_tree();
+        let r = root.to_str().unwrap();
+        let outside = dir.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("secret.txt"), "top secret").unwrap();
+        let outside_abs = outside.to_str().unwrap().to_string();
+
+        // Source.
+        for source in [
+            "../outside/secret.txt".to_string(),
+            "src/../../outside/secret.txt".to_string(),
+            format!("{outside_abs}/secret.txt"),
+            "missing.txt".to_string(),
+            "nope/a.txt".to_string(),
+        ] {
+            assert_eq!(
+                move_path(r, &source, "docs"),
+                Err(MovePathError::NotFound),
+                "source {source:?}"
+            );
+        }
+        // Destination: outside, a spelling the tree would never hand out, a
+        // file, and a folder that is not there.
+        for dest in [
+            "../outside",
+            "..",
+            outside_abs.as_str(),
+            "src/..",
+            "src/../docs",
+            "./docs",
+            "docs/",
+            "/docs",
+            "src//deep",
+            "a.txt",
+            "missing",
+        ] {
+            assert_eq!(
+                move_path(r, "src/lib.rs", dest),
+                Err(MovePathError::NotFound),
+                "dest {dest:?}"
+            );
+        }
+        assert_eq!(
+            fs::read_to_string(outside.join("secret.txt")).unwrap(),
+            "top secret"
+        );
+        assert_eq!(fs::read_dir(&outside).unwrap().count(), 1);
+        assert!(root.join("src/lib.rs").exists());
+    }
+
+    #[test]
+    fn move_path_not_found_for_excluded_directories_on_either_end() {
+        let (_dir, root) = seed_move_tree();
+        let r = root.to_str().unwrap();
+        fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
+        fs::write(root.join("node_modules/pkg/index.js"), "js").unwrap();
+        fs::create_dir_all(root.join("src/target")).unwrap();
+
+        for dest in ["node_modules", "node_modules/pkg", "src/target"] {
+            assert_eq!(
+                move_path(r, "a.txt", dest),
+                Err(MovePathError::NotFound),
+                "dest {dest:?}"
+            );
+        }
+        for source in [
+            "node_modules",
+            "node_modules/pkg",
+            "node_modules/pkg/index.js",
+        ] {
+            assert_eq!(
+                move_path(r, source, "docs"),
+                Err(MovePathError::NotFound),
+                "source {source:?}"
+            );
+        }
+        assert!(root.join("a.txt").exists());
+        assert!(root.join("node_modules/pkg/index.js").exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn move_path_moves_a_symlink_as_a_name_and_refuses_symlinked_directories() {
+        let (dir, root) = seed_move_tree();
+        let r = root.to_str().unwrap();
+        let outside = dir.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("secret.txt"), "top secret").unwrap();
+        symlink(outside.join("secret.txt"), root.join("link.txt")).unwrap();
+        symlink(&outside, root.join("escape")).unwrap();
+        symlink(root.join("docs"), root.join("inner")).unwrap();
+
+        // A symlink is a row, and is moved as the link it is.
+        let entry = move_path(r, "link.txt", "docs").unwrap();
+        assert_eq!(entry.path, "docs/link.txt");
+        assert!(!entry.is_dir);
+        assert!(
+            root.join("docs/link.txt")
+                .symlink_metadata()
+                .unwrap()
+                .is_symlink()
+        );
+        assert_eq!(
+            fs::read_to_string(outside.join("secret.txt")).unwrap(),
+            "top secret"
+        );
+
+        // A symlinked directory is a file leaf in the tree, never a
+        // destination — whether it points outside the root or inside it —
+        // and never a place to move something out of.
+        for dest in ["escape", "inner"] {
+            assert_eq!(
+                move_path(r, "a.txt", dest),
+                Err(MovePathError::NotFound),
+                "dest {dest:?}"
+            );
+        }
+        assert_eq!(
+            move_path(r, "escape/secret.txt", "docs"),
+            Err(MovePathError::NotFound)
+        );
+        assert_eq!(
+            move_path(r, "inner/link.txt", "src"),
+            Err(MovePathError::NotFound)
+        );
+        assert!(root.join("a.txt").exists());
+        assert_eq!(fs::read_dir(&outside).unwrap().count(), 1);
+
+        // The link to a directory itself moves like any other leaf, even into
+        // the directory it points at.
+        let entry = move_path(r, "inner", "docs").unwrap();
+        assert_eq!(entry.path, "docs/inner");
+        assert!(!entry.is_dir);
+    }
+
+    #[test]
+    fn create_tree_dir_makes_one_empty_directory_and_echoes_its_entry() {
+        let (_dir, root) = seed_move_tree();
+        let r = root.to_str().unwrap();
+
+        let entry = create_tree_dir(r, "  assets  ").unwrap();
+        assert_eq!(entry.name, "assets");
+        assert_eq!(entry.path, "assets");
+        assert!(entry.is_dir);
+        assert!(root.join("assets").is_dir());
+
+        let entry = create_tree_dir(r, "src/deep/new").unwrap();
+        assert_eq!(entry.path, "src/deep/new");
+        assert!(root.join("src/deep/new").is_dir());
+        assert_eq!(tree_level(r, "src/deep/new").unwrap().0.len(), 0);
+    }
+
+    #[test]
+    fn create_tree_dir_rejects_bad_names_taken_names_and_bad_parents() {
+        let (dir, root) = seed_move_tree();
+        let r = root.to_str().unwrap();
+
+        for rel in ["", "  ", ".", "..", "src/", "src/..", "a\\b", "nul\0"] {
+            assert!(
+                matches!(create_tree_dir(r, rel), Err(CreateFileError::Validation(_))),
+                "rel {rel:?}"
+            );
+        }
+        for rel in ["node_modules", "src/target", ".git"] {
+            assert_eq!(
+                create_tree_dir(r, rel),
+                Err(CreateFileError::Validation(
+                    "the file tree hides folders with that name"
+                )),
+                "rel {rel:?}"
+            );
+        }
+        for rel in ["src", "a.txt", "src/lib.rs"] {
+            assert_eq!(create_tree_dir(r, rel), Err(CreateFileError::Conflict));
+        }
+        // One level only, inside the root only, and only inside a directory.
+        let outside = format!("{}/outside", dir.path().to_str().unwrap());
+        for rel in ["missing/new", "../new", "a.txt/new", outside.as_str()] {
+            assert_eq!(
+                create_tree_dir(r, rel),
+                Err(CreateFileError::NotFound),
+                "rel {rel:?}"
+            );
+        }
+        assert!(!dir.path().join("new").exists());
+        assert!(!dir.path().join("outside").exists());
     }
 
     // --- upload_file (naru task 2732) -----------------------------------

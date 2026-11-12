@@ -27,13 +27,18 @@ export type NewFileName =
  * is what will be created. An empty result, `.`/`..`, and any `/`, `\` or NUL
  * are rejected: they are the ways a single name stops being a single name, and
  * the reason `parent.join(name)` provably stays inside `parent`. A leading dot
- * is fine (`.env` is a file, not a traversal).
+ * is fine (`.env` is a file, not a traversal). `noun` only words the messages
+ * (a new folder is named by the same rules).
  */
-export function newFilePath(parent: string, name: string): NewFileName {
+export function newFilePath(
+  parent: string,
+  name: string,
+  noun: 'file' | 'folder' = 'file',
+): NewFileName {
   const trimmed = name.trim()
-  if (trimmed === '') return { ok: false, reason: 'Enter a file name.' }
+  if (trimmed === '') return { ok: false, reason: `Enter a ${noun} name.` }
   if (trimmed === '.' || trimmed === '..') {
-    return { ok: false, reason: 'A file cannot be named . or ..' }
+    return { ok: false, reason: `A ${noun} cannot be named . or ..` }
   }
   if (
     trimmed.includes('/') ||
@@ -42,7 +47,7 @@ export function newFilePath(parent: string, name: string): NewFileName {
   ) {
     return {
       ok: false,
-      reason: 'Enter a single file name, not a path.',
+      reason: `Enter a single ${noun} name, not a path.`,
     }
   }
   return { ok: true, path: parent === '' ? trimmed : `${parent}/${trimmed}` }

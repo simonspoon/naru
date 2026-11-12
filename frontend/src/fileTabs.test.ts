@@ -160,6 +160,20 @@ describe('renameSubtree', () => {
     assertWellFormed(s)
   })
 
+  it('follows a move across directories, in both panes', () => {
+    // A move is a rename whose parent changed: `src/a.rs` -> `lib/src/a.rs`.
+    let s = ['src/a.rs', 'src/deep/b.rs'].reduce(openFile, emptyTabsState())
+    s = splitPane(s)! // right pane copies the active src/deep/b.rs
+    s = renameSubtree(s, 'src', 'lib/src')
+    expect(s.left.tabs).toEqual(['lib/src/a.rs', 'lib/src/deep/b.rs'])
+    expect(s.right!.tabs).toEqual(['lib/src/deep/b.rs'])
+    expect(s.right!.active).toBe('lib/src/deep/b.rs')
+    // …and a single file moved up to the root.
+    s = renameSubtree(s, 'lib/src/a.rs', 'a.rs')
+    expect(s.left.tabs).toEqual(['a.rs', 'lib/src/deep/b.rs'])
+    assertWellFormed(s)
+  })
+
   it('drops the duplicate when a rename lands on an already-open path', () => {
     const s = renameSubtree(three(), 'a.rs', 'c.md')
     expect(s.left.tabs).toEqual(['c.md', 'b.ts'])
