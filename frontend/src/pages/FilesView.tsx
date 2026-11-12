@@ -104,6 +104,18 @@ import {
 import { mediaKindForPath } from '../fileMedia'
 import { resolveMarkdownImageSrc } from '../markdownAssets'
 import { newFilePath } from '../newFile'
+import {
+  SKIPPED,
+  dropHint,
+  isOsFileDrag,
+  progressLabel,
+  readAsBase64,
+  splitDropped,
+  summarizeUploads,
+  uploadSizeProblem,
+  uploadTargetDir,
+  type UploadResult,
+} from '../fileUpload'
 import { loadOpenFiles, saveOpenFiles } from '../openFiles'
 import {
   ApiError,
@@ -118,6 +130,7 @@ import {
   renameProjectFileEntry,
   searchProjectFiles,
   updateProjectFilesContent,
+  uploadProjectFile,
   watchProjectFiles,
 } from '../api'
 import { levelsToRefetch, reconnectDelayMs } from '../filesWatch'
@@ -502,6 +515,7 @@ function ContentPane({
   focused,
   landing,
   imageZoom,
+  reload,
 }: {
   projectId: number
   path: string
@@ -521,10 +535,13 @@ function ContentPane({
   landing: SearchLanding | null
   /** The owning pane's zoom per open image (naru task 2731); see `FilePane`. */
   imageZoom: Map<string, ZoomView | null>
+  /** Bumped when an upload replaces this file on disk (naru task 2732); part
+   * of the fetch key, so the bytes on screen are re-read. */
+  reload: number
 }) {
   const { data, error, refetch } = useFetch(
     () => getProjectFilesContent(projectId, path),
-    `files-content-${projectId}-${path}`,
+    `files-content-${projectId}-${path}-${reload}`,
   )
   // In-flight state for one save, and the error it may leave behind — the only
   // two the tab does not carry (see `FileUiState`).
@@ -2249,6 +2266,9 @@ interface TreeOps {
    *  made) or the server's own 409/422/404, rendered the same way for both. */
   error: string | null
   busy: boolean
+  /** The folder an OS file drag would upload into right now (naru task 2732),
+   *  `''` for the project root, or null when no such drag is over the tab. */
+  dropDir: string | null
   onCreateStart: (parent: string) => void
   onCreateSubmit: (name: string) => void
   onRenameStart: (entry: FileTreeEntry) => void
@@ -2283,6 +2303,42 @@ function NewFileButton({
     >
       +
     </button>
+  )
+}
+
+/** The `↑` beside the root's `+` (naru task 2732): the click route into the
+ * same upload a drop starts, so it works by keyboard and on a phone. The file
+ * input is hidden and driven by the button; it is emptied after every pick,
+ * because picking the same file twice must fire `change` twice. */
+function UploadButton({ onPick }: { onPick: (files: File[]) => void }) {
+  const inputRef = useRef<HTMLInputElement>(null)
+  return (
+    <>
+      <button
+        type="button"
+        className="files-tree-add files-tree-upload"
+        aria-label="Upload files into the project root"
+        title="Upload files (or drop them anywhere on this tab)"
+        onClick={(e) => {
+          e.stopPropagation()
+          inputRef.current?.click()
+        }}
+      >
+        ↑
+      </button>
+      <input
+        ref={inputRef}
+        type="file"
+        multiple
+        hidden
+        className="files-upload-input"
+        onChange={(e) => {
+          const picked = Array.from(e.target.files ?? [])
+          e.target.value = ''
+          onPick(picked)
+        }}
+      />
+    </>
   )
 }
 
@@ -2552,8 +2608,12 @@ function TreeNode({
     return (
       <>
         <li
-          className="files-tree-dir"
+          className={`files-tree-dir${
+            ops.dropDir === entry.path ? ' upload-target' : ''
+          }`}
           style={indent}
+          data-upload-path={entry.path}
+          data-upload-row="dir"
           onClick={() => onToggle(entry)}
         >
           <span className={`files-tree-toggle ${isOpen ? 'open' : ''}`}>
@@ -2630,6 +2690,8 @@ function TreeNode({
           entry.path === selectedPath ? 'selected' : ''
         }`}
         style={indent}
+        data-upload-path={entry.path}
+        data-upload-row="file"
         onClick={() => onSelectFile(entry.path)}
       >
         {renaming ? (
@@ -3358,6 +3420,7 @@ function FilePane({
   pendingClose,
   pendingBulk,
   fileUi,
+  reloads,
   onUi,
   wrap,
   onWrapChange,
@@ -3392,6 +3455,8 @@ function FilePane({
    * (naru task 2730); 0 for none. */
   pendingBulk: number
   fileUi: Map<string, FileUiState>
+  /** Per-path counts of uploads that replaced the file (naru task 2732). */
+  reloads: Record<string, number>
   onUi: (path: string, patch: Partial<FileUiState>) => void
   wrap: boolean
   onWrapChange: (wrap: boolean) => void
@@ -3485,6 +3550,7 @@ function FilePane({
             focused={focused}
             landing={landing?.path === active ? landing : null}
             imageZoom={imageZoom}
+            reload={reloads[active] ?? 0}
           />
         ) : (
           <p className="muted">Select a file to see its content.</p>
@@ -3634,6 +3700,37 @@ export function FilesView({ projectId }: { projectId: number }) {
   const [treeAction, setTreeAction] = useState<TreeAction | null>(null)
   const [treeActionError, setTreeActionError] = useState<string | null>(null)
   const [treeBusy, setTreeBusy] = useState(false)
+  // Uploading (naru task 2732). `dropDir` is where an OS file drag would land
+  // right now; `upload` is the batch in flight (which file, a Replace question
+  // waiting on an answer) or, once it ends, what it left on screen. A ref
+  // marks the batch so a second one can't interleave with it, and holds the
+  // resolver of the Replace question the loop is awaiting.
+  const [dropDir, setDropDir] = useState<string | null>(null)
+  const [upload, setUpload] = useState<{
+    progress: { name: string; index: number; total: number } | null
+    replace: string | null
+    /** Said beside the progress line when a second drop arrives mid-batch. */
+    note: string | null
+    done: { ok: string | null; problems: string[] } | null
+  }>({ progress: null, replace: null, note: null, done: null })
+  const uploading = useRef(false)
+  const replaceAnswer = useRef<((replace: boolean) => void) | null>(null)
+  // Bumped when the project changes or the tab goes away; a batch that started
+  // before the bump stops, rather than finishing against another project's
+  // tree and tabs.
+  const uploadRun = useRef(0)
+  // Paths an upload has replaced, counted — see `ContentPane`'s `reload`.
+  const [reloads, setReloads] = useState<Record<string, number>>({})
+  // A Replace question still open at that point is answered "no", or its loop
+  // would wait forever.
+  useEffect(
+    () => () => {
+      uploadRun.current += 1
+      uploading.current = false
+      replaceAnswer.current?.(false)
+    },
+    [projectId],
+  )
   // The wide-tier tree pane's own width and collapse (mesa task 671), both
   // persisted globally for the Files tab (`filesTreeWidth.ts`). Deliberately
   // independent of `treeOpen` above: that one is the phone tier's control and
@@ -3935,6 +4032,8 @@ export function FilesView({ projectId }: { projectId: number }) {
     setTreeOpen(true)
     setTreeAction(null)
     setTreeActionError(null)
+    setDropDir(null)
+    setUpload({ progress: null, replace: null, note: null, done: null })
     setPendingClose(null)
     setPendingBulk(null)
     setTabMenu(null)
@@ -4362,10 +4461,144 @@ export function FilesView({ projectId }: { projectId: number }) {
     }
   }
 
+  /**
+   * Uploads `files` into `dir`, one at a time (naru task 2732), then re-reads
+   * that level and expands it. Each file is checked client-side first
+   * (`fileUpload.ts`); a 409 raises the Replace question and the loop waits for
+   * its answer before moving on. One file failing never stops the rest — every
+   * outcome is collected and summarised at the end. Exactly one uploaded file
+   * opens in the focused pane, the way a created file does.
+   */
+  async function uploadFiles(dir: string, files: File[], folders: number) {
+    if (files.length === 0 && folders === 0) return
+    if (uploading.current) {
+      setUpload((prev) => ({
+        ...prev,
+        note: 'An upload is already running — drop again when it finishes.',
+      }))
+      return
+    }
+    uploading.current = true
+    const run = uploadRun.current
+    setUpload({ progress: null, replace: null, note: null, done: null })
+    const results: UploadResult[] = []
+    let opened: string | null = null
+    for (const [i, file] of files.entries()) {
+      if (uploadRun.current !== run) return
+      const name = file.name
+      setUpload((prev) => ({
+        ...prev,
+        progress: { name, index: i + 1, total: files.length },
+      }))
+      const named = newFilePath('', name)
+      const tooBig = uploadSizeProblem(file.size)
+      if (!named.ok || tooBig !== null) {
+        const message = !named.ok ? named.reason : (tooBig ?? '')
+        results.push({ name, outcome: 'failed', message })
+        continue
+      }
+      let content: string
+      try {
+        content = await readAsBase64(file)
+      } catch {
+        results.push({ name, outcome: 'failed', message: 'could not be read.' })
+        continue
+      }
+      if (uploadRun.current !== run) return
+      try {
+        let entry: FileTreeEntry
+        try {
+          entry = await uploadProjectFile(projectId, dir, name, content, false)
+        } catch (e) {
+          if (!(e instanceof ApiError && e.status === 409)) throw e
+          if (uploadRun.current !== run) return
+          setUpload((prev) => ({ ...prev, replace: name }))
+          const replace = await new Promise<boolean>((resolve) => {
+            replaceAnswer.current = resolve
+          })
+          replaceAnswer.current = null
+          if (uploadRun.current !== run) return
+          setUpload((prev) => ({ ...prev, replace: null }))
+          if (!replace) {
+            results.push({ name, outcome: 'skipped', message: SKIPPED })
+            continue
+          }
+          entry = await uploadProjectFile(projectId, dir, name, content, true)
+          // The file is open somewhere with the old bytes: re-read it, and
+          // leave edit mode — the person just chose to replace it, and a draft
+          // kept would overwrite the upload on the next save.
+          patchUi(entry.path, { editing: false, draft: '', baseline: '' })
+          setReloads((prev) => ({ ...prev, [entry.path]: (prev[entry.path] ?? 0) + 1 }))
+        }
+        results.push({ name, outcome: 'uploaded' })
+        opened = entry.path
+      } catch (e) {
+        results.push({
+          name,
+          outcome: 'failed',
+          message: e instanceof Error ? e.message : 'upload failed.',
+        })
+      }
+    }
+    if (uploadRun.current !== run) return
+    uploading.current = false
+    if (results.some((r) => r.outcome === 'uploaded')) {
+      if (dir !== '') setExpanded((prev) => new Set(prev).add(dir))
+      reloadLevel(dir)
+    }
+    if (files.length === 1 && opened !== null) {
+      const path = opened
+      commit((prev) => openFile(prev, path))
+      // Same reason the create flow closes the tree: the phone tier stacks it.
+      setTreeOpen(false)
+    }
+    setUpload({
+      progress: null,
+      replace: null,
+      note: null,
+      done: summarizeUploads(results, folders),
+    })
+  }
+
+  /** Where an OS file drag over `target` would land — the row's folder, or the
+   *  project root where it is not over a row. */
+  function dropTarget(target: EventTarget): string {
+    const row = target instanceof Element ? target.closest('[data-upload-path]') : null
+    return uploadTargetDir(
+      row instanceof HTMLElement
+        ? { path: row.dataset.uploadPath ?? '', isDir: row.dataset.uploadRow === 'dir' }
+        : null,
+    )
+  }
+
+  // `dragenter` and `dragover` do the same, as the strips' do. Every OS file
+  // drag over the Files tab is `preventDefault()`ed, target or not, or the
+  // browser would navigate to the dropped file.
+  function overUpload(e: ReactDragEvent) {
+    if (!isOsFileDrag(e.dataTransfer.types, dragging !== null)) return
+    e.preventDefault()
+    e.dataTransfer.dropEffect = 'copy'
+    setDropDir(dropTarget(e.target))
+  }
+
+  function dropUpload(e: ReactDragEvent) {
+    if (!isOsFileDrag(e.dataTransfer.types, dragging !== null)) return
+    e.preventDefault()
+    setDropDir(null)
+    // Read now: the item list is emptied once the handler returns.
+    const items = Array.from(e.dataTransfer.items ?? []).filter((it) => it.kind === 'file')
+    const dropped = splitDropped(
+      Array.from(e.dataTransfer.files),
+      items.map((it) => it.webkitGetAsEntry?.()?.isDirectory),
+    )
+    void uploadFiles(dropTarget(e.target), dropped.files, dropped.folders)
+  }
+
   const treeOps: TreeOps = {
     action: treeAction,
     error: treeActionError,
     busy: treeBusy,
+    dropDir,
     onCreateStart: startCreate,
     onCreateSubmit: submitCreate,
     onRenameStart: (entry) =>
@@ -4396,6 +4629,10 @@ export function FilesView({ projectId }: { projectId: number }) {
   }
 
   function endDrag() {
+    // Cleared here as well as in the tab's `dragend`: a tab that moved panes
+    // was unmounted mid-drag and may never fire one, and a stale slot would
+    // make every later OS file drag look like a tab drag (naru task 2732).
+    dragging = null
     setDragActive(false)
     setMark(null)
     setEdgeArmed(false)
@@ -4450,6 +4687,7 @@ export function FilesView({ projectId }: { projectId: number }) {
           ? pendingClose.path
           : null,
       fileUi,
+      reloads,
       onUi: patchUi,
       wrap,
       onWrapChange: toggleWrap,
@@ -4483,7 +4721,62 @@ export function FilesView({ projectId }: { projectId: number }) {
   }
 
   return (
-    <div className="files-view">
+    <div
+      className={`files-view${dropDir !== null ? ' upload-dragging' : ''}`}
+      onDragEnter={overUpload}
+      onDragOver={overUpload}
+      onDragLeave={(e) => {
+        // Entering a child fires leave on its parent; only leaving the view
+        // (or the window) ends the highlight.
+        if (e.relatedTarget instanceof Node && e.currentTarget.contains(e.relatedTarget)) return
+        setDropDir(null)
+      }}
+      onDrop={dropUpload}
+    >
+      {dropDir !== null && <div className="files-upload-hint">{dropHint(dropDir)}</div>}
+      {upload.progress !== null && (
+        <p className="muted files-upload-progress" role="status">
+          {progressLabel(upload.progress.name, upload.progress.index, upload.progress.total)}
+          {upload.note !== null && <span className="error"> {upload.note}</span>}
+        </p>
+      )}
+      {upload.replace !== null && (
+        <div
+          className="confirm-delete files-upload-replace"
+          role="alert"
+          onKeyDown={(e) => {
+            if (e.key !== 'Escape') return
+            e.preventDefault()
+            e.stopPropagation()
+            replaceAnswer.current?.(false)
+          }}
+        >
+          <span className="confirm-message">Replace {upload.replace}?</span>
+          <button className="danger files-upload-replace-yes" onClick={() => replaceAnswer.current?.(true)}>
+            replace
+          </button>
+          <button autoFocus className="files-upload-replace-no" onClick={() => replaceAnswer.current?.(false)}>
+            cancel
+          </button>
+        </div>
+      )}
+      {upload.progress === null && upload.replace === null && upload.done !== null && (
+        <div className="files-upload-summary" role="status">
+          {upload.done.ok !== null && <span className="muted">{upload.done.ok}</span>}
+          {upload.done.problems.map((problem, i) => (
+            <span key={i} className="error">
+              {problem}
+            </span>
+          ))}
+          <button
+            type="button"
+            className="files-upload-dismiss"
+            onClick={() => setUpload((prev) => ({ ...prev, done: null }))}
+          >
+            dismiss
+          </button>
+        </div>
+      )}
       {data.truncated && (
         <p className="muted files-truncated-note">
           This folder is larger than what's shown here — the tree was capped.
@@ -4493,7 +4786,7 @@ export function FilesView({ projectId }: { projectId: number }) {
           it (task 672): the layout has to render for the root's own `+` to
           exist, and creating the first file in an empty project is exactly
           when it is wanted. */}
-      <div className="files-layout">
+      <div className={`files-layout${dropDir === '' ? ' upload-root' : ''}`}>
         {/* Phone-tier affordance for the collapse above; hidden by CSS at
             every wider tier, where the tree never leaves. Rendered before
             the tree so it stays put as the tree comes and goes, and so the
@@ -4533,6 +4826,7 @@ export function FilesView({ projectId }: { projectId: number }) {
               label="New file in the project root"
               ops={treeOps}
             />
+            <UploadButton onPick={(files) => void uploadFiles('', files, 0)} />
             {/* The mouse route to the same panel Cmd/Ctrl+Shift+F opens, and
                 the control the panel hands the caret back to when it closes.
                 Rendered whether or not the panel is open, so that hand-off

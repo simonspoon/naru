@@ -1847,3 +1847,140 @@ mode — the same exclusion markdown and the CSV table carry, for the same reaso
 (a rendered page has no offsets into `data.content`, and here it is inside a
 frame this page cannot even read); in edit mode it is source again and findable
 like anything else.
+
+## Uploading files into the tree (naru task 2732)
+
+The tab's first way to bring an *existing* file in: drop it on the tree, or pick
+it with the Upload control. `core::files` gains `upload_file`, the API one route,
+and the frontend a pure module (`fileUpload.ts`). No new ts-rs type (the echo is
+the existing `FileTreeEntry`), no migration, no CLI twin (`cp` exists). Folder
+upload, multipart/chunked upload and paste-to-upload are non-goals.
+
+### The route
+
+`POST /api/projects/{id}/files/upload`, body
+`{dir, name, content_base64, overwrite}`, echoing the `FileTreeEntry` written.
+`dir` is a directory of the tree (`""` or `.` for the root); `name` is one name
+inside it, never a path; `overwrite` defaults to `false`.
+
+- **JSON with base64 content, not multipart** — the attachments route's choice,
+  for its reason: a multipart or raw body would need a carve-out from the
+  `Content-Type: application/json` gate that is this API's CSRF guard.
+- **The cap is 25 MiB of decoded bytes** (`files::MAX_UPLOAD_BYTES`, defined as
+  the attachments figure), enforced in `core`. The route carries its own
+  `DefaultBodyLimit` (`FILES_UPLOAD_BODY_LIMIT`, the cap × 4/3 + 1 MiB), so an
+  over-cap file reaches `core` and is refused as a JSON 422; a body past even
+  that limit is a JSON 422 too, because the handler takes its body as a
+  `Result<Json<_>, JsonRejection>`. Neither is ever a bare 413.
+- **Errors**: 404 `not_found` (`dir` doesn't resolve, isn't a directory, the
+  write failed, or the project has no live `local_path`); 422 `validation` (a
+  name that is not one usable component, invalid base64, over the cap, or a
+  *folder* already holding the name — which no flag replaces); 409 `conflict`
+  (a file or symlink holds the name and `overwrite` is not set).
+- **Gate**: `require_agent_access` plus the Content-Type gate, the pairing every
+  write under `local_path` has. The `files_tree_cache` entry for `dir` is
+  evicted before the response, as after every write here.
+
+### Containment and the overwrite
+
+Containment is `create_file`'s rule with nothing added: `dir` goes through
+`safe_path` (so a traversal, an absolute path, a symlinked directory leading
+outside the root and a missing directory are all `NotFound`) and `name` through
+`single_component`, which is what keeps `parent.join(name)` inside `parent`.
+Like every other Files route, this checks containment in the project folder and
+nothing narrower: a directory the tree hides (`EXCLUDED_DIRS`) is not *listed*,
+but a caller naming it by path reaches it here exactly as it does through the
+content routes.
+
+A taken name is never replaced silently, and the write never follows a symlink:
+
+- **Without `overwrite`** an existing entry is `Conflict`, and the file is
+  opened with `create_new`, so a name that appears between the check and the
+  write still conflicts rather than being clobbered (and `O_EXCL` refuses a
+  symlink outright).
+- **With `overwrite`** the bytes go to a temporary `.naru-upload-<pid>-<nanos>`
+  file in the same directory, which is renamed over the name. A rename replaces
+  the *name*: a symlink sitting there is replaced as a link and whatever it
+  points at — possibly outside the root — is never written through, which an
+  in-place `fs::write` would have done. It also means a reader never sees a
+  half-written file. A regular file being replaced keeps its permission bits
+  (an executable script stays executable); the temporary is removed on any
+  failure.
+- **A directory** holding the name is `Validation` with or without the flag.
+
+### Gates
+
+`core::files` unit tests cover binary bytes round-tripping, the root spellings
+and a zero-byte file, every `NotFound` directory shape (including a directory
+symlink that escapes), every non-single-component name, the cap at exactly the
+limit and one byte over, the conflict/overwrite pair with no temporary left
+behind, the directory refusal, the kept mode, and the symlink case (conflict
+without the flag; replaced as a name with it, target untouched). `src/api.rs`
+covers the echo, the whole error table, a non-loopback peer refused in default
+mode with disk untouched, the no-`local_path` rung and the cache eviction.
+`scripts/files-check.sh` section 6b drives the route over HTTP (a PNG compared
+byte for byte, both over-size refusals asserted to be JSON) and section 7
+asserts the 415-without-JSON / success-with pairing in default mode and `--lan`.
+
+### The drop targets and the Upload control
+
+The browser half of the route above. Every decision is a pure function in
+`frontend/src/fileUpload.ts` (tested in `fileUpload.test.ts`); `FilesView.tsx`
+only wires them. The name rules are `newFile.ts`'s `newFilePath`, reused.
+
+- **What is an upload.** A drag whose `dataTransfer.types` includes `"Files"`
+  *and* while the module `dragging` slot is `null`. A tab drag sets only
+  `text/plain` and fills the slot, so it can never be mistaken for one, and the
+  tab strips' and split edge's handlers already return on `dragging === null`,
+  so they ignore an OS drag.
+- **Where a drop lands.** The handlers sit on the `.files-view` root, so every
+  part of the tab accepts. A folder row means that folder, a file row its
+  folder, and anything else — the empty tree area, either content pane, the
+  search panel, the tree pane when collapsed — the project root. Rows carry
+  `data-upload-path` / `data-upload-row`; `uploadTargetDir` decides. Every OS
+  file drag over the tab is `preventDefault()`ed, target or not, so a miss
+  never navigates the browser to the file. The destination is painted
+  (`.upload-target` on the folder row, `.upload-root` on the layout for the
+  root) and named in a click-through `.files-upload-hint`; `dragleave` clears it
+  only when the pointer leaves the view, so entering a child does not flicker.
+- **The Upload control.** A `↑` beside the root's `+` in the tree head
+  (`.files-tree-upload`, always visible, including the phone tier) clicks a
+  hidden `<input type="file" multiple class="files-upload-input">` and runs the
+  same flow as a drop into the root. The input is emptied after every pick so
+  the same file twice still fires `change`. Neither exists on the placeholders
+  (no linked folder, dead folder), which render instead of the layout.
+- **The flow.** Files go one at a time. Each is checked first — a name
+  `newFilePath` refuses, or over `MAX_UPLOAD_BYTES` (25 MiB; zero bytes is
+  fine) — and then read with `FileReader.readAsDataURL`, cutting the prefix
+  (no `btoa`). A **409** raises an inline Replace question
+  (`.files-upload-replace`, the `.confirm-delete` pair, *cancel* autofocused,
+  Escape cancels); *replace* resends with `overwrite: true`, *cancel* records
+  the file as skipped, and the remaining files carry on. Any other failure is
+  recorded with the server's message and the rest still upload. Progress
+  (`.files-upload-progress`) names the file and its place in the batch.
+- **After.** The affected level is reloaded through `reloadLevel` and its folder
+  expanded; exactly one uploaded file opens in the focused pane, as a created
+  file does. What happened stays in `.files-upload-summary` — an "Uploaded N
+  files." line and one error line per file that did not go — until dismissed or
+  the next upload. A second drop mid-batch is refused with a message.
+- **Folders** are out of scope: `webkitGetAsEntry()?.isDirectory` finds them
+  (where the API is missing every entry is treated as a file, and a folder then
+  fails at read time with its own message) and the summary says "Folders cannot
+  be dropped yet." Files dropped alongside still upload.
+- **Replacing an open file.** The watch stream refetches tree levels only, not
+  open content, so a confirmed replace bumps a per-path counter that is part of
+  that tab's content fetch key (`ContentPane`'s `reload`) and the bytes are
+  re-read. An unsaved draft in that file is **discarded** and the tab leaves
+  edit mode: the person answered "Replace", and a draft kept would write over
+  the upload on the next save.
+- **A batch belongs to one project.** `FilesView` stays mounted across a project
+  switch, so a run counter (`uploadRun`) is bumped when `projectId` changes or
+  the tab unmounts; a batch from before the bump stops after its current
+  request, an open Replace question is answered "no", and nothing of it reaches
+  the next project's tree, tabs or status area. A drop that arrives while a
+  batch is running is refused with a note beside the progress line.
+- **Frames and players** (`iframe`, `video`, `audio`) get `pointer-events: none`
+  while a file drag is over the tab, since they would otherwise swallow the
+  drop. `endDrag()` clears the tab-drag slot too: a tab that changed panes is
+  unmounted mid-drag and may never fire `dragend`, and a stale slot would make
+  every later file drag look like a tab drag.

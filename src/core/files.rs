@@ -3,11 +3,12 @@
 //! cross-area contract). Like `core::git`/`core::agents`, this module touches
 //! EXTERNAL filesystem state only — `std::fs`, no `Store` dependency beyond
 //! whatever `local_path` string its caller (279's API layer) already
-//! resolved. Five writes live here, all narrow: `write_file` (task 327)
+//! resolved. Six writes live here, all narrow: `write_file` (task 327)
 //! overwrites an existing text file's content in place, `create_dir`
 //! (task 489) makes one empty directory for the folder picker, `create_file`
 //! (task 672) makes one empty file inside a project's tree, and `rename_path`
-//! / `delete_path` (task 877) rename or destroy ONE entry of that tree.
+//! / `delete_path` (task 877) rename or destroy ONE entry of that tree, and
+//! `upload_file` (naru task 2732) writes one whole file's bytes into it.
 //! Nothing in this module moves anything: a rename takes a new name, never a
 //! new path.
 
@@ -1033,6 +1034,125 @@ pub fn delete_path(root: &str, rel: &str) -> Result<FileTreeEntry, DeletePathErr
     };
     removed.map_err(|_| DeletePathError::NotFound)?;
     Ok(destroyed)
+}
+
+/// Largest file [`upload_file`] will write, in decoded bytes: the attachments
+/// figure (25 MiB), since both are "one whole file in one JSON body" and the
+/// API layer sizes its body limit from this the same way.
+pub const MAX_UPLOAD_BYTES: usize = crate::core::attachments::MAX_ATTACHMENT_BYTES as usize;
+
+/// Why [`upload_file`] rejected the request — [`CreateFileError`]'s three-way
+/// split, mapped to the same 404/422/409 at the API layer:
+///   - `NotFound`: `dir` doesn't resolve through [`safe_path`] (traversal,
+///     absolute-path smuggling, symlink escape, nonexistent), is not a
+///     directory, or an `fs` call failed.
+///   - `Validation(reason)`: `name` isn't a usable single component, the bytes
+///     are over [`MAX_UPLOAD_BYTES`], or a *directory* already holds the name
+///     (which no flag replaces).
+///   - `Conflict`: a file or symlink already holds the name and `overwrite`
+///     was not set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UploadFileError {
+    NotFound,
+    Validation(&'static str),
+    Conflict,
+}
+
+/// Writes `bytes` verbatim as the file `name` inside the directory `dir`
+/// (naru task 2732) — the one write in this module that carries arbitrary
+/// content into the tree, so it is binary safe and has its own cap rather than
+/// [`write_file`]'s text-editor one.
+///
+/// Containment is [`create_file`]'s rule unchanged: `dir` (`""` or `.` for the
+/// root) is resolved through [`safe_path`] and must be a directory, and `name`
+/// is held to [`single_component`], which is what keeps `parent.join(name)`
+/// inside `parent`.
+///
+/// A taken name is never replaced silently: without `overwrite` it is
+/// `Conflict`, and the new file is opened with `create_new`, so a name that
+/// appears between the check and the write still conflicts instead of being
+/// clobbered. With `overwrite` the bytes go to a temporary file in the same
+/// directory which is then renamed over the name — a rename replaces the NAME,
+/// so a symlink sitting there is replaced as a link and whatever it points at
+/// (possibly outside `root`) is never written through, and a reader never sees
+/// a half-written file. A regular file being replaced keeps its permission
+/// bits. A directory holding the name is `Validation` either way.
+pub fn upload_file(
+    root: &str,
+    dir: &str,
+    name: &str,
+    bytes: &[u8],
+    overwrite: bool,
+) -> Result<FileTreeEntry, UploadFileError> {
+    use std::io::Write;
+
+    let name = single_component(name).map_err(UploadFileError::Validation)?;
+    if bytes.len() > MAX_UPLOAD_BYTES {
+        return Err(UploadFileError::Validation(
+            "file is larger than the 25 MiB upload limit",
+        ));
+    }
+    let (anchor, parent_rel) = if dir.is_empty() || dir == "." {
+        (".", "")
+    } else {
+        (dir, dir)
+    };
+    let parent = safe_path(root, anchor).ok_or(UploadFileError::NotFound)?;
+    if !parent.is_dir() {
+        return Err(UploadFileError::NotFound);
+    }
+    let target = parent.join(name);
+    // `symlink_metadata`, not `exists()`: a dangling symlink is still a name
+    // taken — `create_file`'s rule.
+    let existing = target.symlink_metadata().ok();
+    if existing.as_ref().is_some_and(|m| m.file_type().is_dir()) {
+        return Err(UploadFileError::Validation(
+            "a folder with that name already exists",
+        ));
+    }
+    if !overwrite {
+        if existing.is_some() {
+            return Err(UploadFileError::Conflict);
+        }
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&target)
+            .map_err(|e| match e.kind() {
+                std::io::ErrorKind::AlreadyExists => UploadFileError::Conflict,
+                _ => UploadFileError::NotFound,
+            })?;
+        if file.write_all(bytes).is_err() {
+            let _ = fs::remove_file(&target);
+            return Err(UploadFileError::NotFound);
+        }
+    } else {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.subsec_nanos());
+        let temp = parent.join(format!(".naru-upload-{}-{nanos}", std::process::id()));
+        let written = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+            .and_then(|mut file| file.write_all(bytes))
+            .and_then(|()| match &existing {
+                Some(meta) if meta.file_type().is_file() => {
+                    fs::set_permissions(&temp, meta.permissions())
+                }
+                _ => Ok(()),
+            })
+            .and_then(|()| fs::rename(&temp, &target));
+        if written.is_err() {
+            let _ = fs::remove_file(&temp);
+            return Err(UploadFileError::NotFound);
+        }
+    }
+    Ok(FileTreeEntry {
+        name: name.to_string(),
+        path: entry_path(parent_rel, name),
+        is_dir: false,
+    })
 }
 
 /// The two toggles a search carries, mirroring the in-file find bar's
@@ -2790,6 +2910,201 @@ mod tests {
         // The link still points at the untouched original.
         assert_eq!(fs::read_to_string(&target).unwrap(), "top secret");
         assert!(outside.join("secret.txt").exists());
+    }
+
+    // --- upload_file (naru task 2732) -----------------------------------
+
+    #[test]
+    fn upload_file_writes_binary_bytes_verbatim_and_echoes_the_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("sub")).unwrap();
+        let root = dir.path().to_str().unwrap();
+        let bytes: Vec<u8> = (0..=255u8).chain([0, 255, 0]).collect();
+
+        let entry = upload_file(root, "sub", "blob.bin", &bytes, false).unwrap();
+        assert_eq!(entry.name, "blob.bin");
+        assert_eq!(entry.path, "sub/blob.bin");
+        assert!(!entry.is_dir);
+        assert_eq!(fs::read(dir.path().join("sub/blob.bin")).unwrap(), bytes);
+
+        // The root is "" or "."; a zero-byte file is a file.
+        let entry = upload_file(root, "", "a.txt", b"", false).unwrap();
+        assert_eq!(entry.path, "a.txt");
+        assert_eq!(fs::read(dir.path().join("a.txt")).unwrap(), b"");
+        let entry = upload_file(root, ".", "b.txt", b"b", false).unwrap();
+        assert_eq!(entry.path, "b.txt");
+    }
+
+    #[test]
+    fn upload_file_not_found_for_traversal_absolute_missing_and_file_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("proj");
+        let outside = dir.path().join("outside");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(root.join("file.txt"), "x").unwrap();
+        let root_str = root.to_str().unwrap();
+
+        for bad in [
+            "..",
+            "../outside",
+            outside.to_str().unwrap(),
+            "missing",
+            "file.txt",
+        ] {
+            assert_eq!(
+                upload_file(root_str, bad, "x.txt", b"x", true),
+                Err(UploadFileError::NotFound),
+                "{bad}"
+            );
+        }
+        assert!(fs::read_dir(&outside).unwrap().next().is_none());
+        assert!(!dir.path().join("x.txt").exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn upload_file_not_found_through_a_directory_symlink_that_escapes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("proj");
+        let outside = dir.path().join("outside");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, root.join("way-out")).unwrap();
+
+        assert_eq!(
+            upload_file(root.to_str().unwrap(), "way-out", "x.txt", b"x", true),
+            Err(UploadFileError::NotFound)
+        );
+        assert!(fs::read_dir(&outside).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn upload_file_rejects_names_that_are_not_a_single_component() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_str().unwrap();
+        for bad in ["", "  ", ".", "..", "a/b.txt", "../b.txt", "a\\b", "a\0b"] {
+            assert!(
+                matches!(
+                    upload_file(root, "", bad, b"x", true),
+                    Err(UploadFileError::Validation(_))
+                ),
+                "{bad:?}"
+            );
+        }
+        assert!(fs::read_dir(dir.path()).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn upload_file_enforces_the_cap_and_accepts_exactly_the_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let mut bytes = vec![7u8; MAX_UPLOAD_BYTES];
+        upload_file(root, "", "at-cap.bin", &bytes, false).unwrap();
+        assert_eq!(
+            fs::metadata(dir.path().join("at-cap.bin")).unwrap().len(),
+            MAX_UPLOAD_BYTES as u64
+        );
+        bytes.push(7);
+        assert!(matches!(
+            upload_file(root, "", "over.bin", &bytes, true),
+            Err(UploadFileError::Validation(_))
+        ));
+        assert!(!dir.path().join("over.bin").exists());
+    }
+
+    #[test]
+    fn upload_file_conflicts_on_a_taken_name_and_replaces_only_with_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_str().unwrap();
+        fs::write(dir.path().join("a.txt"), "old").unwrap();
+
+        assert_eq!(
+            upload_file(root, "", "a.txt", b"new", false),
+            Err(UploadFileError::Conflict)
+        );
+        assert_eq!(fs::read_to_string(dir.path().join("a.txt")).unwrap(), "old");
+
+        upload_file(root, "", "a.txt", b"new", true).unwrap();
+        assert_eq!(fs::read_to_string(dir.path().join("a.txt")).unwrap(), "new");
+        // Overwrite on a free name is a plain create, and no temporary file
+        // is left behind by either.
+        upload_file(root, "", "fresh.txt", b"f", true).unwrap();
+        let mut names: Vec<String> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["a.txt", "fresh.txt"]);
+    }
+
+    #[test]
+    fn upload_file_never_replaces_a_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("src")).unwrap();
+        fs::write(dir.path().join("src/keep.txt"), "keep").unwrap();
+        let root = dir.path().to_str().unwrap();
+        for overwrite in [false, true] {
+            assert!(matches!(
+                upload_file(root, "", "src", b"x", overwrite),
+                Err(UploadFileError::Validation(_))
+            ));
+        }
+        assert_eq!(
+            fs::read_to_string(dir.path().join("src/keep.txt")).unwrap(),
+            "keep"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn upload_file_overwrite_keeps_the_replaced_files_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("run.sh");
+        fs::write(&script, "old").unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+
+        upload_file(dir.path().to_str().unwrap(), "", "run.sh", b"new", true).unwrap();
+        assert_eq!(fs::read_to_string(&script).unwrap(), "new");
+        assert_eq!(
+            fs::metadata(&script).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+    }
+
+    /// The containment case an in-place overwrite would lose: a symlink in the
+    /// tree pointing outside it. It conflicts as a name taken, and overwriting
+    /// replaces the LINK — the file at the other end is never written through.
+    #[test]
+    #[cfg(unix)]
+    fn upload_file_replaces_a_symlink_as_a_name_and_never_writes_through_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("proj");
+        let outside = dir.path().join("outside");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        let target = outside.join("secret.txt");
+        fs::write(&target, "top secret").unwrap();
+        symlink(&target, root.join("link.txt")).unwrap();
+        symlink(outside.join("nowhere"), root.join("dangling.txt")).unwrap();
+        let root_str = root.to_str().unwrap();
+
+        for name in ["link.txt", "dangling.txt"] {
+            assert_eq!(
+                upload_file(root_str, "", name, b"uploaded", false),
+                Err(UploadFileError::Conflict)
+            );
+        }
+        assert_eq!(fs::read_to_string(&target).unwrap(), "top secret");
+
+        for name in ["link.txt", "dangling.txt"] {
+            upload_file(root_str, "", name, b"uploaded", true).unwrap();
+            assert!(root.join(name).symlink_metadata().unwrap().is_file());
+            assert_eq!(fs::read_to_string(root.join(name)).unwrap(), "uploaded");
+        }
+        assert_eq!(fs::read_to_string(&target).unwrap(), "top secret");
+        assert!(!outside.join("nowhere").exists());
     }
 
     // --- search_files (mesa task 813) ----------------------------------

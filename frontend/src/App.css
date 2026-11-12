@@ -5180,6 +5180,74 @@ body.live-panel-ratio-resizing {
   }
 }
 
+/* Uploading files into the tree (naru task 2732). The `↑` is a `.files-tree-add`
+   that stays up on every device — a control that only appears on hover is one
+   nobody finds to upload with. */
+.files-tree-upload {
+  opacity: 1;
+}
+
+/* An OS file drag's destination, painted in the theme's accent: the folder row
+   it would land in, or the tree and content panes when it is the project root. */
+.files-tree li.upload-target {
+  background: var(--cyan-dim);
+  box-shadow: inset 0 0 0 1px var(--cyan);
+}
+
+.files-layout.upload-root .files-tree-pane,
+.files-layout.upload-root .files-panes {
+  box-shadow: inset 0 0 0 1px var(--cyan), inset 0 0 12px var(--cyan-dim);
+}
+
+/* Anchors the drag hint. Absolute and click-through so naming the destination
+   never shifts the rows under the pointer mid-drag. */
+.files-view {
+  position: relative;
+}
+
+/* A frame or a player swallows drag events, so a file dropped on one would
+   never reach the tab; while a drag is over it they let it through. */
+.files-view.upload-dragging iframe,
+.files-view.upload-dragging video,
+.files-view.upload-dragging audio {
+  pointer-events: none;
+}
+
+.files-upload-hint {
+  position: absolute;
+  bottom: 0.5rem;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 5;
+  padding: 0.25rem 0.75rem;
+  border: 1px solid var(--cyan);
+  border-radius: var(--r-md);
+  background: var(--panel-raised);
+  color: var(--cyan);
+  font-size: 0.8rem;
+  pointer-events: none;
+}
+
+/* Progress, the Replace question and the outcome sit above the layout, so they
+   show with the tree collapsed or on the phone tier too. */
+.files-upload-progress,
+.files-upload-replace,
+.files-upload-summary {
+  margin: 0 0 0.75rem;
+  font-size: 0.8rem;
+}
+
+.files-upload-replace {
+  flex-wrap: wrap;
+}
+
+.files-upload-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem 1rem;
+}
+
 /* Collapsed, the pane is just the re-expand rail — there is no tree to create
    into, so the root's `+` goes with it and the toggle keeps the rail centred
    (the `align-self` rule above now applies to this row, not the button). */

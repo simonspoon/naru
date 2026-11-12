@@ -28,8 +28,14 @@
 #      root itself, the 404s for a traversal and a missing entry, a recursive
 #      folder delete, the tree no longer listing a deleted entry *immediately*
 #      (the cache-eviction assertion), and the 422 for a missing `?path=`;
+#   6b. `POST /api/projects/{id}/files/upload` (naru task 2732) — one whole
+#      file written into the tree: a PNG byte-identical and listed at once
+#      (the cache eviction), a zero-byte file, 409 on a taken name until
+#      `overwrite` is sent, the 422s (unusable name, a folder's name, bad
+#      base64, over the cap, over the body limit — all JSON), and the 404s for
+#      a traversal, absolute, missing or non-directory `dir`;
 #   7. both serve modes — raw and search are reads, reachable in default AND
-#      `--lan`, while the content PATCH and both entry writes keep their
+#      `--lan`, while the content PATCH, both entry writes and the upload keep their
 #      `require_agent_access` + Content-Type gates in both.
 #
 #   8. `GET /api/projects/{id}/files/watch` (naru task 1875) — the NDJSON
@@ -482,6 +488,93 @@ api 404 DELETE "/api/projects/$PROJ/files/entry?path=nope.txt"
 ok "DELETE .../files/entry for a traversal or a missing entry: 404 not_found"
 
 # =====================================================================
+# 6b. upload one file into the tree (naru task 2732)
+# =====================================================================
+
+# upload <expected-status> <json-body-file> — the bodies here are too big for
+# an argv, so they ride in from a file.
+upload() {
+  STATUS=$(curl -s -o "$TMP/body" -w '%{http_code}' -X POST \
+    -H 'Content-Type: application/json' --data-binary "@$2" \
+    "$BASE/api/projects/$PROJ/files/upload")
+  BODY=$(cat "$TMP/body")
+  [ "$STATUS" = "$1" ] ||
+    fail "expected HTTP $1, got $STATUS: POST .../files/upload ($(head -c 300 "$TMP/body"))"
+}
+upload_body() { # upload_body <dir> <name> <source-file> <overwrite> > json
+  printf '{"dir":%s,"name":%s,"overwrite":%s,"content_base64":"' \
+    "$(jq -Rn --arg v "$1" '$v')" "$(jq -Rn --arg v "$2" '$v')" "$4"
+  base64 < "$3" | tr -d '\n'
+  printf '"}'
+}
+
+# Warm the level first, so the listing below proves the cache eviction.
+api 200 GET "/api/projects/$PROJ/files?path=sub"
+upload_body sub uploaded.png "$REPO/logo.png" false > "$TMP/up.json"
+upload 200 "$TMP/up.json"
+[ "$(jqb .path)" = "sub/uploaded.png" ] || fail "upload: echo path"
+[ "$(jqb .is_dir)" = "false" ] || fail "upload: echo is_dir"
+cmp -s "$REPO/logo.png" "$REPO/sub/uploaded.png" || fail "upload: bytes must be identical"
+api 200 GET "/api/projects/$PROJ/files?path=sub"
+[ "$(jqb '[.tree[] | select(.name == "uploaded.png")] | length')" = "1" ] ||
+  fail "upload: the tree must list the new file on the very next read"
+ok "POST .../files/upload: 200, the entry echoed, a PNG byte-identical, listed at once"
+
+: > "$TMP/empty"
+upload_body "" empty.bin "$TMP/empty" false > "$TMP/up.json"
+upload 200 "$TMP/up.json"
+[ -f "$REPO/empty.bin" ] && [ ! -s "$REPO/empty.bin" ] || fail "upload: zero-byte file"
+ok "POST .../files/upload with empty content: a zero-byte file at the root"
+
+printf 'replacement\n' > "$TMP/replacement"
+upload_body "" taken.txt "$TMP/replacement" false > "$TMP/up.json"
+upload 409 "$TMP/up.json"
+[ "$(jqb .error.code)" = "conflict" ] || fail "upload taken name: error.code"
+[ "$(cat "$REPO/taken.txt")" = "taken" ] || fail "upload taken name: the file must be untouched"
+upload_body "" taken.txt "$TMP/replacement" true > "$TMP/up.json"
+upload 200 "$TMP/up.json"
+[ "$(cat "$REPO/taken.txt")" = "replacement" ] || fail "upload overwrite: content"
+printf 'taken\n' > "$REPO/taken.txt"
+ok "POST .../files/upload on a taken name: 409 and untouched, replaced only with overwrite"
+
+for name in "" ".." "../escape.txt" "sub/escape.txt" "sub"; do
+  upload_body "" "$name" "$TMP/replacement" true > "$TMP/up.json"
+  upload 422 "$TMP/up.json"
+  [ "$(jqb .error.code)" = "validation" ] || fail "upload name '$name': error.code"
+done
+[ ! -e "$TMP/escape.txt" ] && [ ! -e "$REPO/sub/escape.txt" ] ||
+  fail "upload: a path-shaped name must never write"
+[ -d "$REPO/sub" ] || fail "upload: a folder must never be replaced"
+printf '{"dir":"","name":"bad.bin","content_base64":"not base64!"}' > "$TMP/up.json"
+upload 422 "$TMP/up.json"
+ok "POST .../files/upload with an unusable name, a folder's name or bad base64: 422 validation"
+
+mkdir "$TMP/outside-dir"
+for dir in ".." "../outside-dir" "$TMP/outside-dir" "missing" "notes.md"; do
+  upload_body "$dir" escape.txt "$TMP/replacement" true > "$TMP/up.json"
+  upload 404 "$TMP/up.json"
+  [ "$(jqb .error.code)" = "not_found" ] || fail "upload dir '$dir': error.code"
+done
+[ ! -e "$TMP/escape.txt" ] && [ -z "$(ls -A "$TMP/outside-dir")" ] ||
+  fail "upload: a traversal must never write above the root"
+ok "POST .../files/upload into a traversal, an absolute, a missing or a file dir: 404 not_found"
+
+# One byte over the 25 MiB cap fits the route's body limit, so the refusal is
+# core's; a body past that limit is refused before it is read. Both are JSON.
+head -c $((25 * 1024 * 1024 + 1)) /dev/zero > "$TMP/over-cap"
+upload_body "" over-cap.bin "$TMP/over-cap" false > "$TMP/up.json"
+upload 422 "$TMP/up.json"
+[ "$(jqb .error.code)" = "validation" ] || fail "upload over the cap: error.code"
+head -c $((48 * 1024 * 1024)) /dev/zero > "$TMP/over-limit"
+upload_body "" over-limit.bin "$TMP/over-limit" false > "$TMP/up.json"
+upload 422 "$TMP/up.json"
+[ "$(jqb .error.code)" = "validation" ] || fail "upload over the body limit: error.code"
+[ ! -e "$REPO/over-cap.bin" ] && [ ! -e "$REPO/over-limit.bin" ] ||
+  fail "upload: an over-cap file must never be written"
+rm -f "$TMP/over-cap" "$TMP/over-limit"
+ok "POST .../files/upload over the cap or over the body limit: 422 validation, as JSON"
+
+# =====================================================================
 # 7. both serve modes
 # =====================================================================
 #
@@ -554,6 +647,23 @@ check_modes() { # check_modes <label>
   [ "$(jqb .name)" = "gate-doomed.txt" ] || fail "$label: entry delete echo name"
   [ ! -e "$REPO/gate-doomed.txt" ] || fail "$label: entry delete must remove the file"
   ok "$label: DELETE .../files/entry with JSON from a local page succeeds"
+
+  # The upload (naru task 2732) is the same pairing: 415 without a JSON
+  # Content-Type, and a write from a local page — removed again, so the block
+  # runs identically in either mode.
+  status=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+    -H 'Content-Type: text/plain' \
+    --data '{"dir":"","name":"gate-upload.txt","content_base64":"aGk="}' \
+    "$BASE/api/projects/$PROJ/files/upload")
+  [ "$status" = "415" ] ||
+    fail "$label: POST .../files/upload without a JSON Content-Type must be 415, got $status"
+  [ ! -e "$REPO/gate-upload.txt" ] || fail "$label: a refused upload must never touch disk"
+  ok "$label: POST .../files/upload without a JSON Content-Type is refused (415)"
+  api 200 POST "/api/projects/$PROJ/files/upload" \
+    '{"dir":"","name":"gate-upload.txt","content_base64":"aGk="}'
+  [ "$(cat "$REPO/gate-upload.txt")" = "hi" ] || fail "$label: upload content"
+  rm "$REPO/gate-upload.txt"
+  ok "$label: POST .../files/upload with JSON from a local page succeeds"
 }
 
 check_modes "default mode"

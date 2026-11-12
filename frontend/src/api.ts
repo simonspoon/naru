@@ -695,6 +695,32 @@ export function createProjectFile(
 }
 
 /**
+ * Uploads one file into the directory `dir` (tree-relative, `''` = the project
+ * root) as `name` (naru task 2732). The bytes ride the JSON body as standard
+ * base64 with no data-URL prefix — the request wrapper's Content-Type keeps
+ * this mutating call inside the API's CSRF gate.
+ *
+ * A file or symlink already called `name` 409s unless `overwrite` is set; a
+ * folder with that name is never replaceable. A `name` that isn't a single
+ * usable component, invalid base64, or content over the 25 MiB cap 422s (a
+ * body far past the cap may come back as a bare non-JSON 413 instead, which is
+ * why `fileUpload.ts` refuses an oversized file before encoding it); a `dir`
+ * that doesn't resolve 404s. Returns the new `FileTreeEntry`.
+ */
+export function uploadProjectFile(
+  id: number,
+  dir: string,
+  name: string,
+  contentBase64: string,
+  overwrite: boolean,
+): Promise<FileTreeEntry> {
+  return request(
+    `/api/projects/${id}/files/upload`,
+    jsonInit('POST', { dir, name, content_base64: contentBase64, overwrite }),
+  )
+}
+
+/**
  * Renames one tree entry — file or directory — **within its own directory**
  * (mesa task 877). `name` is a single component, never a path: this moves
  * nothing between folders, which is what keeps the operation checkable against

@@ -4442,6 +4442,15 @@ fn router(state: AppState) -> Router {
             "/api/projects/{id}/files/entry",
             patch(rename_project_file_entry).delete(delete_project_file_entry),
         )
+        // Uploading one whole file into that tree (naru task 2732). JSON with
+        // base64 content, not multipart, so it stays inside the Content-Type
+        // gate like the attachments upload; `require_agent_access` like every
+        // other write under `local_path`; and its own body limit, so an
+        // over-cap file is `core::files`' JSON 422 rather than a bare 413.
+        .route(
+            "/api/projects/{id}/files/upload",
+            post(upload_project_file).layer(DefaultBodyLimit::max(FILES_UPLOAD_BODY_LIMIT)),
+        )
         // New-project folder picker: unscoped (not one project's local_path)
         // server-side directory listing, plus creating one folder to pick.
         // Both verbs carry `require_agent_access` (mesa task 1022) — see
@@ -11549,6 +11558,98 @@ fn evict_files_tree_level(state: &AppState, root: &str, rel: &str) {
         .remove(&(root.to_string(), rel_key));
 }
 
+/// Upper bound on the raw HTTP body of the Files tab upload, by
+/// [`ATTACHMENT_BODY_LIMIT`]'s reasoning: base64 costs 33% on the wire, so
+/// axum's 2 MiB default would turn an at-cap upload into a 413 before
+/// `core::files::upload_file`'s own cap check ever ran. A megabyte of headroom
+/// covers the JSON framing.
+const FILES_UPLOAD_BODY_LIMIT: usize = files::MAX_UPLOAD_BYTES * 4 / 3 + 1024 * 1024;
+
+#[derive(Deserialize)]
+struct FilesUpload {
+    dir: String,
+    name: String,
+    content_base64: String,
+    #[serde(default)]
+    overwrite: bool,
+}
+
+/// Files tab upload (naru task 2732) — `POST /api/projects/{id}/files/upload`,
+/// body `{dir, name, content_base64, overwrite}`, echoing the `FileTreeEntry`
+/// of the file written. The one Files route that carries a whole file's bytes
+/// in: `dir` is a directory of the tree (`""` for the root), `name` one name
+/// inside it, never a path.
+///
+/// JSON with base64 content, not multipart — the attachments route's choice,
+/// for its reason: a multipart or raw body would need a carve-out from the
+/// Content-Type gate that is this API's CSRF guard. Gated by
+/// [`require_agent_access`] like every other write under a project's
+/// `local_path`.
+///
+/// `body` is a `Result` so a body past [`FILES_UPLOAD_BODY_LIMIT`] is the
+/// standard JSON 422 rather than a bare 413. Invalid base64 is 422 here; the
+/// rest is `core::files::upload_file`'s: `NotFound` → 404 (`dir` doesn't
+/// resolve or isn't a directory, plus the no-`local_path`/dead-folder rung),
+/// `Validation` → 422 (unusable name, over the cap, a folder holds the name),
+/// `Conflict` → 409 (the name is taken and `overwrite` is not set). The tree
+/// cache entry for `dir` is evicted before responding, as after every write
+/// here.
+async fn upload_project_file(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    body: Result<Json<FilesUpload>, JsonRejection>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let Json(body) = body?;
+    let not_found = || ApiError {
+        status: StatusCode::NOT_FOUND,
+        code: "not_found",
+        message: format!("folder not found: {}", body.dir),
+    };
+    let (path, is_dir) = project_files_root(&state, id).await?;
+    let (Some(root), true) = (path, is_dir) else {
+        return Err(not_found());
+    };
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(body.content_base64.as_bytes())
+        .map_err(|e| ApiError {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            code: "validation",
+            message: format!("invalid base64 content: {e}"),
+        })?;
+    let upload_root = root.clone();
+    let dir = body.dir.clone();
+    let name = body.name.clone();
+    let overwrite = body.overwrite;
+    let uploaded = tokio::task::spawn_blocking(move || {
+        files::upload_file(&upload_root, &dir, &name, &bytes, overwrite)
+    })
+    .await
+    .unwrap_or(Err(files::UploadFileError::NotFound));
+    let entry = match uploaded {
+        Ok(entry) => entry,
+        Err(files::UploadFileError::NotFound) => return Err(not_found()),
+        Err(files::UploadFileError::Validation(message)) => {
+            return Err(ApiError {
+                status: StatusCode::UNPROCESSABLE_ENTITY,
+                code: "validation",
+                message: message.into(),
+            });
+        }
+        Err(files::UploadFileError::Conflict) => {
+            return Err(ApiError {
+                status: StatusCode::CONFLICT,
+                code: "conflict",
+                message: format!("already exists: {}", body.name),
+            });
+        }
+    };
+    evict_files_tree_level(&state, &root, &entry.path);
+    Ok(Json(entry).into_response())
+}
+
 #[derive(Deserialize)]
 struct FilesEntryRename {
     path: String,
@@ -16577,6 +16678,182 @@ mod tests {
         )
         .await;
         assert_eq!(resp.unwrap_err().status, StatusCode::NOT_FOUND);
+    }
+
+    // --- Files tab: POST /files/upload (naru task 2732) ---------------------
+
+    async fn upload(
+        state: &AppState,
+        peer: SocketAddr,
+        id: i64,
+        dir: &str,
+        name: &str,
+        bytes: &[u8],
+        overwrite: bool,
+    ) -> ApiResult<Response> {
+        upload_project_file(
+            State(state.clone()),
+            ConnectInfo(peer),
+            loopback_agent_headers(),
+            Path(id),
+            Ok(Json(FilesUpload {
+                dir: dir.to_string(),
+                name: name.to_string(),
+                content_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+                overwrite,
+            })),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn upload_project_file_writes_the_bytes_and_echoes_the_entry() {
+        let (dir, state) = test_state();
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(root.join("img")).unwrap();
+        let id = new_project(&state, Some(root.to_str().unwrap()));
+        let bytes = [0x89, b'P', b'N', b'G', 0, 255, 0];
+
+        let resp = upload(&state, loopback(), id, "img", "logo.png", &bytes, false)
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+        assert_eq!(body["name"], "logo.png");
+        assert_eq!(body["path"], "img/logo.png");
+        assert_eq!(body["is_dir"], false);
+        assert_eq!(std::fs::read(root.join("img/logo.png")).unwrap(), bytes);
+    }
+
+    #[tokio::test]
+    async fn upload_project_file_error_table() {
+        let (dir, state) = test_state();
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("a.txt"), "old").unwrap();
+        std::fs::write(dir.path().join("outside.txt"), "outside").unwrap();
+        let id = new_project(&state, Some(root.to_str().unwrap()));
+        let status = |r: ApiResult<Response>| r.unwrap_err().status;
+
+        // Traversal, an absolute directory and a missing one are all 404.
+        let abs = dir.path().to_str().unwrap().to_string();
+        for bad in ["..", "../..", abs.as_str(), "missing", "a.txt"] {
+            assert_eq!(
+                status(upload(&state, loopback(), id, bad, "x.txt", b"x", true).await),
+                StatusCode::NOT_FOUND,
+                "{bad}"
+            );
+        }
+        assert!(!dir.path().join("x.txt").exists());
+
+        // A name that is not one component is 422, as is a folder's name.
+        for bad in ["", "..", "../outside.txt", "src/x.txt", "src"] {
+            assert_eq!(
+                status(upload(&state, loopback(), id, "", bad, b"x", true).await),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{bad:?}"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("outside.txt")).unwrap(),
+            "outside"
+        );
+
+        // A taken name is 409 and untouched until `overwrite` is sent.
+        let err = upload(&state, loopback(), id, "", "a.txt", b"new", false)
+            .await
+            .unwrap_err();
+        assert_eq!(err.status, StatusCode::CONFLICT);
+        assert_eq!(err.code, "conflict");
+        assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "old");
+        upload(&state, loopback(), id, "", "a.txt", b"new", true)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "new");
+
+        // Over the cap is a JSON 422 from core, and nothing is written.
+        let big = vec![0u8; files::MAX_UPLOAD_BYTES + 1];
+        let err = upload(&state, loopback(), id, "", "big.bin", &big, false)
+            .await
+            .unwrap_err();
+        assert_eq!(err.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(err.code, "validation");
+        assert!(!root.join("big.bin").exists());
+
+        // Content that is not base64 is 422 too.
+        let resp = upload_project_file(
+            State(state.clone()),
+            ConnectInfo(loopback()),
+            loopback_agent_headers(),
+            Path(id),
+            Ok(Json(FilesUpload {
+                dir: String::new(),
+                name: "bad.bin".to_string(),
+                content_base64: "not base64!".to_string(),
+                overwrite: false,
+            })),
+        )
+        .await;
+        assert_eq!(status(resp), StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(!root.join("bad.bin").exists());
+    }
+
+    #[tokio::test]
+    async fn upload_project_file_rejects_non_loopback_peer_in_default_mode() {
+        let (dir, state) = test_state();
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let id = new_project(&state, Some(root.to_str().unwrap()));
+
+        let resp = upload(&state, lan_peer(), id, "", "pwned.sh", b"x", true).await;
+        assert!(resp.unwrap_err().status.is_client_error());
+        assert!(
+            !root.join("pwned.sh").exists(),
+            "rejected upload must never touch disk"
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_project_file_no_local_path_is_not_found() {
+        let (_dir, state) = test_state();
+        let id = new_project(&state, None);
+        let resp = upload(&state, loopback(), id, "", "a.txt", b"x", false).await;
+        assert_eq!(resp.unwrap_err().status, StatusCode::NOT_FOUND);
+    }
+
+    /// The 5s tree cache must not outlive the upload, for the reason the
+    /// create's twin test gives.
+    #[tokio::test]
+    async fn upload_project_file_evicts_the_tree_cache_for_its_directory() {
+        let (dir, state) = test_state();
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        let id = new_project(&state, Some(root.to_str().unwrap()));
+        for level in [None, Some("src".to_string())] {
+            get_project_files(
+                State(state.clone()),
+                Path(id),
+                Query(FilesTreeQuery { path: level }),
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(state.files_tree_cache.lock().unwrap().len(), 2);
+
+        upload(
+            &state,
+            loopback(),
+            id,
+            "src",
+            "new.rs",
+            b"fn main() {}",
+            false,
+        )
+        .await
+        .unwrap();
+        let cache = state.files_tree_cache.lock().unwrap();
+        assert_eq!(cache.len(), 1);
+        assert!(cache.keys().all(|(_, rel)| rel.is_empty()));
     }
 
     // --- Files tab: PATCH/DELETE /files/entry (mesa task 877) ---------------
