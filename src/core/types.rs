@@ -1677,7 +1677,8 @@ pub struct GitCommitInfo {
     pub upstream: Option<String>,
     /// HEAD is already contained in `upstream` (not ahead of it) or, on a
     /// branch, in any other remote-tracking branch (pushed without tracking):
-    /// amending rewrites published history. Same as `published_on` being set.
+    /// amending rewrites published history. Also true, with `published_on`
+    /// None, when that lookup failed or timed out (it fails closed).
     pub head_published: bool,
     /// The ref that already holds HEAD (`origin/main`): the upstream when it
     /// does, else the first remote-tracking branch that does; else None.

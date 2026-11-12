@@ -1489,41 +1489,88 @@ fn head_is_unborn(dir: &str) -> Result<bool, String> {
 /// go back to their INDEX version (`git restore --worktree`, staged changes
 /// kept); untracked paths are removed with `git clean -f -d -q -- <paths>`,
 /// limited to exactly those (an untracked folder entry `dir/` removes that
-/// folder; git itself refuses a nested repo). Never `-x`, never pathless.
+/// folder). Never `-x`, never pathless. `git clean` silently skips a nested
+/// git repository (naru task 2802), so each entry is checked for a `.git` of
+/// its own and a dry run comes first: when one would be skipped, the whole
+/// discard is refused and nothing is changed.
 pub fn discard(dir: &str, files: &[GitFile]) -> Result<(), String> {
     let tracked: Vec<&str> = files
         .iter()
         .filter(|f| has_unstaged_tracked(f))
         .map(|f| f.path.as_str())
         .collect();
-    run_pathspec_write(dir, &["restore", "--worktree"], &tracked)?;
     let untracked: Vec<&str> = files
         .iter()
         .filter(|f| f.status == "??")
         .map(|f| f.path.as_str())
         .collect();
+    let mut chunks: Vec<Vec<&str>> = Vec::new();
     let mut chunk: Vec<&str> = Vec::new();
     let mut size = 0;
     for p in untracked {
         if !chunk.is_empty() && size + p.len() > CLEAN_ARGV_CAP {
-            run_clean(dir, &chunk)?;
-            chunk.clear();
+            chunks.push(std::mem::take(&mut chunk));
             size = 0;
         }
         size += p.len() + 1;
         chunk.push(p);
     }
-    if chunk.is_empty() {
-        Ok(())
-    } else {
-        run_clean(dir, &chunk)
+    if !chunk.is_empty() {
+        chunks.push(chunk);
     }
+    let mut skipped = Vec::new();
+    for c in &chunks {
+        // An entry that IS a nested repo: the dry run says nothing about it.
+        for p in c {
+            let dot_git = std::path::Path::new(dir).join(p).join(".git");
+            if dot_git.symlink_metadata().is_ok() {
+                skipped.push(p.to_string());
+            }
+        }
+        skipped.extend(clean_would_skip(dir, c)?);
+    }
+    if !skipped.is_empty() {
+        return Err(format!(
+            "git does not delete a nested git repository: {}. Nothing was discarded; remove it in the terminal.",
+            skipped.join(", ")
+        ));
+    }
+    run_pathspec_write(dir, &["restore", "--worktree"], &tracked)?;
+    for c in &chunks {
+        run_clean(dir, c)?;
+    }
+    Ok(())
 }
 
 fn run_clean(dir: &str, paths: &[&str]) -> Result<(), String> {
     let mut args = vec!["clean", "-f", "-d", "-q", "--"];
     args.extend_from_slice(paths);
     run_write(dir, &args, None)
+}
+
+/// The nested repositories inside `paths` that `git clean -f -d -- <paths>`
+/// would leave in place, from its dry run (`-n` prints `Would skip repository
+/// <path>` for each; `LC_ALL=C` pins the wording). A dry run that cannot be read is an `Err`:
+/// the discard must not go ahead unchecked.
+fn clean_would_skip(dir: &str, paths: &[&str]) -> Result<Vec<String>, String> {
+    let out = Command::new("git")
+        .args(["-C", dir, "clean", "-n", "-d", "--"])
+        .args(paths)
+        .env("GIT_LITERAL_PATHSPECS", "1")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("LC_ALL", "C")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .map_err(|e| format!("could not run git: {e}"))?;
+    if !out.status.success() {
+        return Err("could not check what git clean would remove; nothing was discarded".into());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| l.strip_prefix("Would skip repository "))
+        .map(str::to_string)
+        .collect())
 }
 
 /// One `git <args> --pathspec-from-file=- --pathspec-file-nul` call with the
@@ -2133,8 +2180,9 @@ fn unmerged_of(dir: &str, name: &str) -> (Vec<GitCommit>, bool) {
 /// refuses as "not fully merged" that is NOT an error: the outcome carries its
 /// text, the tip hash and the commits only this branch holds. With `force`:
 /// `expected_hash` (a full hash) must equal the branch's current tip, else
-/// 409 and nothing is deleted; then `git branch -D`. A branch checked out in
-/// any worktree is refused.
+/// 409 and nothing is deleted; the delete itself is [`force_delete_ref`], which
+/// hands git that hash so a branch that moves after the check is kept. A
+/// branch checked out in any worktree is refused.
 pub fn delete_branch(
     dir: &str,
     name: &str,
@@ -2166,11 +2214,16 @@ pub fn delete_branch(
     };
     if force {
         if expected_hash != Some(tip.as_str()) {
-            return Err(RefErr::Conflict(format!(
-                "{name} moved since the delete was confirmed. It was reloaded; nothing was deleted."
-            )));
+            return Err(branch_moved(name));
         }
-        run_ref_write(dir, &["branch", "-D", name]).map_err(RefErr::Conflict)?;
+        // `update-ref` does not refuse a checked-out branch as `branch -D`
+        // did: look once more right before it.
+        let rows = fresh_branches(dir)?;
+        let row = local_row(&rows, name)?;
+        if let Some(path) = row.worktree.as_deref() {
+            return Err(rv(format!("{name} is checked out in {path}")));
+        }
+        force_delete_ref(dir, name, &tip)?;
         return Ok(deleted(tip));
     }
     match run_ref_write(dir, &["branch", "-d", name]) {
@@ -2187,6 +2240,34 @@ pub fn delete_branch(
         }
         Err(e) => Err(RefErr::Conflict(e)),
     }
+}
+
+fn branch_moved(name: &str) -> RefErr {
+    RefErr::Conflict(format!(
+        "{name} moved since the delete was confirmed. It was reloaded; nothing was deleted."
+    ))
+}
+
+/// The forced delete (naru task 2802): `git update-ref -d refs/heads/<name>
+/// <expected>`, which git applies only while the ref still holds `expected`,
+/// so there is no gap between the tip check and the delete. On success the
+/// branch's `branch.<name>` config section goes too, as `git branch -D` would
+/// remove it (best-effort; most branches have none).
+fn force_delete_ref(dir: &str, name: &str, expected: &str) -> Result<(), RefErr> {
+    let full = format!("refs/heads/{name}");
+    if let Err(e) = run_ref_write(dir, &["update-ref", "-d", &full, expected]) {
+        let now = read_git_line(dir, &["rev-parse", "--verify", "-q", &full]);
+        return Err(if now.as_deref() != Some(expected) {
+            branch_moved(name)
+        } else {
+            RefErr::Conflict(e)
+        });
+    }
+    let _ = run_ref_write(
+        dir,
+        &["config", "--remove-section", &format!("branch.{name}")],
+    );
+    Ok(())
 }
 
 /// A stash message the UI may send: trimmed, blank = none, one line of at most
@@ -2259,11 +2340,17 @@ fn stash_name_of(dir: &str, hash: &str) -> Option<String> {
 /// on `dir`'s worktree, without `--index`, and are refused while an operation
 /// is in progress; drop is allowed. A conflicting apply/pop is the 409 carrying
 /// git's text (it prints on stdout); the stash is kept.
+///
+/// `confirmed` (naru task 2802) is the caller's word that the person agreed:
+/// without it a drop is always a 409, and an apply or pop is one when the
+/// worktree has uncommitted changes (or its status cannot be read). Nothing
+/// is run.
 pub fn stash_entry_op(
     dir: &str,
     op: StashOp,
     index: u32,
     hash: &str,
+    confirmed: bool,
 ) -> Result<Option<String>, RefErr> {
     let (done, action) = match op {
         StashOp::Apply => ("applied", "applying a stash"),
@@ -2283,6 +2370,20 @@ pub fn stash_entry_op(
         return Err(RefErr::Conflict(format!(
             "The stash list changed since it was shown. It was reloaded; nothing was {done}."
         )));
+    }
+    if !confirmed {
+        if op == StashOp::Drop {
+            return Err(RefErr::Conflict(format!(
+                "Dropping {} removes it for every worktree and cannot be undone here; confirm to proceed.",
+                entry.name
+            )));
+        }
+        if view_of(dir).is_none_or(|v| !v.files.is_empty()) {
+            return Err(RefErr::Conflict(format!(
+                "This worktree has uncommitted changes and {} would be applied on top of them; confirm to proceed.",
+                entry.name
+            )));
+        }
     }
     let drop_by_hash = |dir: &str| -> Option<Result<(), String>> {
         let name = stash_name_of(dir, hash)?;
@@ -2343,11 +2444,50 @@ pub fn head_of(dir: &str) -> Option<(String, String)> {
     Some((full, short))
 }
 
+/// How long the pushed-commit lookup of [`commit_info_of`] may take.
+const PUSHED_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The first remote-tracking branch containing HEAD (`git for-each-ref
+/// --contains HEAD refs/remotes`, `<remote>/HEAD` aliases skipped), `Ok(None)`
+/// when there is none. `Err` when git could not be run, failed or passed
+/// `timeout`: the caller fails closed.
+fn pushed_on(program: &str, dir: &str, timeout: Duration) -> Result<Option<String>, ()> {
+    let mut cmd = Command::new(program);
+    cmd.args([
+        "-C",
+        dir,
+        "for-each-ref",
+        "--contains",
+        "HEAD",
+        "--format=%(refname)",
+        "refs/remotes",
+    ])
+    .env("GIT_OPTIONAL_LOCKS", "0");
+    match output_within(cmd, Some(timeout)) {
+        Some((stdout, true, false)) => Ok(String::from_utf8_lossy(&stdout)
+            .lines()
+            .filter(|r| !r.ends_with("/HEAD"))
+            .find_map(|r| r.strip_prefix("refs/remotes/"))
+            .map(str::to_string)),
+        _ => Err(()),
+    }
+}
+
 /// What the commit box needs from `dir`'s worktree; `None` when it is not a
 /// repo. Every read is best-effort and never panics: an unreadable HEAD is
 /// "not unborn" with no `head`; a failed upstream, identity or MERGE_MSG read
 /// is `None`. Nothing is cached and nothing is written.
 pub fn commit_info_of(dir: &str) -> Option<GitCommitInfo> {
+    commit_info_with(dir, "git", PUSHED_TIMEOUT)
+}
+
+/// [`commit_info_of`] with the pushed-commit lookup's program and timeout
+/// explicit (a test injects a failing or hanging one).
+fn commit_info_with(
+    dir: &str,
+    pushed_git: &str,
+    pushed_timeout: Duration,
+) -> Option<GitCommitInfo> {
     let git_dir = read_git_line(dir, &["rev-parse", "--absolute-git-dir"])?;
     let branch = read_git_line(dir, &["symbolic-ref", "-q", "--short", "HEAD"]);
     let unborn = head_is_unborn(dir).unwrap_or(false);
@@ -2395,26 +2535,19 @@ pub fn commit_info_of(dir: &str) -> Option<GitCommitInfo> {
             .and_then(|full| read_git(dir, &["merge-base", "--is-ancestor", "HEAD", &full]))
             .is_some_and(|(c, _)| c == 0);
     // Pushed without tracking (naru task 2801): on a branch, HEAD is also
-    // published when any remote-tracking branch contains it.
+    // published when any remote-tracking branch contains it. A lookup that
+    // fails or times out (naru task 2802) counts as published, with no name.
+    let mut pushed_unknown = false;
     let published_on = if on_upstream {
         upstream.clone()
     } else if head.is_some() && branch.is_some() {
-        read_git_line(
-            dir,
-            &[
-                "for-each-ref",
-                "--contains",
-                "HEAD",
-                "--format=%(refname)",
-                "refs/remotes",
-            ],
-        )
-        .and_then(|refs| {
-            refs.lines()
-                .filter(|r| !r.ends_with("/HEAD"))
-                .find_map(|r| r.strip_prefix("refs/remotes/"))
-                .map(str::to_string)
-        })
+        match pushed_on(pushed_git, dir, pushed_timeout) {
+            Ok(on) => on,
+            Err(()) => {
+                pushed_unknown = true;
+                None
+            }
+        }
     } else {
         None
     };
@@ -2445,7 +2578,7 @@ pub fn commit_info_of(dir: &str) -> Option<GitCommitInfo> {
         unborn,
         head,
         upstream,
-        head_published: published_on.is_some(),
+        head_published: published_on.is_some() || pushed_unknown,
         published_on,
         author_name: config("user.name"),
         author_email: config("user.email"),
@@ -5347,6 +5480,41 @@ mod tests {
     }
 
     #[test]
+    fn discard_refuses_a_nested_repo_and_changes_nothing() {
+        let d = wrepo(true);
+        put(&d, "base.txt", "worktree\n");
+        put(&d, "u.txt", "u\n");
+        put(&d, "udir/f.txt", "f\n");
+        put(&d, "udir/inner/g.txt", "g\n");
+        put(&d, "nested/h.txt", "h\n");
+        wgit(&d.path().join("udir/inner"), &["init", "-q"]);
+        wgit(&d.path().join("nested"), &["init", "-q"]);
+        let before = sts(&d);
+        // A nested repo as the entry itself, and one inside an untracked folder.
+        for names in [
+            &["base.txt", "u.txt", "nested/"][..],
+            &["base.txt", "u.txt", "udir/"][..],
+        ] {
+            let f = pick(&d, names);
+            check_write(WriteOp::Discard, &f).unwrap();
+            let e = discard(dstr(&d), &f).unwrap_err();
+            assert!(e.contains("nested git repository"), "{e}");
+            assert!(e.contains("Nothing was discarded"), "{e}");
+            assert!(e.contains(names[2].trim_end_matches('/')), "{e}");
+            assert_eq!(sts(&d), before, "nothing changed");
+            assert!(d.path().join("u.txt").exists());
+            assert!(d.path().join("udir/f.txt").exists());
+            assert_eq!(
+                std::fs::read_to_string(d.path().join("base.txt")).unwrap(),
+                "worktree\n"
+            );
+        }
+        // Without the nested repos in the pick the discard still works.
+        discard(dstr(&d), &pick(&d, &["base.txt", "u.txt"])).unwrap();
+        assert!(!d.path().join("u.txt").exists());
+    }
+
+    #[test]
     fn discard_restores_a_deleted_file_and_works_on_unborn_untracked() {
         let d = wrepo(true);
         std::fs::remove_file(d.path().join("base.txt")).unwrap();
@@ -6599,6 +6767,35 @@ mod commit_tests {
     }
 
     #[test]
+    fn a_failed_or_slow_pushed_lookup_counts_as_published() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = repo();
+        let d = tmp.path();
+        // A local-only commit on a branch: really unpublished.
+        let i = commit_info_of(s(d)).unwrap();
+        assert!(!i.head_published && i.published_on.is_none());
+        let stub = |name: &str, body: &str| {
+            let p = d.join(name);
+            std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            p.to_str().unwrap().to_string()
+        };
+        // The lookup errors: fail closed, with no branch name to show.
+        let failing = stub("failing-git", "exit 3");
+        let i = commit_info_with(s(d), &failing, PUSHED_TIMEOUT).unwrap();
+        assert!(i.head_published && i.published_on.is_none());
+        // The lookup hangs: stopped at the timeout, and fails closed too.
+        let hanging = stub("hanging-git", "exec sleep 30");
+        let started = Instant::now();
+        let i = commit_info_with(s(d), &hanging, Duration::from_millis(300)).unwrap();
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert!(i.head_published && i.published_on.is_none());
+        // A program that cannot be run at all is the same.
+        let i = commit_info_with(s(d), "/nonexistent/git", PUSHED_TIMEOUT).unwrap();
+        assert!(i.head_published && i.published_on.is_none());
+    }
+
+    #[test]
     fn commit_info_sees_a_head_pushed_without_an_upstream() {
         let tmp = repo();
         let d = tmp.path();
@@ -7267,14 +7464,14 @@ mod ref_tests {
             list.iter().map(|x| &x.hash).collect::<Vec<_>>()
         );
         assert_eq!(
-            stash_entry_op(s(&w), StashOp::Apply, 1, &list[1].hash),
+            stash_entry_op(s(&w), StashOp::Apply, 1, &list[1].hash, true),
             Ok(None)
         );
         assert_eq!(std::fs::read_to_string(w.join("a.txt")).unwrap(), "one\n");
         assert_eq!(std::fs::read_to_string(d.join("a.txt")).unwrap(), "a\n");
         assert_eq!(stash_count(d), 2, "apply keeps the entry");
         // A stale hash or a missing index runs nothing.
-        let e = conflict(stash_entry_op(s(d), StashOp::Drop, 0, &list[1].hash));
+        let e = conflict(stash_entry_op(s(d), StashOp::Drop, 0, &list[1].hash, true));
         assert_eq!(
             e,
             "The stash list changed since it was shown. It was reloaded; nothing was dropped."
@@ -7284,23 +7481,24 @@ mod ref_tests {
             StashOp::Pop,
             0,
             "0".repeat(40).as_str(),
+            true,
         ));
         assert!(e.ends_with("nothing was applied."), "{e}");
         assert!(matches!(
-            stash_entry_op(s(d), StashOp::Drop, 5, &list[0].hash),
+            stash_entry_op(s(d), StashOp::Drop, 5, &list[0].hash, true),
             Err(RefErr::NotFound(_))
         ));
         assert_eq!(stash_count(d), 2);
         // Pop applies and removes; drop removes.
         g(&w, &["checkout", "-q", "--", "a.txt"]);
         assert_eq!(
-            stash_entry_op(s(d), StashOp::Pop, 0, &list[0].hash),
+            stash_entry_op(s(d), StashOp::Pop, 0, &list[0].hash, true),
             Ok(None)
         );
         assert_eq!(std::fs::read_to_string(d.join("a.txt")).unwrap(), "two\n");
         assert_eq!(stash_count(d), 1);
         assert_eq!(
-            stash_entry_op(s(d), StashOp::Drop, 0, &list[1].hash),
+            stash_entry_op(s(d), StashOp::Drop, 0, &list[1].hash, true),
             Ok(None)
         );
         assert_eq!(stash_count(d), 0);
@@ -7309,7 +7507,7 @@ mod ref_tests {
         g(d, &["add", "a.txt"]);
         stash_push(s(d), None, false).unwrap();
         let h = stashes_of(s(d)).unwrap()[0].hash.clone();
-        assert_eq!(stash_entry_op(s(d), StashOp::Pop, 0, &h), Ok(None));
+        assert_eq!(stash_entry_op(s(d), StashOp::Pop, 0, &h, true), Ok(None));
         assert_eq!(g(d, &["diff", "--cached", "--name-only"]), "");
         assert_eq!(g(d, &["diff", "--name-only"]), "a.txt");
     }
@@ -7322,7 +7520,7 @@ mod ref_tests {
         stash_push(s(d), None, false).unwrap();
         commit(d, "a.txt", "committed\n", "diverge");
         let h = stashes_of(s(d)).unwrap()[0].hash.clone();
-        let e = conflict(stash_entry_op(s(d), StashOp::Pop, 0, &h));
+        let e = conflict(stash_entry_op(s(d), StashOp::Pop, 0, &h, true));
         // git prints the conflict on STDOUT; it must be in the error.
         assert!(e.contains("CONFLICT"), "{e}");
         assert!(e.contains("a.txt"), "{e}");
@@ -7332,7 +7530,7 @@ mod ref_tests {
         assert!(is_conflicted(f), "{f:?}");
         // The same through apply.
         g(d, &["checkout", "-q", "HEAD", "--", "a.txt"]);
-        let e = conflict(stash_entry_op(s(d), StashOp::Apply, 0, &h));
+        let e = conflict(stash_entry_op(s(d), StashOp::Apply, 0, &h, true));
         assert!(e.contains("CONFLICT"), "{e}");
         assert_eq!(stash_count(d), 1);
     }
@@ -7353,11 +7551,11 @@ mod ref_tests {
             .args(["-C", s(d), "merge", "side"])
             .output()
             .unwrap();
-        let e = validation(stash_entry_op(s(d), StashOp::Apply, 0, &h));
+        let e = validation(stash_entry_op(s(d), StashOp::Apply, 0, &h, true));
         assert!(e.contains("A merge is in progress in this worktree; applying a stash is not available. Finish or abort it in the terminal."), "{e}");
-        validation(stash_entry_op(s(d), StashOp::Pop, 0, &h));
+        validation(stash_entry_op(s(d), StashOp::Pop, 0, &h, true));
         assert_eq!(stash_count(d), 1);
-        assert_eq!(stash_entry_op(s(d), StashOp::Drop, 0, &h), Ok(None));
+        assert_eq!(stash_entry_op(s(d), StashOp::Drop, 0, &h, true), Ok(None));
         assert_eq!(stash_count(d), 0);
     }
 
@@ -7384,6 +7582,73 @@ mod ref_tests {
             saved_note("boom".into(), true),
             "boom\nA stash entry was saved (stash@{0}); your changes are in it."
         );
+    }
+
+    #[test]
+    fn force_delete_keeps_a_branch_that_moved_after_the_check() {
+        let tmp = repo();
+        let d = tmp.path();
+        g(d, &["branch", "side"]);
+        g(d, &["config", "branch.side.remote", "origin"]);
+        let old = g(d, &["rev-parse", "side"]);
+        // The branch moves after the caller's tip check.
+        std::fs::write(d.join("a.txt"), "moved\n").unwrap();
+        g(d, &["commit", "-q", "-a", "-m", "moved"]);
+        g(d, &["branch", "-f", "side", "HEAD"]);
+        let new = g(d, &["rev-parse", "side"]);
+        assert_ne!(old, new);
+        let e = conflict(force_delete_ref(s(d), "side", &old));
+        assert_eq!(
+            e,
+            "side moved since the delete was confirmed. It was reloaded; nothing was deleted."
+        );
+        assert_eq!(g(d, &["rev-parse", "side"]), new, "the branch is kept");
+        assert_eq!(g(d, &["config", "--get", "branch.side.remote"]), "origin");
+        // With the tip it has now it goes, and so does its config section.
+        assert_eq!(force_delete_ref(s(d), "side", &new), Ok(()));
+        assert!(!branch_names(d).contains(&"side".to_string()));
+        assert!(read_git_line(s(d), &["config", "--get", "branch.side.remote"]).is_none());
+    }
+
+    #[test]
+    fn stash_drop_and_dirty_apply_pop_need_the_confirm() {
+        let tmp = repo();
+        let d = tmp.path();
+        std::fs::write(d.join("a.txt"), "stashed\n").unwrap();
+        stash_push(s(d), Some("one"), false).unwrap();
+        let h = stashes_of(s(d)).unwrap()[0].hash.clone();
+        // Drop: always refused without the confirm; nothing is dropped.
+        let e = conflict(stash_entry_op(s(d), StashOp::Drop, 0, &h, false));
+        assert!(e.ends_with("confirm to proceed."), "{e}");
+        assert_eq!(stash_count(d), 1);
+        // Apply and pop onto a dirty tree (an untracked file counts): refused,
+        // the tree and the list untouched.
+        std::fs::write(d.join("new.txt"), "dirty\n").unwrap();
+        for op in [StashOp::Apply, StashOp::Pop] {
+            let e = conflict(stash_entry_op(s(d), op, 0, &h, false));
+            assert!(e.contains("uncommitted changes"), "{e}");
+            assert!(e.ends_with("confirm to proceed."), "{e}");
+            assert_eq!(stash_count(d), 1);
+            assert_eq!(std::fs::read_to_string(d.join("a.txt")).unwrap(), "a\n");
+        }
+        // With the confirm the dirty apply runs.
+        assert_eq!(stash_entry_op(s(d), StashOp::Apply, 0, &h, true), Ok(None));
+        assert_eq!(
+            std::fs::read_to_string(d.join("a.txt")).unwrap(),
+            "stashed\n"
+        );
+        // A clean tree needs no confirm for apply or pop.
+        g(d, &["checkout", "-q", "--", "a.txt"]);
+        std::fs::remove_file(d.join("new.txt")).unwrap();
+        assert_eq!(stash_entry_op(s(d), StashOp::Apply, 0, &h, false), Ok(None));
+        g(d, &["checkout", "-q", "--", "a.txt"]);
+        assert_eq!(stash_entry_op(s(d), StashOp::Pop, 0, &h, false), Ok(None));
+        assert_eq!(stash_count(d), 0);
+        // And a confirmed drop goes.
+        stash_push(s(d), Some("two"), false).unwrap();
+        let h = stashes_of(s(d)).unwrap()[0].hash.clone();
+        assert_eq!(stash_entry_op(s(d), StashOp::Drop, 0, &h, true), Ok(None));
+        assert_eq!(stash_count(d), 0);
     }
 
     #[test]
@@ -7433,24 +7698,27 @@ mod ref_tests {
         );
         // The stale index with the right hash is refused; nothing runs.
         for op in [StashOp::Apply, StashOp::Pop, StashOp::Drop] {
-            conflict(stash_entry_op(s(d), op, 0, &shown.hash));
+            conflict(stash_entry_op(s(d), op, 0, &shown.hash, true));
         }
         assert_eq!(stash_count(d), 2);
         assert_eq!(g(d, &["status", "--porcelain"]), "");
         // With the current index the by-hash apply applies OUR content.
         assert_eq!(
-            stash_entry_op(s(d), StashOp::Apply, 1, &shown.hash),
+            stash_entry_op(s(d), StashOp::Apply, 1, &shown.hash, true),
             Ok(None)
         );
         assert_eq!(std::fs::read_to_string(d.join("a.txt")).unwrap(), "first\n");
         g(d, &["checkout", "-q", "--", "a.txt"]);
         // Pop drops exactly the popped entry, leaving the sibling's.
-        assert_eq!(stash_entry_op(s(d), StashOp::Pop, 1, &shown.hash), Ok(None));
+        assert_eq!(
+            stash_entry_op(s(d), StashOp::Pop, 1, &shown.hash, true),
+            Ok(None)
+        );
         let left = stashes_of(s(d)).unwrap();
         assert_eq!(left.len(), 1);
         assert_eq!(left[0].message, "sibling");
         // Drop of an entry that is gone is a 409; the sibling's stays.
-        let gone = conflict(stash_entry_op(s(d), StashOp::Drop, 0, &shown.hash));
+        let gone = conflict(stash_entry_op(s(d), StashOp::Drop, 0, &shown.hash, true));
         assert!(gone.ends_with("nothing was dropped."), "{gone}");
         assert_eq!(stash_count(d), 1);
     }

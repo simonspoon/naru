@@ -386,7 +386,7 @@ export function createGitActions(deps: {
       const plan = discardPlan(items, ctx.worktree, ctx.branch)
       if (!(await confirm(plan))) return { ok: false, reason: 'cancelled' }
       const verb: Verb = items.every((i) => i.untracked) ? 'delete' : 'discard'
-      return send(verb, ctx, { paths: plan.paths }, (b) => api.discard(b))
+      return send(verb, ctx, { paths: plan.paths }, (b) => api.discard({ ...b, confirm: true }))
     },
     stageHunks: (ctx: WriteCtx, t: HunkTarget): Promise<WriteOutcome> =>
       sendHunks('stage', ctx, t, (b) => api.stageHunks(b)),
@@ -434,7 +434,7 @@ export function createGitActions(deps: {
       if (t.hunks.length === 0) return { ok: false, reason: 'empty' }
       const plan = discardHunkPlan(t.path, lost, ctx.worktree, ctx.branch)
       if (!(await confirm(plan))) return { ok: false, reason: 'cancelled' }
-      return sendHunks('discard', ctx, t, (b) => api.discardHunks(b))
+      return sendHunks('discard', ctx, t, (b) => api.discardHunks({ ...b, confirm: true }))
     },
   }
 }
@@ -557,6 +557,26 @@ export function popPlan(
   })
 }
 
+/** Applying onto a dirty (or not known to be clean) tree (naru task 2802). */
+export function applyPlan(
+  stash: GitStash,
+  dirty: boolean | null,
+  ctx: { worktree: string; branch: string },
+): ConfirmPlan {
+  return plan(ctx, {
+    title: `Apply ${stash.name}?`,
+    listed: [stashLine(stash)],
+    listLabel: 'Stash',
+    consequences: [
+      dirty === null
+        ? 'It is not known whether this worktree has uncommitted changes.'
+        : 'This worktree has uncommitted changes.',
+      'The stash is applied on top of them and stays in the list. If it conflicts, git leaves the conflicts in the files.',
+    ],
+    confirmLabel: 'Apply stash',
+  })
+}
+
 export function dropPlan(stash: GitStash, ctx: { worktree: string; branch: string }): ConfirmPlan {
   return plan(ctx, {
     title: `Drop ${stash.name}?`,
@@ -639,7 +659,9 @@ export const refFailurePrefix = {
  *   refusal as unmerged (a 200 with `deleted: false`) awaits a SECOND, distinct
  *   `confirm(forceDeletePlan)` listing what would become unreachable; only a
  *   yes sends `force` with that result's `hash` as `expected_hash`.
- * - `dropStash` always confirms; `popStash` reads the worktree fresh and confirms unless it is known clean (a failed read asks).
+ * - `dropStash` always confirms; `popStash` and `applyStash` read the worktree fresh and confirm unless it is known clean (a failed read asks).
+ * - The server refuses those without `confirm: true` (naru task 2802), which
+ *   is put in the body only after a yes.
  * - `switchBranch` confirms from the main checkout and from a detached HEAD
  *   (and so does a create that switches in the main checkout). The stash
  *   variant (`stashAndSwitch`) is its own method, only for the explicit
@@ -694,15 +716,18 @@ export function createGitRefActions(deps: {
   ): Promise<RefOutcome> {
     if (ctx.worktree === null) return { ok: false, reason: 'no-worktree' }
     const wt = { worktree: ctx.worktree, branch: ctx.branch }
-    if (verb === 'drop' && !(await confirm(dropPlan(req.stash, wt)))) {
-      return { ok: false, reason: 'cancelled' }
-    }
-    if (verb === 'pop') {
+    let confirmed = false
+    if (verb === 'drop') {
+      if (!(await confirm(dropPlan(req.stash, wt)))) return { ok: false, reason: 'cancelled' }
+      confirmed = true
+    } else {
       // The tab's cached view can be stale (an agent may have dirtied the
       // tree since): decide from a read made now; a failed read = unknown = ask.
       const dirty = await api.readDirty(ctx.worktree, ctx.repo).catch(() => null)
-      if (dirty !== false && !(await confirm(popPlan(req.stash, dirty, wt)))) {
-        return { ok: false, reason: 'cancelled' }
+      if (dirty !== false) {
+        const p = verb === 'pop' ? popPlan(req.stash, dirty, wt) : applyPlan(req.stash, dirty, wt)
+        if (!(await confirm(p))) return { ok: false, reason: 'cancelled' }
+        confirmed = true
       }
     }
     const body: GitStashEntryBody = {
@@ -710,6 +735,7 @@ export function createGitRefActions(deps: {
       index: req.stash.index,
       hash: req.stash.hash,
     }
+    if (confirmed) body.confirm = true
     return guarded(refFailurePrefix.entry(verb, req.stash.name, ctx.worktree), async () => ({
       ok: true,
       notice: (await call(body)).notice,

@@ -338,7 +338,8 @@ JSON body:
 { "worktree": "<path>",         // REQUIRED, non-empty; byte-equal to a path in the worktree list
   "repo":     "<path>" | absent, // same selector as the GETs (resolve_repo_dir)
   "paths":    ["a", "b"] | absent,
-  "all":      true | absent }    // stage/unstage only
+  "all":      true | absent,     // stage/unstage only
+  "confirm":  true | absent }    // discard only, REQUIRED there (below)
 ```
 
 - **Guard.** `require_agent_access` is the first thing in each handler: a
@@ -388,8 +389,24 @@ JSON body:
   - **discard**: tracked paths in one `git restore --worktree` (back to the
     INDEX version, staged changes kept); untracked paths in `git clean -f -d -q
     -- <paths>`, limited to exactly those (an untracked folder entry `dir/`
-    removes that folder; git refuses nested repos itself), chunked if the argv
-    would pass ~100 KiB.
+    removes that folder; a nested repo refuses the discard, below), chunked if
+    the argv would pass ~100 KiB.
+- **Confirm (409 `conflict`, naru task 2802).** `discard` without `confirm:
+  true` is refused after the allowlist and the per-file rules, before git runs:
+  `Discarding throws these changes away and cannot be undone; confirm to
+  proceed.` Nothing is changed and no cache is dropped. The UI puts the flag in
+  the body only after its confirm dialog answered yes; `discard-hunks` has the
+  same flag and refusal. This is the same server-side pattern as
+  `allow_published` / `allow_merge` on an amend and `force` + `expected_hash`
+  on a branch delete: a local caller past the agent gate cannot destroy work
+  by leaving the dialog out.
+- **Nested repositories (409, naru task 2802).** `git clean` silently skips a
+  nested git repository, so before anything runs `git::discard` checks each
+  untracked entry for a `.git` of its own and reads a dry run (`git clean -n -d
+  -- <paths>`, `LC_ALL=C`, lines `Would skip repository <path>`). When any
+  would be skipped the whole discard is refused: `git does not delete a nested
+  git repository: <paths>. Nothing was discarded; remove it in the terminal.`
+  A dry run that cannot be read refuses too.
 - **Never.** `git add -A` / `git add .` (would mark a conflict resolved); a
   bare `git reset` (would abort a merge in progress); `git clean -x` or a
   `clean` without paths; touching the index in a discard; deleting
@@ -428,8 +445,13 @@ first, JSON Content-Type, never a GET). JSON body:
   "repo":     "<path>" | absent,
   "path":     "<file>",            // REQUIRED; byte-equal to a path of a FRESH view_of
   "digest":   "<string>",          // REQUIRED; GitFileDiff.digest the client rendered from
-  "hunks": [ { "index": 0, "lines": [3, 4] | absent } ] }   // REQUIRED, non-empty
+  "hunks": [ { "index": 0, "lines": [3, 4] | absent } ],   // REQUIRED, non-empty
+  "confirm":  true | absent }      // discard-hunks only, REQUIRED there
 ```
+
+`discard-hunks` without `confirm: true` is a 409 (the text of the whole-file
+discard's refusal), checked after every other check and before `git apply`;
+nothing is applied.
 
 `index` is the 0-based ordinal of the `@@` hunk, each at most once. `lines`
 absent is the whole hunk; present it is a non-empty list of 0-based body-line
@@ -545,7 +567,10 @@ only; a read that fails is `None`/`false`, never a panic):
   branch, the first remote-tracking branch that contains HEAD (`for-each-ref
   --contains HEAD refs/remotes`, `<remote>/HEAD` skipped), which is how a
   branch pushed without tracking is seen (naru task 2801); else None.
-  `head_published` = `published_on` is set. Always None / false on an unborn
+  `head_published` = `published_on` is set, OR that `for-each-ref` lookup
+  failed, could not be run or passed its 5 s timeout (`git::pushed_on`, naru
+  task 2802): it fails closed, `head_published: true` with `published_on:
+  null`, so the amend still needs `allow_published`. Always None / false on an unborn
   or a detached HEAD (amending there moves no branch). It reads the local
   remote-tracking refs as of the last fetch or push; nothing is fetched.
 - `author_name`/`author_email` = `git -C <dir> config --get user.name|email`
@@ -584,7 +609,10 @@ writes runs before every check passes:
    (`The staged changes changed since they were shown. They were reloaded;
    nothing was committed.`, caches dropped); amend and `head_published` without
    `allow_published: true` (`The last commit is already on <published_on>. Amending
-   rewrites published history; confirm to proceed.`); amend of a merge commit
+   rewrites published history; confirm to proceed.`, or when the pushed lookup
+   failed, `It could not be checked whether the last commit was pushed.
+   Amending a pushed commit rewrites published history; confirm to proceed.`);
+   amend of a merge commit
    (`head.is_merge`) without `allow_merge: true` (`The last commit is a merge
    commit. Amending replaces it with a new merge commit; confirm to proceed.`).
 6. `git::commit` (below). Git or a hook failing is `409 conflict` carrying the
@@ -753,8 +781,13 @@ drop are allowed.
    is 409. With `force: true`: `expected_hash` is REQUIRED, exactly 40 or 64
    lowercase hex digits (422), and must equal the branch's current tip, else
    409 `<name> moved since the delete was confirmed. It was reloaded; nothing
-   was deleted.`; then `git branch -D`. The tip is re-read right before git
-   runs; the window is one spawn, not atomic. A deletion answers `{ deleted:
+   was deleted.`; then `git update-ref -d refs/heads/<name> <expected_hash>`
+   (`git::force_delete_ref`, naru task 2802), which git applies only while the
+   ref still holds that hash: a branch that moves after the check is kept and
+   answers the same 409. `update-ref` does not refuse a checked-out branch as
+   `branch -D` did, so the branch list is re-read right before it (422 when a
+   worktree now holds the branch; the window is one spawn). The branch's `branch.<name>` config section is then
+   removed, as `git branch -D` would. A deletion answers `{ deleted:
    true, refusal: null, hash, unmerged: [], unmerged_more: false, view }`.
 5. `POST .../git/stash-push` `{worktree, repo?, message?, include_untracked?}`.
    `message` is trimmed; blank = none; a control character (so a newline) or
@@ -767,9 +800,15 @@ drop are allowed.
    git fails after saving its entry (its cleanup step failed) the 409 adds `A
    stash entry was saved (stash@{0}); your changes are in it.`
 6. `POST .../git/stash-apply`, `.../stash-pop`, `.../stash-drop` `{worktree,
-   repo?, index, hash}`. A FRESH `stashes_of`: no entry at `index` = 404; its
+   repo?, index, hash, confirm?}`. A FRESH `stashes_of`: no entry at `index` = 404; its
    `hash` not equal to the body's = 409 `The stash list changed since it was
-   shown. It was reloaded; nothing was applied.` (`...dropped.` for drop). Git
+   shown. It was reloaded; nothing was applied.` (`...dropped.` for drop).
+   Then the confirm (naru task 2802), a 409 that runs nothing: a drop without
+   `confirm: true` (`Dropping stash@{N} removes it for every worktree and
+   cannot be undone here; confirm to proceed.`), and an apply or pop without it
+   when a fresh `view_of` lists any file, untracked included, or cannot be read
+   (`This worktree has uncommitted changes and stash@{N} would be applied on
+   top of them; confirm to proceed.`). A clean tree needs no flag. Git
    is then handed the stash COMMIT hash, never a position (the list is shared
    by every worktree, and a sibling's `stash push` shifts indexes): apply =
    `git stash apply <hash>`; pop = that apply and, only on success, a re-list
@@ -841,7 +880,7 @@ and a linked worktree whose writes do not touch the main checkout.
 
 Branch and stash actions live on the Git tab's **Refs** panel (`GitSidePanel`) and in the History commit detail. Every rule is pure: `frontend/src/gitRefs.ts` (which controls are off and why, labels, target lines, the name check; `gitRefs.test.ts`) and `frontend/src/gitActions.ts` (the confirm plans and `createGitRefActions`, the gate; `gitActions.test.ts`). `useGitRefOps.ts` owns the state, `GitRefDialogs` / `GitFormDialog` / `GitConfirmDialog` / `GitRefMessages` lay it out; the components never call the api. The ops hook lives in `GitRepoPane`, not in the panel: a drawer panel unmounts when it closes, and "Create branch here" in History has to work with it closed.
 
-- **The gate** (`createGitRefActions({api, confirm})`; the api is bound only in `projectGitRefApi`). `deleteBranch` always awaits `confirm(deleteBranchPlan)` before the first call; a refusal as unmerged (a 200, `deleted: false`) awaits a SECOND, distinct `confirm(forceDeletePlan)` that lists `unmerged` as "abc1234 subject" (up to 50, then "and more" when `unmerged_more`) and states the count that becomes unreachable, even 0 ("0 commits become unreachable: ..."); only a yes sends `force: true, expected_hash: <that result's hash>`. The second confirm is skipped (cancelled) if the selected worktree changed during the first request, and a force reply with `deleted: false` is an error ("<name> was not deleted." + the refusal), not a success. `dropStash` always confirms; `popStash` reads the worktree fresh (`getProjectGit`, not the tab's cached view) and confirms unless it is known clean, so a failed read asks; `apply` never asks. `switchBranch` confirms from the main checkout (it is the main checkout, N linked worktrees are based on it, agents' worktrees are made from it, Naru may be served from this folder) and from a detached HEAD (commits on no branch are reachable only through the reflog; create a branch first); so does a create with "Switch to it" in the main checkout (it moves the main checkout too). A plain switch never sends `stash`: `stash: true` is sent only by `stashAndSwitch`, from the explicit "Stash and switch" button of the failure alert, and it asks the same confirms (plus "stashed first"). A `false` answer sends nothing; no worktree path sends nothing; every body carries `worktree` (and `repo` when the tab has one), and the stash entry calls carry the row's `index` and `hash`. Every confirm names the branch or stash AND the worktree's full path and branch. `ConfirmPlan` is `DiscardPlan` with an optional `irreversible` and a `moreLabel`; `GitConfirmDialog` takes it. `gitActions.test.ts` pins that `deleteProjectGitBranch`, `dropProjectGitStash`, `popProjectGitStash` and `switchProjectGitBranch` appear only in `api.ts` and `gitActions.ts`, their route strings only in `api.ts`, that the force call is one site after the second confirm, that `body.stash = true` appears once, and that `projectGitRefApi` is used only by `gitActions.ts` and `useGitRefOps.ts`.
+- **The gate** (`createGitRefActions({api, confirm})`; the api is bound only in `projectGitRefApi`). `deleteBranch` always awaits `confirm(deleteBranchPlan)` before the first call; a refusal as unmerged (a 200, `deleted: false`) awaits a SECOND, distinct `confirm(forceDeletePlan)` that lists `unmerged` as "abc1234 subject" (up to 50, then "and more" when `unmerged_more`) and states the count that becomes unreachable, even 0 ("0 commits become unreachable: ..."); only a yes sends `force: true, expected_hash: <that result's hash>`. The second confirm is skipped (cancelled) if the selected worktree changed during the first request, and a force reply with `deleted: false` is an error ("<name> was not deleted." + the refusal), not a success. `dropStash` always confirms; `popStash` and `applyStash` read the worktree fresh (`getProjectGit`, not the tab's cached view) and confirm unless it is known clean (`popPlan` / `applyPlan`), so a failed read asks. `confirm: true` goes in the body only after a yes (naru task 2802): always for a drop, for a pop or apply only when it asked (a known-clean tree sends no flag); if the tree turned dirty between that read and the server's, the server's 409 is shown and the next click asks. `switchBranch` confirms from the main checkout (it is the main checkout, N linked worktrees are based on it, agents' worktrees are made from it, Naru may be served from this folder) and from a detached HEAD (commits on no branch are reachable only through the reflog; create a branch first); so does a create with "Switch to it" in the main checkout (it moves the main checkout too). A plain switch never sends `stash`: `stash: true` is sent only by `stashAndSwitch`, from the explicit "Stash and switch" button of the failure alert, and it asks the same confirms (plus "stashed first"). A `false` answer sends nothing; no worktree path sends nothing; every body carries `worktree` (and `repo` when the tab has one), and the stash entry calls carry the row's `index` and `hash`. Every confirm names the branch or stash AND the worktree's full path and branch. `ConfirmPlan` is `DiscardPlan` with an optional `irreversible` and a `moreLabel`; `GitConfirmDialog` takes it. `gitActions.test.ts` pins that `deleteProjectGitBranch`, `dropProjectGitStash`, `popProjectGitStash` and `switchProjectGitBranch` appear only in `api.ts` and `gitActions.ts`, their route strings only in `api.ts`, that the force call is one site after the second confirm, that `body.stash = true` appears once, and that `projectGitRefApi` is used only by `gitActions.ts` and `useGitRefOps.ts`.
 - **Rows.** A branch or stash row is `div.git-side-rowwrap[data-git-row]` (`data-nacts`) holding the untouched `button.git-side-row` (click scopes History, `data-git-item`) and a sibling `span.git-side-row-acts[data-side-acts]`, so nothing is nested. Local branch: Switch `->`, Rename, Delete; remote branch: only "Create local branch from this" (`+`; no push, pull, fetch, set-upstream, merge, rebase, reset or remote delete exists anywhere); stash: Apply, Pop, Drop. With a mouse (`hover: hover` and `pointer: fine`) they are compact glyphs at the right of the first line, hidden until hover, focus-within or the selected row (the `.git-wt-actions` pattern); the empty `.git-side-row-menu` spans reserve their width so the name ellipsises before them. On touch, and always at <= 600px, they sit in flow as a third line, always visible, glyph plus text, 44px high. Section headers carry `+` (New branch; Stash) in `.git-side-actions`, glyph only.
 - **Labels and disabled.** Every control has the same `aria-label` and `title`, naming its target and, for Switch / Apply / Pop / New branch / Stash, the worktree's full path and branch ("Switch to feature/x in /abs/path (branch main)", "Apply stash@{0} to main in /abs/path", "Rename branch x", "Delete branch x", "Drop stash@{0}", "Create local branch from origin/x"). A control that is off is `aria-disabled="true"` (never `disabled`: that drops focus and the tooltip), its label ends with the reason, and the click is ignored. Reasons: busy / a dialog open ("Another git action is in progress."), no worktree path ("The worktree path is unknown."), a loading worktree; a branch held by another worktree (Switch, Rename, Delete: "Checked out in <path>"); the current branch (Switch "Already the current branch", Delete "Can't delete the checked-out branch"; Rename stays on and its form says "Renaming the branch checked out here."); an operation in progress (Switch, Stash, Apply, Pop: "Merge in progress in this worktree. Finish or abort it in the terminal."; New branch stays on but its "Switch to it" checkbox is off with that reason; Rename, Delete, Drop stay on); a name starting with `-` (all three: "Rename it in the terminal."); an unborn HEAD (New branch and Stash: "No commits yet."; detected as a non-detached worktree whose branch list has no `is_head` row, because the server leaves create and stash on an unborn HEAD to git's own 409). On touch a muted `p.git-side-why[data-side-why]` under the actions shows the row's reasons; with a mouse the reason is the tooltip.
 - **Target lines.** `p.git-side-target[data-side-target="branches|stashes"]` first in each section body: "Switch and New branch act on <branch> * <full path>" and "Stashes are shared by all worktrees. Apply, Pop and Stash act on <branch> * <full path>" (one ellipsised line, full text in the tooltip). On a detached HEAD the Branches body also has `div.git-side-detached[data-side-detached]`: "HEAD is detached at abc1234" and a "Create branch here" button (`data-side-act="branch-here"`; its form switches by default and says the new branch keeps these commits).

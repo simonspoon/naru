@@ -263,6 +263,13 @@ describe('amend confirm dialog', () => {
     expect(p.consequences[1]).toContain('feat and origin/feat diverge')
   })
 
+  it('a pushed lookup that failed (published, no branch named) still asks, and says so', () => {
+    const p = amendConfirmPlan(info({ head_published: true, published_on: null }), WT, 'feat')!
+    expect(p.title).toBe('Amend a published commit?')
+    expect(p.consequences[0]).toBe('It could not be checked whether this commit was already pushed.')
+    expect(p.consequences[1]).toContain('feat and its remote branch diverge')
+  })
+
   it('a merge commit says so, alone or with the published lines', () => {
     const merged = { ...head, is_merge: true }
     const m = amendConfirmPlan(info({ head: merged }), WT, 'main')!

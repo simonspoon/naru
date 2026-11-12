@@ -10755,6 +10755,21 @@ struct GitWriteBody {
     paths: Option<Vec<String>>,
     /// stage/unstage only: every eligible file, computed server-side.
     all: Option<bool>,
+    /// discard only, REQUIRED there: the person confirmed (naru task 2802).
+    confirm: Option<bool>,
+}
+
+/// The 409 of a discard route called without `confirm: true` (naru task
+/// 2802); nothing was changed.
+const DISCARD_UNCONFIRMED: &str =
+    "Discarding throws these changes away and cannot be undone; confirm to proceed.";
+
+fn git_write_conflict(message: impl Into<String>) -> ApiError {
+    ApiError {
+        status: StatusCode::CONFLICT,
+        code: "conflict",
+        message: message.into(),
+    }
 }
 
 fn git_write_validation(message: impl Into<String>) -> ApiError {
@@ -10872,6 +10887,9 @@ async fn git_write(
         git::check_write(op, &picked).map_err(git_write_validation)?;
         picked
     };
+    if op == git::WriteOp::Discard && body.confirm != Some(true) {
+        return Err(git_write_conflict(DISCARD_UNCONFIRMED));
+    }
     let written = {
         let d = dir.clone();
         tokio::task::spawn_blocking(move || git::apply_write(&d, op, &files))
@@ -10921,8 +10939,9 @@ async fn post_project_git_unstage(
     git_write(&state, id, git::WriteOp::Unstage, body).await
 }
 
-/// `POST /api/projects/{id}/git/discard` — `{worktree, repo?, paths}`; no
-/// `all`. Same gate as `stage`.
+/// `POST /api/projects/{id}/git/discard` — `{worktree, repo?, paths,
+/// confirm}`; no `all`. Same gate as `stage`; without `confirm: true` a 409
+/// and nothing is changed.
 async fn post_project_git_discard(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
@@ -11093,10 +11112,13 @@ async fn post_project_git_commit(
     }
     if amend {
         if info.head_published && body.allow_published != Some(true) {
-            let on = info.published_on.as_deref().unwrap_or("its upstream");
-            return Err(conflict(format!(
-                "The last commit is already on {on}. Amending rewrites published history; confirm to proceed."
-            )));
+            return Err(conflict(match info.published_on.as_deref() {
+                Some(on) => format!(
+                    "The last commit is already on {on}. Amending rewrites published history; confirm to proceed."
+                ),
+                // The lookup failed or timed out (naru task 2802): fail closed.
+                None => "It could not be checked whether the last commit was pushed. Amending a pushed commit rewrites published history; confirm to proceed.".into(),
+            }));
         }
         if info.head.as_ref().is_some_and(|h| h.is_merge) && body.allow_merge != Some(true) {
             return Err(conflict(
@@ -11194,6 +11216,9 @@ struct GitStashEntryBody {
     repo: Option<String>,
     index: Option<u32>,
     hash: Option<String>,
+    /// The person confirmed (naru task 2802): required by drop, and by apply
+    /// and pop onto a worktree with uncommitted changes.
+    confirm: Option<bool>,
 }
 
 fn git_ref_worktree(w: Option<&str>) -> ApiResult<String> {
@@ -11432,7 +11457,7 @@ async fn post_project_git_stash_push(
 }
 
 /// Shared by `POST .../git/stash-{apply,pop,drop}`: `{worktree, repo?, index,
-/// hash}`; see `git::stash_entry_op`.
+/// hash, confirm?}`; see `git::stash_entry_op`.
 async fn git_stash_entry(
     state: &AppState,
     id: i64,
@@ -11445,8 +11470,9 @@ async fn git_stash_entry(
         .ok_or_else(|| git_write_validation("index is required"))?;
     let hash = git_ref_required(body.hash.as_deref(), "hash")?;
     let dir = git_ref_dir(state, id, &worktree, body.repo.as_deref()).await?;
+    let confirmed = body.confirm == Some(true);
     let notice = git_ref_write(state, &dir, move |d| {
-        git::stash_entry_op(d, op, index, &hash)
+        git::stash_entry_op(d, op, index, &hash, confirmed)
     })
     .await?;
     git_ref_result(&dir, notice).await
@@ -11498,6 +11524,8 @@ struct GitHunksBody {
     /// The `GitFileDiff.digest` the client rendered from.
     digest: Option<String>,
     hunks: Option<Vec<git::HunkPick>>,
+    /// discard-hunks only, REQUIRED there: the person confirmed (naru task 2802).
+    confirm: Option<bool>,
 }
 
 /// The message of a 409 for a digest that no longer matches; the client shows
@@ -11611,6 +11639,9 @@ async fn git_write_hunks(
     }
     let patch = git::build_partial_patch(&raw, &picks, op != git::WriteOp::Stage)
         .map_err(git_write_validation)?;
+    if op == git::WriteOp::Discard && body.confirm != Some(true) {
+        return Err(git_write_conflict(DISCARD_UNCONFIRMED));
+    }
     let written = {
         let d = dir.clone();
         tokio::task::spawn_blocking(move || git::apply_hunks(&d, op, patch))
@@ -11661,8 +11692,9 @@ async fn post_project_git_unstage_hunks(
     git_write_hunks(&state, id, git::WriteOp::Unstage, body).await
 }
 
-/// `POST /api/projects/{id}/git/discard-hunks` — same body and gate; picks
-/// from the unstaged diff and throws the picked changes away.
+/// `POST /api/projects/{id}/git/discard-hunks` — same body and gate plus
+/// `confirm` (without `confirm: true` a 409, nothing changed); picks from the
+/// unstaged diff and throws the picked changes away.
 async fn post_project_git_discard_hunks(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
@@ -29013,12 +29045,24 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         .unwrap();
         assert_eq!(e.status, StatusCode::UNPROCESSABLE_ENTITY);
         assert!(e.message.contains("nothing to discard"), "{}", e.message);
-        // ... and the rest goes.
+        // Without `confirm: true` (naru task 2802) the server refuses, changing
+        // nothing; `false` is not a confirm either.
+        for body in [
+            json!({"worktree": wt, "paths": ["new.txt"]}),
+            json!({"worktree": wt, "paths": ["new.txt"], "confirm": false}),
+        ] {
+            let e = git_post(&state, id, "discard", body).await.err().unwrap();
+            assert_eq!(e.status, StatusCode::CONFLICT);
+            assert_eq!(e.code, "conflict");
+            assert!(e.message.ends_with("confirm to proceed."), "{}", e.message);
+            assert!(root.join("new.txt").exists());
+        }
+        // ... and with it the rest goes.
         git_post(
             &state,
             id,
             "discard",
-            json!({"worktree": wt, "paths": ["new.txt"]}),
+            json!({"worktree": wt, "paths": ["new.txt"], "confirm": true}),
         )
         .await
         .unwrap();
@@ -30111,11 +30155,41 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             .await
             .unwrap();
         assert_eq!(r["notice"], "No local changes to stash.");
+        // Without `confirm: true` (naru task 2802): drop is refused, and so are
+        // apply and pop onto a dirty tree; the list and the tree stay.
+        std::fs::write(root.join("dirty.txt"), "d\n").unwrap();
+        for route in ["stash-drop", "stash-apply", "stash-pop"] {
+            let e = ref_post(
+                &state,
+                id,
+                route,
+                json!({"worktree": wt, "index": 0, "hash": st[0]["hash"]}),
+            )
+            .await
+            .err()
+            .unwrap();
+            assert_eq!(e.status, StatusCode::CONFLICT, "{route}");
+            assert!(e.message.ends_with("confirm to proceed."), "{}", e.message);
+            assert_eq!(ref_stashes(&state, id).await.len(), 1, "{route}");
+            assert_eq!(git_get_files(&state, id).await, ["?? dirty.txt"], "{route}");
+        }
+        // With it, an apply onto the dirty tree runs.
+        let r = ref_post(
+            &state,
+            id,
+            "stash-apply",
+            json!({"worktree": wt, "index": 0, "hash": st[0]["hash"], "confirm": true}),
+        )
+        .await
+        .unwrap();
+        assert!(r["view"]["files"].as_array().unwrap().len() > 1);
+        git_in(&root, &["reset", "-q", "--hard"]);
+        git_in(&root, &["clean", "-q", "-f", "-d"]);
         ref_post(
             &state,
             id,
             "stash-drop",
-            json!({"worktree": wt, "index": 0, "hash": st[0]["hash"]}),
+            json!({"worktree": wt, "index": 0, "hash": st[0]["hash"], "confirm": true}),
         )
         .await
         .unwrap();
@@ -30948,12 +31022,29 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
 
         // Discard one line pair of the unstaged hunk.
         let u = hunks_diff(&state, id, &wt, "f.txt", Some(false)).await;
-        hunks_post(
+        // Without `confirm: true` (naru task 2802) nothing is applied.
+        let e = hunks_post(
             &state,
             id,
             "discard-hunks",
             json!({"worktree": wt, "path": "f.txt", "digest": u["digest"],
                    "hunks": [{"index": 0, "lines": [1, 3]}]}),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert_eq!(e.status, StatusCode::CONFLICT);
+        assert!(e.message.ends_with("confirm to proceed."), "{}", e.message);
+        assert_eq!(
+            std::fs::read_to_string(root.join("f.txt")).unwrap(),
+            "a\nB\nC\nd\ne\n"
+        );
+        hunks_post(
+            &state,
+            id,
+            "discard-hunks",
+            json!({"worktree": wt, "path": "f.txt", "digest": u["digest"],
+                   "hunks": [{"index": 0, "lines": [1, 3]}], "confirm": true}),
         )
         .await
         .unwrap();
@@ -31322,7 +31413,7 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             &state,
             id,
             "discard",
-            json!({"worktree": wt, "paths": ["base.txt"]}),
+            json!({"worktree": wt, "paths": ["base.txt"], "confirm": true}),
         )
         .await
         .unwrap();

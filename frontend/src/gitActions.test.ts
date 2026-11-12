@@ -170,7 +170,7 @@ describe('the confirm gate (destructive_ops_without_confirm = 0)', () => {
     expect(confirm).toHaveBeenCalledTimes(1)
     expect(confirm.mock.calls[0][0].paths).toEqual(['a', 'b'])
     expect(api.discard).toHaveBeenCalledTimes(1)
-    expect(api.discard).toHaveBeenCalledWith({ worktree: WT, repo: 'sub', paths: ['a', 'b'] })
+    expect(api.discard).toHaveBeenCalledWith({ worktree: WT, repo: 'sub', paths: ['a', 'b'], confirm: true })
   })
 
   it('does not call the api until the confirm settles', async () => {
@@ -181,7 +181,7 @@ describe('the confirm gate (destructive_ops_without_confirm = 0)', () => {
     expect(api.discard).not.toHaveBeenCalled()
     release(true)
     await p
-    expect(api.discard).toHaveBeenCalledWith({ worktree: WT, paths: ['pkg/'] })
+    expect(api.discard).toHaveBeenCalledWith({ worktree: WT, paths: ['pkg/'], confirm: true })
   })
 
   it('stage and unstage never ask, and send one request for all', async () => {
@@ -254,6 +254,7 @@ describe('hunk and line writes', () => {
       path: 'src/a.ts',
       digest: 'd1',
       hunks: [{ index: 0, lines: [1, 2] }],
+      confirm: true,
     })
   })
 
@@ -707,7 +708,13 @@ describe('stash drop and pop', () => {
     expect(out.ok).toBe(true)
     expect(confirm.mock.calls[0][0].title).toContain('stash@{2}')
     expect(confirm.mock.calls[0][0].worktree).toBe(WT)
-    expect(api.dropStash).toHaveBeenCalledWith({ worktree: WT, repo: 'sub', index: 2, hash: stash.hash })
+    expect(api.dropStash).toHaveBeenCalledWith({
+      worktree: WT,
+      repo: 'sub',
+      index: 2,
+      hash: stash.hash,
+      confirm: true,
+    })
   })
 
   it('pop reads the worktree fresh: dirty or unknown asks, clean does not', async () => {
@@ -731,7 +738,22 @@ describe('stash drop and pop', () => {
     expect(clean.api.popStash).toHaveBeenCalledWith({ worktree: WT, index: 2, hash: stash.hash })
   })
 
-  it('apply never asks; a stale list (409) is the error text', async () => {
+  it('pop and apply onto a dirty tree send confirm: true only after a yes', async () => {
+    for (const verb of ['popStash', 'applyStash'] as const) {
+      const no = refHarness(false)
+      vi.mocked(no.api.readDirty).mockResolvedValueOnce(true)
+      expect(await no.actions[verb](rctx, { stash })).toEqual({ ok: false, reason: 'cancelled' })
+      expect(no.confirm).toHaveBeenCalledTimes(1)
+      expect(no.api[verb]).not.toHaveBeenCalled()
+      const yes = refHarness()
+      vi.mocked(yes.api.readDirty).mockResolvedValueOnce(true)
+      expect((await yes.actions[verb](rctx, { stash })).ok).toBe(true)
+      expect(yes.confirm.mock.calls[0][0].title).toBe(verb === 'popStash' ? 'Pop stash@{2}?' : 'Apply stash@{2}?')
+      expect(yes.api[verb]).toHaveBeenCalledWith({ worktree: WT, index: 2, hash: stash.hash, confirm: true })
+    }
+  })
+
+  it('apply onto a clean tree never asks; a stale list (409) is the error text', async () => {
     const { api, confirm, actions } = refHarness(false)
     vi.mocked(api.applyStash).mockRejectedValueOnce(
       Object.assign(new Error('The stash list changed since it was shown.'), { code: 'conflict' }),

@@ -254,6 +254,11 @@ export function commitState(i: CommitStateIn): CommitState {
         `The last commit is already on ${i.info.published_on}: amending it asks you to confirm first.`,
       )
     }
+    if (i.amending && i.info.head_published && i.info.published_on === null) {
+      warnings.push(
+        'It could not be checked whether the last commit was pushed: amending it asks you to confirm first.',
+      )
+    }
     if (i.amending && i.info.head?.is_merge === true) {
       warnings.push('The last commit is a merge commit: amending it asks you to confirm first.')
     }
@@ -303,13 +308,19 @@ export function amendConfirmPlan(
   const head = info.head
   const merge = head?.is_merge === true
   if (!info.head_published && !merge) return null
-  const on = info.published_on ?? 'its upstream'
+  const on = info.published_on
   const line = head === null ? '' : `${head.short_hash} ${splitMessage(head.message).subject}`
   const consequences: string[] = []
-  if (info.head_published) {
+  if (info.head_published && on !== null) {
     consequences.push(
       `This commit is already on ${on}.`,
       `Amending replaces it with a new commit, so ${branch} and ${on} diverge, and anyone who pulled the old commit keeps it.`,
+    )
+  } else if (info.head_published) {
+    // The server's lookup failed or timed out; it fails closed (naru task 2802).
+    consequences.push(
+      'It could not be checked whether this commit was already pushed.',
+      `If it was, amending replaces it with a new commit, so ${branch} and its remote branch diverge, and anyone who pulled the old commit keeps it.`,
     )
   }
   if (merge) {

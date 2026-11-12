@@ -543,6 +543,9 @@ export interface GitWriteBody {
   repo?: string
   paths?: string[]
   all?: true
+  /** Discard only, where the server requires it: sent only after the person
+   * confirmed (naru task 2802). */
+  confirm?: true
 }
 
 /** Stage paths (or everything) in one worktree; answers its fresh view. */
@@ -572,6 +575,9 @@ export interface GitHunkBody {
   path: string
   digest: string
   hunks: { index: number; lines?: number[] }[]
+  /** discard-hunks only, where the server requires it: sent only after the
+   * person confirmed (naru task 2802). */
+  confirm?: true
 }
 
 /** Stage hunks or lines of the unstaged diff; answers the worktree's fresh view. */
@@ -664,6 +670,9 @@ export interface GitStashPushBody extends GitRefBase {
 export interface GitStashEntryBody extends GitRefBase {
   index: number
   hash: string
+  /** Only after the person confirmed (naru task 2802): the server requires it
+   * for a drop, and for an apply or pop onto uncommitted changes. */
+  confirm?: true
 }
 
 export function createProjectGitBranch(id: number, body: GitBranchCreateBody): Promise<GitRefResult> {
