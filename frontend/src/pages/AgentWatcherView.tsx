@@ -165,7 +165,6 @@ export function AgentWatcherView({ active = true }: { active?: boolean } = {}) {
               <feGaussianBlur stdDeviation="10" />
             </filter>
           </defs>
-          <circle className="orbit-ring" cx={C} cy={C} r={RING} />
           <g style={{ stroke: 'var(--violet)' }}>
             {layout.naru.map((d) => (
               <line

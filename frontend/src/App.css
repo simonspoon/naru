@@ -13625,13 +13625,6 @@ body.dock-resizing .dock-body {
   stroke-linejoin: round;
 }
 
-.orbit-ring {
-  fill: none;
-  stroke: var(--border);
-  stroke-width: 2;
-  stroke-dasharray: 6 10;
-}
-
 .orbit-spoke {
   stroke-width: 4;
   stroke-opacity: 0.4;
