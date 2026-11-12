@@ -19,4 +19,9 @@ path: string,
 /**
  * Rename/copy source path ('2' lines only), else None.
  */
-orig_path: string | null, };
+orig_path: string | null, 
+/**
+ * The entry is a submodule: porcelain v2's `<sub>` field starts with
+ * `S`. Defaulted so JSON written before this field still reads.
+ */
+submodule: boolean, };

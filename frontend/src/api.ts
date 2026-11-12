@@ -62,6 +62,7 @@ import type { ProjectGitStashes } from './types/ProjectGitStashes'
 import type { ProjectGitWorktreeDetails } from './types/ProjectGitWorktreeDetails'
 import type { GitCommitFile } from './types/GitCommitFile'
 import type { GitFileDiff } from './types/GitFileDiff'
+import type { GitRepoView } from './types/GitRepoView'
 import type { InboxItem } from './types/InboxItem'
 import type { InboxKind } from './types/InboxKind'
 import type { LibraryBundle } from './types/LibraryBundle'
@@ -516,10 +517,45 @@ export function getProjectGitDiff(
   path: string,
   worktree?: string,
   repo?: string,
+  staged?: boolean,
 ): Promise<GitFileDiff> {
+  // `staged` omitted = the plain unified diff (a conflicted file's markers);
+  // true = the index against HEAD, false = the working tree against the index.
   return request(
-    `/api/projects/${id}/git/diff${gitQuery({ path, worktree, repo })}`,
+    `/api/projects/${id}/git/diff${gitQuery({
+      path,
+      worktree,
+      repo,
+      staged: staged === undefined ? undefined : String(staged),
+    })}`,
   )
+}
+
+/** Body of the working-tree write routes (naru task 2738). `worktree` is the
+ * explicit path of the selected worktree and is never omitted; stage and
+ * unstage take exactly one of `paths` / `all`, discard takes `paths` only. */
+export interface GitWriteBody {
+  worktree: string
+  repo?: string
+  paths?: string[]
+  all?: true
+}
+
+/** Stage paths (or everything) in one worktree; answers its fresh view. */
+export function stageProjectGit(id: number, body: GitWriteBody): Promise<GitRepoView> {
+  return request(`/api/projects/${id}/git/stage`, jsonInit('POST', body))
+}
+
+/** Unstage paths (or everything) in one worktree; answers its fresh view. */
+export function unstageProjectGit(id: number, body: GitWriteBody): Promise<GitRepoView> {
+  return request(`/api/projects/${id}/git/unstage`, jsonInit('POST', body))
+}
+
+/** DESTRUCTIVE: reset tracked files to the staged copy and delete untracked
+ * ones. Call it only through `createGitActions` (gitActions.ts), which asks the
+ * person first; a test pins that this is its only caller. */
+export function discardProjectGit(id: number, body: GitWriteBody): Promise<GitRepoView> {
+  return request(`/api/projects/${id}/git/discard`, jsonInit('POST', body))
 }
 
 /** Recent commit log for the project's local_path repo, or for one of its

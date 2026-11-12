@@ -72,7 +72,7 @@ pub use types::{
     CcSessionThreadStat, CcSessionToolStat, CcSkillStat, CcTokens, CcUsage, CcUsageExtra,
     CcUsageWindow, ConfigCommand, ConfigPrice, ConfigServe, ContrastWarning,
     DEFAULT_ARTIFACT_CONTENT_TYPE, Dependency, DiffStat, DirEntry, DirListing, FileContentView,
-    FileTreeEntry, GitBranch, GitBranchKind, GitCommit, GitCommitDetail, GitCommitFile,
+    FileTreeEntry, GitBranch, GitBranchKind, GitCommit, GitCommitDetail, GitCommitFile, GitFile,
     GitFileDiff, GitRef, GitRefKind, GitRepo, GitRepoView, GitStash, GitStatus, GitWorktree,
     GitWorktreeDetail, GpuInfo, HookRun, InboxItem, InboxKind, LibraryBundle, LibraryDiffKind,
     LibraryImportResult, LibraryItem, LibraryKind, LibraryScope, LibrarySyncResult, LibrarySyncRow,

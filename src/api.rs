@@ -40,8 +40,8 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::core::{
     AgentSession, ArchiveOutcome, Artifact, ArtifactPatch, ArtifactSummary, AudioTestResult,
     CcDashboard, CcLiveSession, CcScorecard, CcUsage, ConfigServe, Error, FileTreeEntry, GitBranch,
-    GitCommit, GitCommitDetail, GitCommitFile, GitFileDiff, GitRepo, GitRepoView, GitStash,
-    GitStatus, GitWorktree, GitWorktreeDetail, InboxItem, InboxKind, LIVE_AUDIO_MAX,
+    GitCommit, GitCommitDetail, GitCommitFile, GitFile, GitFileDiff, GitRepo, GitRepoView,
+    GitStash, GitStatus, GitWorktree, GitWorktreeDetail, InboxItem, InboxKind, LIVE_AUDIO_MAX,
     LIVE_BOARD_INK_STATE_MAX, LIVE_BOARD_KEEP, LIVE_INK_MAX, LibraryBuiltinAction, LibraryBundle,
     LibraryImportResult, LibraryKind, LibraryPatch, LibraryScope, LiveBoardHistoryEntry,
     LiveBoardHistoryPage, LiveBoardInkEntry, LiveBoardKind, LiveBoardSummary, LiveContext,
@@ -210,6 +210,10 @@ struct AppState {
     /// Single-flight locks for those caches (`git_cached`), keyed by
     /// `kind\0dir`: concurrent misses wait for one computation.
     git_flights: Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+    /// Bumped by `drop_git_caches`; a cache fill that read the old value
+    /// before spawning git skips its insert, so a pre-write result can never
+    /// repopulate a cache a write just cleared.
+    git_epoch: Arc<AtomicU64>,
     /// Bumped whenever a spawn invalidates the list cache. A concurrent list
     /// whose subprocess started before the spawn checks this before caching,
     /// so it can't reinsert a pre-spawn snapshot after the invalidation and
@@ -3641,6 +3645,7 @@ pub fn serve(flags: ServeFlags) -> crate::core::Result<()> {
         git_branches_cache: Arc::new(Mutex::new(HashMap::new())),
         git_stashes_cache: Arc::new(Mutex::new(HashMap::new())),
         git_flights: Arc::new(Mutex::new(HashMap::new())),
+        git_epoch: Arc::new(AtomicU64::new(0)),
         git_repos_cache: Arc::new(Mutex::new(HashMap::new())),
         files_tree_cache: Arc::new(Mutex::new(HashMap::new())),
         files_watch: crate::core::files_watch::WatchRegistry::new(),
@@ -4393,6 +4398,19 @@ fn router(state: AppState) -> Router {
         .route("/api/projects/{id}/version", get(get_project_version))
         .route("/api/projects/{id}/git/repos", get(get_project_git_repos))
         .route("/api/projects/{id}/git/diff", get(get_project_git_diff))
+        // Git writes (naru task 2738): the first routes that change a repo.
+        // Each is `require_agent_access`-gated (loopback peer + local Host +
+        // local Origin by default, the LAN page gate under --lan) on top of
+        // the global Host allowlist and JSON Content-Type gate, never a GET.
+        .route("/api/projects/{id}/git/stage", post(post_project_git_stage))
+        .route(
+            "/api/projects/{id}/git/unstage",
+            post(post_project_git_unstage),
+        )
+        .route(
+            "/api/projects/{id}/git/discard",
+            post(post_project_git_discard),
+        )
         // Commit history: recent log, one commit's changed files, and one
         // commit-file's diff. Same read-only/standard-guard-only posture as
         // the two routes above — these execute nothing but `git` shell-outs.
@@ -10190,6 +10208,7 @@ async fn get_git_status(State(state): State<AppState>) -> ApiResult<Response> {
                 // Blocking subprocess (like the agents list) — keep it off
                 // the async workers. A panic just means "no status this poll".
                 let dir = path.clone();
+                let epoch = state.git_epoch.load(Ordering::SeqCst);
                 let s = tokio::task::spawn_blocking(move || git::status_of(&dir))
                     .await
                     .unwrap_or(None);
@@ -10198,7 +10217,9 @@ async fn get_git_status(State(state): State<AppState>) -> ApiResult<Response> {
                 if cache.len() >= 64 {
                     cache.retain(|_, (at, _)| at.elapsed() < GIT_TTL);
                 }
-                cache.insert(path, (Instant::now(), s.clone()));
+                if git_epoch_unchanged(&state, epoch) {
+                    cache.insert(path, (Instant::now(), s.clone()));
+                }
                 s
             }
         };
@@ -10458,6 +10479,7 @@ async fn git_view_at(state: &AppState, dir: &str) -> Option<GitRepoView> {
             // Blocking subprocess (like the sidebar status) — keep it off the
             // async workers. A panic just means "no view this request".
             let d = dir.to_string();
+            let epoch = state.git_epoch.load(Ordering::SeqCst);
             let v = tokio::task::spawn_blocking(move || git::view_of(&d))
                 .await
                 .unwrap_or(None);
@@ -10466,7 +10488,9 @@ async fn git_view_at(state: &AppState, dir: &str) -> Option<GitRepoView> {
             if cache.len() >= 64 {
                 cache.retain(|_, (at, _)| at.elapsed() < GIT_TTL);
             }
-            cache.insert(dir.to_string(), (Instant::now(), v.clone()));
+            if git_epoch_unchanged(state, epoch) {
+                cache.insert(dir.to_string(), (Instant::now(), v.clone()));
+            }
             v
         }
     }
@@ -10596,6 +10620,11 @@ struct GitDiffQuery {
     worktree: Option<String>,
     /// Same repo selector as `GitViewQuery`.
     repo: Option<String>,
+    /// Which side of the file to diff (naru task 2738, `git::diff_of_file`):
+    /// `true` the index against HEAD, `false` the working tree against the
+    /// index, absent today's staged-plus-unstaged diff against HEAD. Typed,
+    /// so a non-boolean is a 400 from the extractor.
+    staged: Option<bool>,
 }
 
 /// Unified diff for one file from the selected worktree's (default: the
@@ -10637,13 +10666,198 @@ async fn get_project_git_diff(
     let Some(file) = file else {
         return Err(not_found());
     };
-    let untracked = file.status == "??";
+    let file = file.clone();
     let target = wanted.clone();
-    let diff = tokio::task::spawn_blocking(move || git::diff_of(&dir, &target, untracked))
+    let staged = q.staged;
+    let diff = tokio::task::spawn_blocking(move || git::diff_of_file(&dir, &file, &target, staged))
         .await
         .unwrap_or(None)
         .unwrap_or_default();
     Ok(Json(GitFileDiff { path: wanted, diff }).into_response())
+}
+
+/// Body of the three git write routes (naru task 2738).
+#[derive(Deserialize)]
+struct GitWriteBody {
+    /// REQUIRED: a path from the worktree list (`resolve_git_dir`). A write
+    /// never silently defaults to `local_path`.
+    worktree: Option<String>,
+    /// Same repo selector as the GET routes.
+    repo: Option<String>,
+    paths: Option<Vec<String>>,
+    /// stage/unstage only: every eligible file, computed server-side.
+    all: Option<bool>,
+}
+
+fn git_write_validation(message: impl Into<String>) -> ApiError {
+    ApiError {
+        status: StatusCode::UNPROCESSABLE_ENTITY,
+        code: "validation",
+        message: message.into(),
+    }
+}
+
+/// Drops every cache a git write can have made stale: the view, log,
+/// branches, sidebar-status and per-worktree-details caches. Cleared whole,
+/// not by key: the write runs in the worktree path git lists (real path) while
+/// a GET may have cached the same folder under `local_path` spelled another
+/// way (a symlinked temp dir, a trailing slash), so a by-key drop would miss
+/// it; each map holds at most 64 small entries and writes are rare. The one
+/// helper later write tasks call after any write attempt.
+fn drop_git_caches(state: &AppState) {
+    state.git_epoch.fetch_add(1, Ordering::SeqCst);
+    state.git_view_cache.lock().unwrap().clear();
+    state.git_cache.lock().unwrap().clear();
+    state.git_wt_details_cache.lock().unwrap().clear();
+    state.git_branches_cache.lock().unwrap().clear();
+    state.git_log_cache.lock().unwrap().clear();
+}
+
+/// True when no `drop_git_caches` ran since `epoch` was read: the fill that
+/// read it may insert. A GET that began before a write holds a pre-write
+/// answer, which must not repopulate a cache the write just cleared.
+fn git_epoch_unchanged(state: &AppState, epoch: u64) -> bool {
+    state.git_epoch.load(Ordering::SeqCst) == epoch
+}
+
+/// Shared by `POST .../git/{stage,unstage,discard}`, after the access gate:
+/// validate the body shape (422), resolve the project, repo and worktree
+/// (404), read a FRESH status as the allowlist (every requested path
+/// byte-equal to a listed `path`, else 404 and no git write), apply the
+/// per-file rules (422), then run the one git call. Git failing is 409
+/// `conflict` carrying its stderr. Caches drop after the attempt either way;
+/// success returns the worktree's fresh `GitRepoView`.
+async fn git_write(
+    state: &AppState,
+    id: i64,
+    op: git::WriteOp,
+    body: GitWriteBody,
+) -> ApiResult<Response> {
+    let worktree = body
+        .worktree
+        .as_deref()
+        .filter(|w| !w.is_empty())
+        .ok_or_else(|| git_write_validation("worktree is required"))?;
+    let all = body.all.unwrap_or(false);
+    let paths = body.paths.unwrap_or_default();
+    match (op, all, paths.is_empty()) {
+        (git::WriteOp::Discard, true, _) => {
+            return Err(git_write_validation(
+                "discard takes paths only; there is no discard-all",
+            ));
+        }
+        (_, true, false) | (_, false, true) => {
+            return Err(git_write_validation(
+                "give exactly one of a non-empty paths list or all: true",
+            ));
+        }
+        _ => {}
+    }
+    let not_found = |message: String| ApiError {
+        status: StatusCode::NOT_FOUND,
+        code: "not_found",
+        message,
+    };
+    let local_path = state.store.lock().unwrap().get_project(id)?.local_path;
+    let Some(local_path) = local_path.filter(|p| std::path::Path::new(p).is_dir()) else {
+        return Err(not_found("project has no git folder".into()));
+    };
+    let base = resolve_repo_dir(state, &local_path, body.repo.as_deref()).await?;
+    let (dir, _worktrees) = resolve_git_dir(state, &base, Some(worktree)).await?;
+    let fresh = {
+        let d = dir.clone();
+        tokio::task::spawn_blocking(move || git::view_of(&d))
+            .await
+            .unwrap_or(None)
+    };
+    let Some(fresh) = fresh else {
+        return Err(not_found(format!("not a git repo: {dir}")));
+    };
+    if all && op == git::WriteOp::Unstage {
+        // Bulk-unstaging cleanly merged files would silently drop them from
+        // the merge result; explicit paths stay allowed.
+        if let Some(operation) = fresh.operation.as_deref() {
+            return Err(git_write_validation(format!(
+                "A {operation} is in progress in this worktree; unstage files one at a time, or finish or abort it in the terminal."
+            )));
+        }
+    }
+    let files: Vec<GitFile> = if all {
+        git::eligible_for_all(op, &fresh.files)
+    } else {
+        let mut picked: Vec<GitFile> = Vec::new();
+        for p in &paths {
+            let Some(f) = git::pick_entry(op, &fresh.files, p) else {
+                return Err(not_found(format!("path not in git status: {p}")));
+            };
+            if !picked.iter().any(|q| q.path == f.path) {
+                picked.push(f.clone());
+            }
+        }
+        git::check_write(op, &picked).map_err(git_write_validation)?;
+        picked
+    };
+    let written = {
+        let d = dir.clone();
+        tokio::task::spawn_blocking(move || git::apply_write(&d, op, &files))
+            .await
+            .unwrap_or_else(|_| Err("git write task panicked".into()))
+    };
+    drop_git_caches(state);
+    written.map_err(|message| ApiError {
+        status: StatusCode::CONFLICT,
+        code: "conflict",
+        message,
+    })?;
+    let d = dir.clone();
+    match tokio::task::spawn_blocking(move || git::view_of(&d))
+        .await
+        .unwrap_or(None)
+    {
+        Some(view) => Ok(Json(view).into_response()),
+        None => Err(not_found(format!("not a git repo: {dir}"))),
+    }
+}
+
+/// `POST /api/projects/{id}/git/stage` — `{worktree, repo?, paths? | all?}`;
+/// see `git_write`. Agent-grade gate: it changes a repo.
+async fn post_project_git_stage(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    body: Result<Json<GitWriteBody>, JsonRejection>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let Json(body) = body?;
+    git_write(&state, id, git::WriteOp::Stage, body).await
+}
+
+/// `POST /api/projects/{id}/git/unstage` — same body and gate as `stage`.
+async fn post_project_git_unstage(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    body: Result<Json<GitWriteBody>, JsonRejection>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let Json(body) = body?;
+    git_write(&state, id, git::WriteOp::Unstage, body).await
+}
+
+/// `POST /api/projects/{id}/git/discard` — `{worktree, repo?, paths}`; no
+/// `all`. Same gate as `stage`.
+async fn post_project_git_discard(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    body: Result<Json<GitWriteBody>, JsonRejection>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let Json(body) = body?;
+    git_write(&state, id, git::WriteOp::Discard, body).await
 }
 
 /// `git_log_cache` key: the folder actually read, `all`, `skip`, filters, branch.
@@ -10806,6 +11020,7 @@ async fn get_project_git_log(
                 Some(c) => c,
                 None => {
                     let d = dir.clone();
+                    let epoch = state.git_epoch.load(Ordering::SeqCst);
                     let c = tokio::task::spawn_blocking(move || {
                         let p = git::commit_log_page_for(&d, all, skip, &filter, rev.as_deref());
                         (p.commits, p.has_more, p.timed_out)
@@ -10822,7 +11037,9 @@ async fn get_project_git_log(
                             cache.clear();
                         }
                     }
-                    cache.insert(key, (Instant::now(), c.clone()));
+                    if git_epoch_unchanged(&state, epoch) {
+                        cache.insert(key, (Instant::now(), c.clone()));
+                    }
                     c
                 }
             };
@@ -10846,6 +11063,7 @@ async fn get_project_git_log(
 /// async mutex and re-check the cache once they hold it, so overlapping polls
 /// share one computation instead of each fanning out its own git processes.
 async fn git_cached<T: Clone + Send + 'static>(
+    epoch: &AtomicU64,
     flights: &Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     cache: &Mutex<HashMap<String, (Instant, T)>>,
     kind: &str,
@@ -10873,12 +11091,15 @@ async fn git_cached<T: Clone + Send + 'static>(
     if let Some(hit) = lookup() {
         return Some(hit);
     }
+    let seen = epoch.load(Ordering::SeqCst);
     let v = tokio::task::spawn_blocking(f).await.ok()?;
     let mut c = cache.lock().unwrap();
     if c.len() >= 64 {
         c.retain(|_, (at, _)| at.elapsed() < GIT_TTL);
     }
-    c.insert(key.to_string(), (Instant::now(), v.clone()));
+    if epoch.load(Ordering::SeqCst) == seen {
+        c.insert(key.to_string(), (Instant::now(), v.clone()));
+    }
     Some(v)
 }
 
@@ -10886,6 +11107,7 @@ async fn git_cached<T: Clone + Send + 'static>(
 async fn git_branches_at(state: &AppState, dir: &str) -> Option<Vec<GitBranch>> {
     let d = dir.to_string();
     git_cached(
+        &state.git_epoch,
         &state.git_flights,
         &state.git_branches_cache,
         "branches",
@@ -10924,6 +11146,7 @@ async fn get_project_git_worktrees(
         Some(base) => {
             let b = base.clone();
             git_cached(
+                &state.git_epoch,
                 &state.git_flights,
                 &state.git_wt_details_cache,
                 "details",
@@ -10981,6 +11204,7 @@ async fn get_project_git_stashes(
         Some(base) => {
             let b = base.clone();
             git_cached(
+                &state.git_epoch,
                 &state.git_flights,
                 &state.git_stashes_cache,
                 "stashes",
@@ -16154,6 +16378,7 @@ mod tests {
             git_branches_cache: Arc::new(Mutex::new(HashMap::new())),
             git_stashes_cache: Arc::new(Mutex::new(HashMap::new())),
             git_flights: Arc::new(Mutex::new(HashMap::new())),
+            git_epoch: Arc::new(AtomicU64::new(0)),
             git_repos_cache: Arc::new(Mutex::new(HashMap::new())),
             files_tree_cache: Arc::new(Mutex::new(HashMap::new())),
             files_watch: crate::core::files_watch::WatchRegistry::new(),
@@ -16196,6 +16421,8 @@ mod tests {
             .arg(dir)
             .args(["-c", "user.name=t", "-c", "user.email=t@t"])
             .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
             .output()
             .unwrap()
             .status
@@ -27690,5 +27917,520 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             .await
             .is_err()
         );
+    }
+
+    // --- Git writes (naru task 2738) ------------------------------------
+
+    /// A project over a fresh repo with one commit holding `base.txt`;
+    /// returns `(tmp, root, id, worktree)` with `worktree` as git lists it.
+    fn git_write_fixture(state: &AppState) -> (tempfile::TempDir, std::path::PathBuf, i64, String) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("proj");
+        init_repo(&root, "c0");
+        git_in(&root, &["config", "commit.gpgsign", "false"]);
+        std::fs::write(root.join("base.txt"), "base\n").unwrap();
+        git_in(&root, &["add", "base.txt"]);
+        git_in(&root, &["commit", "-q", "-m", "base"]);
+        let id = new_project(state, Some(root.to_str().unwrap()));
+        let wt = git::worktrees_of(root.to_str().unwrap()).unwrap()[0]
+            .path
+            .clone();
+        (tmp, root, id, wt)
+    }
+
+    async fn git_post(
+        state: &AppState,
+        id: i64,
+        op: &str,
+        body: serde_json::Value,
+    ) -> ApiResult<Response> {
+        git_post_as(
+            state,
+            id,
+            op,
+            body,
+            loopback(),
+            hdrs(Some("localhost:0"), None),
+        )
+        .await
+    }
+
+    async fn git_post_as(
+        state: &AppState,
+        id: i64,
+        op: &str,
+        body: serde_json::Value,
+        addr: SocketAddr,
+        headers: HeaderMap,
+    ) -> ApiResult<Response> {
+        let b = Ok(Json(serde_json::from_value::<GitWriteBody>(body).unwrap()));
+        let (s, c, p) = (State(state.clone()), ConnectInfo(addr), Path(id));
+        match op {
+            "stage" => post_project_git_stage(s, c, headers, p, b).await,
+            "unstage" => post_project_git_unstage(s, c, headers, p, b).await,
+            _ => post_project_git_discard(s, c, headers, p, b).await,
+        }
+    }
+
+    fn git_lines(root: &std::path::Path) -> Vec<String> {
+        git::view_of(root.to_str().unwrap())
+            .unwrap()
+            .files
+            .iter()
+            .map(|f| format!("{} {}", f.status, f.path))
+            .collect()
+    }
+
+    async fn git_get_files(state: &AppState, id: i64) -> Vec<String> {
+        let resp = get_project_git(
+            State(state.clone()),
+            Path(id),
+            Query(GitViewQuery {
+                worktree: None,
+                repo: None,
+            }),
+        )
+        .await
+        .unwrap();
+        json_body(resp).await["repo"]["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| {
+                format!(
+                    "{} {}",
+                    f["status"].as_str().unwrap(),
+                    f["path"].as_str().unwrap()
+                )
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn git_write_routes_validate_and_never_write_on_a_bad_request() {
+        let (_db, state) = test_state();
+        let (_tmp, root, id, wt) = git_write_fixture(&state);
+        std::fs::write(root.join("new.txt"), "n\n").unwrap();
+        let before = git_lines(&root);
+        assert_eq!(before, ["?? new.txt"]);
+        let status = |r: ApiResult<Response>| r.err().unwrap().status;
+
+        // 422: worktree missing/empty, neither or both of paths and all,
+        // discard with all.
+        for op in ["stage", "unstage", "discard"] {
+            assert_eq!(
+                status(git_post(&state, id, op, json!({"paths": ["new.txt"]})).await),
+                StatusCode::UNPROCESSABLE_ENTITY
+            );
+            assert_eq!(
+                status(
+                    git_post(
+                        &state,
+                        id,
+                        op,
+                        json!({"worktree": "", "paths": ["new.txt"]})
+                    )
+                    .await
+                ),
+                StatusCode::UNPROCESSABLE_ENTITY
+            );
+            assert_eq!(
+                status(git_post(&state, id, op, json!({"worktree": wt})).await),
+                StatusCode::UNPROCESSABLE_ENTITY
+            );
+            assert_eq!(
+                status(git_post(&state, id, op, json!({"worktree": wt, "paths": []})).await),
+                StatusCode::UNPROCESSABLE_ENTITY
+            );
+            assert_eq!(
+                status(
+                    git_post(
+                        &state,
+                        id,
+                        op,
+                        json!({"worktree": wt, "paths": ["new.txt"], "all": true})
+                    )
+                    .await
+                ),
+                StatusCode::UNPROCESSABLE_ENTITY
+            );
+            // 404: an unlisted worktree, an unlisted repo.
+            assert_eq!(
+                status(
+                    git_post(
+                        &state,
+                        id,
+                        op,
+                        json!({"worktree": "/nope", "paths": ["new.txt"]})
+                    )
+                    .await
+                ),
+                StatusCode::NOT_FOUND
+            );
+            assert_eq!(
+                status(
+                    git_post(
+                        &state,
+                        id,
+                        op,
+                        json!({"worktree": wt, "repo": "nope", "paths": ["new.txt"]})
+                    )
+                    .await
+                ),
+                StatusCode::NOT_FOUND
+            );
+            // 404 and no write: one listed path next to one that is not.
+            let e = git_post(
+                &state,
+                id,
+                op,
+                json!({"worktree": wt, "paths": ["new.txt", "../x"]}),
+            )
+            .await
+            .err()
+            .unwrap();
+            assert_eq!(e.status, StatusCode::NOT_FOUND);
+            assert_eq!(e.code, "not_found");
+            assert!(e.message.contains("../x"), "{}", e.message);
+            assert_eq!(git_lines(&root), before, "{op} wrote despite a 404");
+        }
+        let e = git_post(&state, id, "discard", json!({"worktree": wt, "all": true}))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(e.code, "validation");
+        // A project with no folder: 404 after the body checks.
+        let none = new_project(&state, None);
+        assert_eq!(
+            status(
+                git_post(
+                    &state,
+                    none,
+                    "stage",
+                    json!({"worktree": wt, "paths": ["a"]})
+                )
+                .await
+            ),
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn git_write_routes_change_the_repo_and_the_next_get_is_fresh() {
+        let (_db, state) = test_state();
+        let (_tmp, root, id, wt) = git_write_fixture(&state);
+        std::fs::write(root.join("new.txt"), "n\n").unwrap();
+        std::fs::write(root.join("base.txt"), "changed\n").unwrap();
+        // Prime every cache with the old state.
+        assert_eq!(
+            git_get_files(&state, id).await,
+            [".M base.txt", "?? new.txt"]
+        );
+        let _ = get_git_status(State(state.clone())).await.unwrap();
+
+        let resp = git_post(
+            &state,
+            id,
+            "stage",
+            json!({"worktree": wt, "paths": ["new.txt"]}),
+        )
+        .await
+        .unwrap();
+        let body = json_body(resp).await;
+        let files: Vec<String> = body["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["status"].as_str().unwrap().to_string() + " " + f["path"].as_str().unwrap())
+            .collect();
+        assert_eq!(files, [".M base.txt", "A. new.txt"]);
+        assert_eq!(body["operation"], serde_json::Value::Null);
+        // The GET straight after is not the 5 s-old cached answer.
+        assert_eq!(
+            git_get_files(&state, id).await,
+            [".M base.txt", "A. new.txt"]
+        );
+
+        git_post(&state, id, "stage", json!({"worktree": wt, "all": true}))
+            .await
+            .unwrap();
+        assert_eq!(
+            git_get_files(&state, id).await,
+            ["M. base.txt", "A. new.txt"]
+        );
+        git_post(&state, id, "unstage", json!({"worktree": wt, "all": true}))
+            .await
+            .unwrap();
+        assert_eq!(
+            git_get_files(&state, id).await,
+            [".M base.txt", "?? new.txt"]
+        );
+        // Nothing eligible is a success that spawns nothing.
+        git_post(&state, id, "unstage", json!({"worktree": wt, "all": true}))
+            .await
+            .unwrap();
+
+        // Discard: a tracked file with nothing unstaged is 422 ...
+        git_post(
+            &state,
+            id,
+            "stage",
+            json!({"worktree": wt, "paths": ["base.txt"]}),
+        )
+        .await
+        .unwrap();
+        let e = git_post(
+            &state,
+            id,
+            "discard",
+            json!({"worktree": wt, "paths": ["base.txt"]}),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert_eq!(e.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(e.message.contains("nothing to discard"), "{}", e.message);
+        // ... and the rest goes.
+        git_post(
+            &state,
+            id,
+            "discard",
+            json!({"worktree": wt, "paths": ["new.txt"]}),
+        )
+        .await
+        .unwrap();
+        assert!(!root.join("new.txt").exists());
+        assert_eq!(git_get_files(&state, id).await, ["M. base.txt"]);
+    }
+
+    #[tokio::test]
+    async fn git_write_failure_is_409_with_gits_message_and_drops_caches() {
+        let (_db, state) = test_state();
+        let (_tmp, root, id, wt) = git_write_fixture(&state);
+        std::fs::write(root.join("new.txt"), "n\n").unwrap();
+        assert_eq!(git_get_files(&state, id).await, ["?? new.txt"]);
+        let lock = root.join(".git/index.lock");
+        std::fs::write(&lock, "").unwrap();
+        let e = git_post(
+            &state,
+            id,
+            "stage",
+            json!({"worktree": wt, "paths": ["new.txt"]}),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert_eq!(e.status, StatusCode::CONFLICT);
+        assert_eq!(e.code, "conflict");
+        assert!(e.message.contains("index.lock"), "{}", e.message);
+        assert!(lock.exists());
+        assert!(state.git_view_cache.lock().unwrap().is_empty());
+        std::fs::remove_file(&lock).unwrap();
+        git_post(
+            &state,
+            id,
+            "stage",
+            json!({"worktree": wt, "paths": ["new.txt"]}),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn git_write_refuses_conflicted_files_and_reports_the_operation() {
+        let (_db, state) = test_state();
+        let (_tmp, root, id, wt) = git_write_fixture(&state);
+        git_in(&root, &["checkout", "-q", "-b", "feature"]);
+        std::fs::write(root.join("base.txt"), "feature\n").unwrap();
+        git_in(&root, &["commit", "-q", "-am", "f"]);
+        git_in(&root, &["checkout", "-q", "-"]);
+        std::fs::write(root.join("base.txt"), "trunk\n").unwrap();
+        git_in(&root, &["commit", "-q", "-am", "t"]);
+        let merge = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["merge", "feature"])
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(!merge.status.success());
+        let resp = get_project_git(
+            State(state.clone()),
+            Path(id),
+            Query(GitViewQuery {
+                worktree: None,
+                repo: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(json_body(resp).await["repo"]["operation"], "merge");
+        for op in ["stage", "unstage", "discard"] {
+            let e = git_post(
+                &state,
+                id,
+                op,
+                json!({"worktree": wt, "paths": ["base.txt"]}),
+            )
+            .await
+            .err()
+            .unwrap();
+            assert_eq!(e.status, StatusCode::UNPROCESSABLE_ENTITY);
+            assert!(e.message.contains("has conflicts"), "{}", e.message);
+        }
+        git_post(&state, id, "stage", json!({"worktree": wt, "all": true}))
+            .await
+            .unwrap();
+        assert_eq!(git_lines(&root), ["UU base.txt"]);
+    }
+
+    #[tokio::test]
+    async fn git_write_routes_need_the_agent_gate() {
+        let (_db, state) = test_state();
+        let (_tmp, root, id, wt) = git_write_fixture(&state);
+        std::fs::write(root.join("new.txt"), "n\n").unwrap();
+        let body = || json!({"worktree": wt, "paths": ["new.txt"]});
+        let lan: SocketAddr = "192.168.1.9:4000".parse().unwrap();
+        for op in ["stage", "unstage", "discard"] {
+            let cases = [
+                ("non-loopback peer", lan, hdrs(Some("localhost:0"), None)),
+                (
+                    "foreign Origin",
+                    loopback(),
+                    hdrs(Some("localhost:0"), Some("http://evil.example")),
+                ),
+                ("foreign Host", loopback(), hdrs(Some("evil.example"), None)),
+                ("no Host", loopback(), hdrs(None, None)),
+            ];
+            for (what, addr, h) in cases {
+                let e = git_post_as(&state, id, op, body(), addr, h)
+                    .await
+                    .err()
+                    .unwrap_or_else(|| panic!("{op}: {what} was let through"));
+                assert_eq!(e.status, StatusCode::FORBIDDEN, "{op}: {what}");
+            }
+        }
+        assert_eq!(git_lines(&root), ["?? new.txt"], "a refused request wrote");
+    }
+
+    #[tokio::test]
+    async fn git_diff_staged_picks_a_side_and_a_non_boolean_is_400() {
+        let (_db, state) = test_state();
+        let (_tmp, root, id, wt) = git_write_fixture(&state);
+        std::fs::write(root.join("base.txt"), "staged\n").unwrap();
+        git_in(&root, &["add", "base.txt"]);
+        std::fs::write(root.join("base.txt"), "staged\nworktree\n").unwrap();
+        let diff = |staged: &str| {
+            let state = state.clone();
+            let uri = format!(
+                "/x?path=base.txt&worktree={}{staged}",
+                wt.replace('/', "%2F")
+            );
+            async move {
+                let q = Query::<GitDiffQuery>::try_from_uri(&uri.parse().unwrap()).unwrap();
+                let resp = get_project_git_diff(State(state), Path(id), q)
+                    .await
+                    .unwrap();
+                json_body(resp).await["diff"].as_str().unwrap().to_string()
+            }
+        };
+        let s = diff("&staged=true").await;
+        assert!(s.contains("+staged") && !s.contains("+worktree"), "{s}");
+        let u = diff("&staged=false").await;
+        assert!(u.contains("+worktree") && !u.contains("-base"), "{u}");
+        let both = diff("").await;
+        assert!(
+            both.contains("-base") && both.contains("+worktree"),
+            "{both}"
+        );
+        let bad =
+            Query::<GitDiffQuery>::try_from_uri(&"/x?path=a&staged=notabool".parse().unwrap());
+        assert_eq!(bad.err().unwrap().status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn a_cache_fill_that_began_before_a_write_does_not_repopulate() {
+        let (_db, state) = test_state();
+        let cache: Mutex<HashMap<String, (Instant, u32)>> = Mutex::new(HashMap::new());
+        let flights = Mutex::new(HashMap::new());
+        // The fill's git call "runs" while a write lands and drops the caches.
+        let epoch = state.git_epoch.clone();
+        let got = git_cached(&state.git_epoch, &flights, &cache, "k", "dir", move || {
+            epoch.fetch_add(1, Ordering::SeqCst);
+            7u32
+        })
+        .await;
+        assert_eq!(got, Some(7));
+        assert!(cache.lock().unwrap().is_empty(), "stale fill was cached");
+        // With no write in between the fill is cached as before.
+        let got = git_cached(&state.git_epoch, &flights, &cache, "k", "dir", || 8u32).await;
+        assert_eq!(got, Some(8));
+        assert_eq!(cache.lock().unwrap().len(), 1);
+        // And the helper itself bumps the epoch.
+        let before = state.git_epoch.load(Ordering::SeqCst);
+        drop_git_caches(&state);
+        assert!(!git_epoch_unchanged(&state, before));
+    }
+
+    #[tokio::test]
+    async fn git_unstage_all_is_refused_mid_merge_but_paths_are_allowed() {
+        let (_db, state) = test_state();
+        let (_tmp, root, id, wt) = git_write_fixture(&state);
+        git_in(&root, &["checkout", "-q", "-b", "feature"]);
+        std::fs::write(root.join("clean.txt"), "c\n").unwrap();
+        git_in(&root, &["add", "clean.txt"]);
+        git_in(&root, &["commit", "-q", "-m", "f"]);
+        git_in(&root, &["checkout", "-q", "-"]);
+        git_in(&root, &["merge", "--no-ff", "--no-commit", "feature"]);
+        assert_eq!(git_lines(&root), ["A. clean.txt"]);
+        let e = git_post(&state, id, "unstage", json!({"worktree": wt, "all": true}))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(e.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            e.message.contains("A merge is in progress"),
+            "{}",
+            e.message
+        );
+        assert_eq!(git_lines(&root), ["A. clean.txt"]);
+        git_post(
+            &state,
+            id,
+            "unstage",
+            json!({"worktree": wt, "paths": ["clean.txt"]}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(git_lines(&root), ["?? clean.txt"]);
+    }
+
+    #[tokio::test]
+    async fn git_write_on_a_doubled_path_acts_on_the_right_entry() {
+        let (_db, state) = test_state();
+        let (_tmp, root, id, wt) = git_write_fixture(&state);
+        git_in(&root, &["rm", "--cached", "-q", "base.txt"]);
+        std::fs::write(root.join("base.txt"), "again\n").unwrap();
+        assert_eq!(git_lines(&root), ["D. base.txt", "?? base.txt"]);
+        git_post(
+            &state,
+            id,
+            "discard",
+            json!({"worktree": wt, "paths": ["base.txt"]}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(git_lines(&root), ["D. base.txt"]);
+        std::fs::write(root.join("base.txt"), "again\n").unwrap();
+        git_post(
+            &state,
+            id,
+            "unstage",
+            json!({"worktree": wt, "paths": ["base.txt"]}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(git_lines(&root), [".M base.txt"]);
     }
 }

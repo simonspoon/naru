@@ -1,4 +1,4 @@
-# Git tab (read-only working-tree + history view per project)
+# Git tab (working-tree view with stage/unstage/discard, plus history, per project)
 
 The **Git** tab on a project page (web UI) shows the working tree of the
 project's `local_path`: branch/ahead-behind + changed-file list, with a
@@ -8,8 +8,12 @@ history. Like `/api/git-status` it reads **external** state via read-only
 `git` shell-outs (`view_of`/`diff_of`/`worktrees_of`/`commit_log_of`/
 `commit_files_of`/`commit_file_diff_of` in `src/core/git.rs`) and touches the
 store only to read `local_path`. No CLI (an agent in a terminal uses `git`
-directly). Standard middleware guard only — no agent-style gate, it executes
-nothing.
+directly). **Reads** (every GET) sit behind the standard middleware guard only
+— they execute nothing. Since naru task 2738 the tab also **writes**: the
+three POST routes `git/stage`, `git/unstage` and `git/discard` ("Write
+operations" below) change the repo, so they carry the agent-grade
+`require_agent_access` gate on top of the standard guard. No other route here
+writes.
 
 - **Several repos under one folder** (mesa task 1509).
   `GET /api/projects/{id}/git/repos` → `ProjectGitRepos { path, repos:
@@ -280,6 +284,128 @@ push, checkout, merge or stash push anywhere in the tab).
   tracked changes). **Untracked files stashed with `-u` live in the stash's
   third parent and are not shown.**
 
+## Write operations (naru task 2738)
+
+The first routes that change a repo. Git 6/8 and 7/8 reuse the helpers named
+below (`git::run_write`, `git::WriteOp`, `drop_git_caches`).
+
+**Status read.** `view_of` runs `git status --porcelain=v2 --branch -z`, so a
+path is never C-quoted: a space, quote, tab, newline, unicode or leading-`-`
+name round-trips byte-exact (a name that is not valid UTF-8 is lossy). With
+`-z` every record ends in NUL and a rename (`2 …`) record is followed by one
+more NUL-terminated field, the original path; `parse_view` is pure and
+unit-tested. `status_of`/`parse_status` (the sidebar) are unchanged. Untracked
+mode stays git's default (`normal`): an untracked folder is one `dir/` entry.
+
+**Types.** `GitFile.submodule` (`#[serde(default)]`): the porcelain `<sub>`
+field starts with `S`. `GitRepoView.operation` (`#[serde(default)]`): the
+operation in progress in that worktree, `"merge"`, `"rebase"`, `"cherry-pick"`,
+`"revert"`, `"bisect"` or `null`, read from the worktree's own git dir
+(`git rev-parse --absolute-git-dir`; a linked worktree has its own):
+`rebase-merge/` or `rebase-apply/rebasing` (rebase wins), `MERGE_HEAD`,
+`CHERRY_PICK_HEAD`, `REVERT_HEAD`, `BISECT_LOG`. A rebase is `rebase-merge/` or
+`rebase-apply/rebasing`; a bare `rebase-apply/` is a `git am` session and
+reports `null`.
+
+**Diff side.** `GET .../git/diff` gains `staged` (typed `Option<bool>`, so a
+non-boolean is a 400 from the extractor). Absent is today's staged-plus-unstaged
+diff against HEAD, byte-identical. For the allowlisted file
+(`git::diff_of_file`, every path after `--` with `GIT_LITERAL_PATHSPECS=1`):
+
+| file | `staged=true` | `staged=false` |
+| --- | --- | --- |
+| conflicted (`u` record) | `git diff HEAD -- path` | same |
+| untracked | the `--no-index` all-added diff | same |
+| other | `git diff --cached -- path` (works on an unborn HEAD); a staged rename passes `orig_path` and `path` with `-M` so it renders as a rename | `git diff -- path` (index against working tree) |
+
+A conflict is diffed against HEAD because that is what yields a plain
+`diff --git` of the working file with its `<<<<<<<` markers (bare `git diff`
+prints a `diff --cc` combined diff the client's parser cannot render; a test
+pins both). Where HEAD has nothing to show (a file deleted by us), the diff is
+empty, never an error.
+
+**Routes.** `POST /api/projects/{id}/git/stage`, `.../unstage`, `.../discard`.
+JSON body:
+
+```
+{ "worktree": "<path>",         // REQUIRED, non-empty; byte-equal to a path in the worktree list
+  "repo":     "<path>" | absent, // same selector as the GETs (resolve_repo_dir)
+  "paths":    ["a", "b"] | absent,
+  "all":      true | absent }    // stage/unstage only
+```
+
+- **Guard.** `require_agent_access` is the first thing in each handler: a
+  loopback peer, a local Host and a local Origin by default, the LAN page gate
+  under `--lan`; plus the global Host allowlist and the `Content-Type:
+  application/json` gate (415 without it). It was chosen because it is the
+  strictest existing posture that still lets the local page and the `--lan`
+  page work, and a repo write is exactly what a DNS-rebound or cross-site page
+  must never reach. Never reachable by GET (405).
+- **Shape (422 `validation`).** `worktree` missing or empty (a write never
+  defaults to `local_path`); stage/unstage need exactly one of a non-empty
+  `paths` or `all: true`; discard takes non-empty `paths` only, `all` is
+  refused (there is no discard-all).
+- **Allowlist (404 `not_found`).** A project with no folder, a dead folder, an
+  unlisted `repo` or `worktree`, a non-repo, and any requested path that is not
+  byte-equal to a `GitFile.path` of a **fresh** `git::view_of` (never the 5 s
+  cache); the message names the path. Nothing is spawned.
+- **Per-file rules (422), checked before any write.** A conflicted file in
+  `paths` for any of the three ops ("… has conflicts; resolve it in the
+  terminal"); discard of a submodule entry; discard of a tracked file whose
+  unstaged column (Y) is `.` or `A` (intent-to-add, where `restore --worktree`
+  is a silent no-op) ("nothing to discard"). `unstage` with `all: true` while
+  `operation` is non-null is refused ("A merge is in progress in this
+  worktree; unstage files one at a time, or finish or abort it in the
+  terminal."), since bulk-unstaging cleanly merged files would drop them from
+  the merge result; explicit `paths` stay allowed.
+- **A path listed twice** (`D. keep.txt` plus `?? keep.txt` after `git rm
+  --cached` and a re-create): stage and discard act on the untracked entry,
+  unstage on the entry with something staged (`git::pick_entry`).
+- **What runs** (`git -C <dir>` as argv, never a shell; `GIT_LITERAL_PATHSPECS=1`,
+  `GIT_TERMINAL_PROMPT=0`; paths NUL-separated on stdin with
+  `--pathspec-from-file=- --pathspec-file-nul`, so 5,000 paths are one git call
+  and a leading `-` is never a flag):
+  - **stage**: `git add` (modifications, deletions, untracked files and
+    folders; a record whose Y is `R` also adds `orig_path`). A submodule entry
+    stages only its gitlink, never its contents.
+  - **unstage**: `git restore --staged`; on an unborn HEAD (`git rev-parse
+    --verify -q HEAD` fails, and HEAD's branch ref does not exist)
+    `git rm --cached -f -q` instead, index only, the working file survives. Any
+    other HEAD failure (a ref whose commit is missing) is a 409 with nothing
+    written, since `rm --cached` on a born repo would stage deletions. A record whose X is `R` also unstages `orig_path`,
+    so both sides of a rename go. Files with nothing staged are skipped.
+  - **`all: true`** is an explicit path list computed from the fresh status,
+    then the same single call: stage-all = every non-conflict file with an
+    unstaged change or untracked, unstage-all = every non-conflict file with a
+    staged change. Nothing eligible is a success that spawns nothing.
+  - **discard**: tracked paths in one `git restore --worktree` (back to the
+    INDEX version, staged changes kept); untracked paths in `git clean -f -d -q
+    -- <paths>`, limited to exactly those (an untracked folder entry `dir/`
+    removes that folder; git refuses nested repos itself), chunked if the argv
+    would pass ~100 KiB.
+- **Never.** `git add -A` / `git add .` (would mark a conflict resolved); a
+  bare `git reset` (would abort a merge in progress); `git clean -x` or a
+  `clean` without paths; touching the index in a discard; deleting
+  `index.lock`; retrying a failed write.
+- **Failure.** Git exiting non-zero (a held `index.lock`, say) is 409
+  `conflict` whose `message` is git's own stderr, lossy UTF-8, trimmed, capped
+  at 4 KiB. The standard `{"error":{"code","message"}}` envelope.
+- **Caches.** After every attempt, success or failure, `drop_git_caches` clears
+  `git_view_cache`, `git_cache`, `git_wt_details_cache`, `git_branches_cache`
+  and `git_log_cache`, whole rather than by key (the write runs in the
+  worktree path git lists while a GET may have cached the same folder as
+  `local_path` spelled another way), so the next GET is fresh. It also bumps
+  `AppState.git_epoch`; every cache fill reads the epoch before spawning git
+  and skips its insert if it moved, so a GET that began before the write
+  cannot put its pre-write answer back.
+- **Success.** 200 with the fresh `GitRepoView` of that worktree, recomputed
+  after the write.
+
+Tests: `src/core/git.rs` (real temp repos: every op born and unborn, rename,
+awkward names, merge conflict, `index.lock`, 5,000 files) and `src/api.rs`
+(`git_write_*`, `git_diff_staged_*`); `scripts/api-check.sh` asserts the gate
+and validation halves of the three routes.
+
 ## Diff view (naru task 2734)
 
 Both diff panes — the working-tree file and the commit file — render the
@@ -417,7 +543,8 @@ Logic is in `frontend/src/gitSearch.ts` (pure, `gitSearch.test.ts`).
   | `Enter` | Open the focused commit or file (the row's own click); focus then moves to the commit's first file, or to the diff |
   | `Esc` or `←` | Back a level: diff → its file row, commit detail → its commit row; in the working tree, diff → its file. In a diff only `Esc` (`←` is left to the page) |
   | `/` | Focus the search box (History) or the file filter (Working tree) |
-  | `[` `]` | Previous / next changed file of the open list, opening it; focus stays where it is |
+| click, `⌘`/`Ctrl`-click, `Shift`-click | Working tree: select one file, toggle one, extend a range over the visible rows of one section (naru task 2738) |
+  | `[` `]` | Previous / next changed file of the open list, opening it (section and folder headers are skipped); focus stays where it is |
   | `?` | Show / hide the key list (also the `?` button by the mode toggle) |
 
   A key the tab handles stops there (`preventDefault` + `stopPropagation`),
@@ -513,3 +640,115 @@ routes above and never changes the repo (no checkout, fetch or stash apply).
   drawer; with the `?` list open it closes that first); `[` `]` are ignored there. The `?` list shows them.
 - All repo text (names, subjects, paths, messages) is rendered as plain text
   nodes; colours are theme tokens only.
+
+## Working tree view (naru task 2738)
+
+`components/GitWorkingTree.tsx` replaced the flat file list. Rules are pure in
+`frontend/src/gitWorktree.ts` (sections, badges, tree, row cap, selection, bulk
+buttons; `gitWorktree.test.ts`) and `frontend/src/gitActions.ts` (confirm text,
+control labels, the write gate; `gitActions.test.ts`); the component and
+`components/GitConfirmDialog.tsx` only lay them out. The write routes are the
+server's ("Write operations" above); this section is the client.
+
+- **Sections**, each a collapsible `button.git-side-head` (chevron, title,
+  count, `aria-expanded`) in a sticky `.git-side-headbar`: Conflicts (only when
+  there is one), Staged, Changes, Untracked. Open state is in `localStorage`
+  `naru-git-wt-sections`. A porcelain `XY` pair puts a file in Staged by `X`
+  and in Changes by `Y`, so `MM` is in both; a conflicted pair
+  (`UU AA DD AU UA DU UD`) is only in Conflicts; `??` is Untracked (an untracked
+  folder is one row whose path ends `/`). Empty sections are hidden; "Nothing
+  staged" shows when there are changes but nothing staged; a clean tree keeps
+  its sentence. The "Filter changed files" box filters every section (path or
+  rename source) before the cap.
+- **Row**: a coloured letter badge (M amber, A and untracked `U` green, D red,
+  R / C cyan, T violet, conflict `!` red; theme tokens only), the file name with
+  its folder muted (flat), the plain status word ("modified", "both modified",
+  "deleted by them", …; a conflict reads "conflict · <type>"), a `submodule`
+  badge, and `orig → path` for a rename. Paths and git text are text nodes only.
+- **Flat | Tree** toggle, remembered in `naru-git-tree-mode`. Tree groups a
+  section by folder (folders first), a chain of single-child folders is one row
+  (`a/b/c`), folders collapse and show a file count.
+- **Selection** is (section, path). A plain click selects one and opens its
+  diff (`staged=true` from Staged, `false` from Changes and Untracked, omitted
+  for Conflicts); `⌘`/`Ctrl`-click toggles; `Shift`-click extends from the
+  anchor over the section's rendered order. It never spans sections. With more
+  than one selected a bar reads "N selected" with the section's actions and
+  Clear, and a row's own action acts on the whole selection when the row is in
+  it. After a refetch paths that left the section drop out, and a lone selected
+  file that moved to another section (staged, now only in Changes) is followed
+  there. Esc in the diff clears the selection and focuses its row.
+- **Actions**, whole files only: Staged -> Unstage; Changes -> Stage, Discard;
+  Untracked -> Stage, Delete; Conflicts -> none ("Resolve in the terminal, then
+  stage."). Row and folder buttons are compact glyphs (`+ − ↶ ✕`), shown on
+  hover / focus / selected row with a mouse and always on touch; a folder button
+  acts on everything under it. A section header has one bulk button, always ONE
+  request: Staged "Unstage all" and Changes "Stage all" send `all: true`
+  (Stage all includes untracked files); Untracked "Stage all" sends its paths.
+  With a filter on, they read "... shown" and send exactly the shown paths; with
+  a conflict in the repo they also send paths, never `all`. While `operation`
+  is set the Staged bulk button is disabled (its tooltip says why): unstaging
+  everything mid-merge would drop cleanly merged files from the result; rows
+  and selections still unstage. There is no "discard
+  all". While a write is in flight the write controls are disabled; when it
+  settles (success or failure) the view is refetched.
+- **Worktree**: the explicit path is `activeWorktreePath(view.worktrees,
+  selectedWorktree)`; if it cannot be resolved the write controls are disabled
+  and nothing is sent. Every write control's `title` / `aria-label` reads
+  "Stage 3 files in …/folder (branch)", and a line above the list ("Acting on
+  <branch> <full path>") names the target, also on a phone. The confirm dialog
+  closes (answers no) if the worktree changes or the list unmounts.
+- **Destructive confirm** (`destructive_ops_without_confirm = 0`). Discard and
+  Delete always open `GitConfirmDialog` first: `role="alertdialog"`, title
+  ("Discard changes to 3 files?" / "Delete untracked file?"), the worktree's full
+  path and branch, up to 10 paths ("and N more"), the exact consequence (tracked:
+  working tree copy reset to the staged version, staged changes kept, and for a
+  file that is both staged and modified only the unstaged edits are lost;
+  untracked file: deleted from disk; untracked folder: the folder and everything
+  in it is deleted), "This cannot be undone." Focus starts on Cancel and is
+  trapped; Esc, the scrim and Cancel all say no; the danger button names the
+  action ("Discard 3 files", "Delete file"). No bypass and no "don't ask again".
+  Enforced in one place: `createGitActions({ api, confirm })` in `gitActions.ts`
+  — `discard()` awaits `confirm(plan)` and calls `api.discard` only on `true`,
+  and the component gets its api only through `projectGitApi`. `gitActions.test.ts`
+  proves it ("the confirm gate" cases: a `false` answer never reaches
+  `api.discard` for tracked, untracked, a selection and a folder; `true` sends
+  once with exactly the planned paths and the worktree; stage / unstage never
+  ask; no worktree sends nothing) and, by reading the sources, that
+  `discardProjectGit` appears only in `api.ts` and `gitActions.ts` and the
+  `/git/discard` string only in `api.ts`.
+- **Operation banner** ("Merge in progress in this worktree. Finish or abort it
+  in the terminal.") when `operation` is set (merge, rebase, cherry-pick, revert,
+  bisect). Detached and unborn HEAD need nothing more than the header's branch.
+- **Errors**: one dismissible `role="alert"` above the list: what was attempted
+  ("Could not stage 3 files in <worktree>:") then git's own message in a
+  plain-text `<pre>`. A 404 (a path left the list) says so quietly instead. The
+  list is refetched after any failure; nothing retries.
+- **Large lists**: each section renders at most 500 rows (`ROW_CAP`), then
+  "Show all N" (tree mode counts rendered file rows the same way; a collapsed
+  folder's files are not rendered). "Stage all" stays one request.
+- **Hooks for a browser test**: `[data-git-list="tree"]` (the scroller),
+  `[data-wt-section="staged|changes|untracked|conflicts"]` on `<section>` and on
+  each row button (with `data-path`, `aria-current` on the open one,
+  `aria-pressed` on selected ones), `[data-wt-toggle="<section>"]` header
+  buttons, `[data-wt-action="stage|unstage|discard|delete|stage-all|stage-shown|
+  unstage-all|unstage-shown"]`, `[data-wt-mode="flat|tree"]`,
+  `[data-wt-showall="<section>"]`, `[data-wt-selbar]`, `[data-wt-banner]`,
+  `[data-wt-alert]`, `[data-wt-target]`, `[data-wt-nothing-staged]`, and the
+  dialog `[data-git-confirm="dialog|cancel|confirm|backdrop"]`.
+- Keys: section and folder headers are items for `j` `k` `↑` `↓` / `Enter`
+  (Enter toggles them and does not hand focus to the diff); `[` `]` step through
+  files only.
+- **Container layout** (QA fix). The working tree sits in `.git-wt-root`, a CSS
+  size container (`container-type: inline-size`) *inside* `.git-content` — not
+  `.git-shell`, whose phone drawer is `position: fixed`. At `<= 52rem` of
+  container width (a narrow Custom-layout pane or a phone, regardless of the
+  viewport) the list stacks over the diff: the list scroller keeps 10rem to
+  24rem, the diff is 30rem, and the pane scrolls. Above 52rem the pane hands its
+  box to `.git-layout` (side by side, 16rem floor, so a banner plus an alert
+  cannot squeeze the list to nothing). The banner (5rem) and the alert (7rem)
+  are capped and scroll inside; the alert's title wraps anywhere.
+- **One target line.** `[data-wt-target]` ("<branch> ↑n ↓n <full path>", one
+  ellipsised line, full path in the tooltip) is the single statement of where
+  the controls act; the tab's own `.git-repo-header` is hidden while the list is
+  shown (it still shows for History, a clean tree and loading). Section headers
+  truncate the title and keep count and bulk button apart.

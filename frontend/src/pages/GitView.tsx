@@ -5,12 +5,10 @@ import {
   getProjectGitCommit,
   getProjectGitCommitDiff,
   getProjectGitCommitFiles,
-  getProjectGitDiff,
   getProjectGitRepos,
 } from '../api'
 import type { GitCommit } from '../types/GitCommit'
 import type { GitCommitFile } from '../types/GitCommitFile'
-import type { GitFile } from '../types/GitFile'
 import type { GitRepo } from '../types/GitRepo'
 import type { GitBranch } from '../types/GitBranch'
 import type { GitStash } from '../types/GitStash'
@@ -20,6 +18,7 @@ import { useFetch } from '../useFetch'
 import { DiffView } from '../components/DiffView'
 import { CommitList } from '../components/CommitGraph'
 import { GitSidePanel } from '../components/GitSidePanel'
+import { GitWorkingTree } from '../components/GitWorkingTree'
 import { useGitSide } from '../useGitSide'
 import { activeWorktreePath } from '../gitPanel'
 import type { BranchScope } from '../gitPanel'
@@ -64,24 +63,6 @@ const STATUS_WORDS: Record<string, string> = {
   U: 'conflict',
 }
 
-/** "MM" → "modified (staged), modified (unstaged)"; "??" → "untracked";
- * any unknown char → the raw pair verbatim. */
-function statusLabel(status: string): string {
-  if (status === '??') return 'untracked'
-  const parts: string[] = []
-  const columns: [string | undefined, string][] = [
-    [status[0], 'staged'],
-    [status[1], 'unstaged'],
-  ]
-  for (const [c, column] of columns) {
-    if (c === undefined || c === '.') continue
-    const word = STATUS_WORDS[c]
-    if (word === undefined) return status
-    parts.push(`${word} (${column})`)
-  }
-  return parts.length > 0 ? parts.join(', ') : status
-}
-
 /** Per-commit status label: a single name-status token (`A`/`M`/`D`/`T`/`U`/
  * `X`, or `R100`/`C100` with a similarity score) — a commit has no staged/
  * unstaged distinction, so this is a small sibling of statusLabel, not a
@@ -89,29 +70,6 @@ function statusLabel(status: string): string {
 function commitStatusLabel(status: string): string {
   const word = STATUS_WORDS[status[0]]
   return word ?? status
-}
-
-/** The selected working-tree file's unified diff vs HEAD, scoped to
- * `worktree` when a non-default one is selected (same selector GitView's
- * own file list/diff already resolved `path` against). */
-function DiffPane({
-  projectId,
-  path,
-  worktree,
-  repo,
-}: {
-  projectId: number
-  path: string
-  worktree: string | null
-  repo: string | undefined
-}) {
-  const { data, error } = useFetch(
-    () => getProjectGitDiff(projectId, path, worktree ?? undefined, repo),
-    `git-diff-${projectId}-${repo ?? ''}-${worktree ?? ''}-${path}`,
-  )
-  if (error) return <p className="error">{error}</p>
-  if (!data) return <p className="muted">Loading…</p>
-  return <DiffView key={`${worktree ?? ''} ${path}`} diff={data.diff} path={path} />
 }
 
 /** The selected file's unified diff as introduced by one commit. Sibling of
@@ -135,11 +93,6 @@ function CommitDiffPane({
   if (error) return <p className="error">{error}</p>
   if (!data) return <p className="muted">Loading…</p>
   return <DiffView key={`${sha} ${path}`} diff={data.diff} path={path} />
-}
-
-function fileLabel(f: GitFile): string {
-  // Rename/copy lines carry the source path: show "orig → path".
-  return f.orig_path !== null ? `${f.orig_path} → ${f.path}` : f.path
 }
 
 function commitFileLabel(f: GitCommitFile): string {
@@ -1049,7 +1002,7 @@ function GitRepoPane({
   const [selectedWorktree, setSelectedWorktree] = useState<string | null>(
     null,
   )
-  const { data, error } = useFetch(
+  const { data, error, refetch } = useFetch(
     () => getProjectGit(projectId, selectedWorktree ?? undefined, repo),
     `git-${projectId}-${repo ?? ''}-${selectedWorktree ?? ''}`,
   )
@@ -1059,8 +1012,10 @@ function GitRepoPane({
   // reset) and only the content area shows its loading state.
   const [lastView, setLastView] = useState<typeof data>(null)
   if (data !== null && data !== lastView) setLastView(data)
-  // Selected path is component state, not URL (no deep-linking a file).
+  // The working tree's open file (reported by GitWorkingTree, which owns the
+  // selection) — only the live focus reads it. Component state, not URL.
   const [selectedPath, setSelectedPath] = useState<string | null>(null)
+  const treeBack = useRef<(() => boolean) | null>(null)
   // Working tree | History — default Working tree (today's behavior,
   // unchanged, S2). History mode is a small component that's only mounted
   // once selected, so its commit-log fetch is lazy for free.
@@ -1135,7 +1090,7 @@ function GitRepoPane({
       handled()
       item.click()
       // A commit row or a side-panel row does not hand focus to a diff.
-      if (!item.closest('[data-git-list="commits"], .git-side')) {
+      if (!item.closest('[data-git-list="commits"], .git-side') && !item.hasAttribute('data-wt-head')) {
         setTimeout(() => root.querySelector<HTMLElement>('[data-git-diff]')?.focus(), 0)
       }
       return
@@ -1188,7 +1143,10 @@ function GitRepoPane({
         if (t.closest('.git-side')) return
         const list = root.querySelector('[data-git-list="tree"], [data-git-list="files"]')
         if (!list) return
-        const items = Array.from(list.querySelectorAll<HTMLElement>('[data-git-item]'))
+        // Section and folder headers are items for j/k but not files.
+        const items = Array.from(
+          list.querySelectorAll<HTMLElement>('[data-git-item]:not([data-wt-head])'),
+        )
         const at = items.findIndex((el) => el.getAttribute('aria-current') === 'true')
         const next = items[stepIndex(at, items.length, action === 'nextFile' ? 1 : -1)]
         if (next && items.indexOf(next) !== at) {
@@ -1209,12 +1167,7 @@ function GitRepoPane({
         // In a diff only Esc goes back; ← is left to the page.
         if (e.key === 'ArrowLeft' && t.closest('[data-git-diff]')) return
         if (historyBack.current?.(t)) return handled()
-        if (mode === 'tree' && selectedPath !== null && t.closest('[data-git-diff]')) {
-          const path = selectedPath
-          setSelectedPath(null)
-          root
-            .querySelector<HTMLElement>(`[data-git-list="tree"] [data-path="${CSS.escape(path)}"]`)
-            ?.focus()
+        if (mode === 'tree' && t.closest('[data-git-diff]') && treeBack.current?.()) {
           return handled()
         }
         return
@@ -1238,17 +1191,11 @@ function GitRepoPane({
   // previous worktree's, good only for the shell and the panel.
   const fresh = data !== null
   const { status, files } = view.repo
-  // Selection survives refetches by path; a file that left the list (e.g.
-  // committed from a terminal) simply drops back to "select a file" instead
-  // of fetching a diff the server would now 404.
-  const selected =
-    fresh && selectedPath !== null
-      ? (files.find((f) => f.path === selectedPath) ?? null)
-      : null
-  // Header shows the directory `repo` actually reflects: the selected
-  // worktree once one's picked, else the project's own local_path.
-  const repoPath = selectedWorktree ?? view.path
-  const shownFiles = filterByPath(files, treeQuery)
+  // The explicit path of the worktree this view is for: the picked one, else
+  // the one at the repo. Null (no worktree list) turns the write controls off.
+  const worktreePath = activeWorktreePath(view.worktrees ?? [], selectedWorktree)
+  // Header shows the directory `repo` actually reflects.
+  const repoPath = worktreePath ?? selectedWorktree ?? view.path
 
   return (
     <div className="git-view" ref={rootRef} onKeyDown={onKeyDown}>
@@ -1259,12 +1206,13 @@ function GitRepoPane({
         <LiveFocus
           ctx={{
             kind: 'git',
-            id: selected?.path ?? null,
-            label: selected?.path.split('/').pop() ?? null,
+            id: selectedPath,
+            label: selectedPath?.split('/').pop() ?? null,
             detail: null,
           }}
         />
       )}
+      {!(mode === 'tree' && fresh && files.length > 0) && (
       <p className="git-repo-header">
         {fresh && (
           <>
@@ -1275,6 +1223,7 @@ function GitRepoPane({
         )}
         <span className="muted git-repo-path">{repoPath}</span>
       </p>
+      )}
 
       <div
         className={`git-shell ${sideInline ? 'git-shell-inline' : 'git-shell-drawer'}${sideOpen ? ' side-open' : ''}`}
@@ -1389,55 +1338,31 @@ function GitRepoPane({
       ) : files.length === 0 ? (
         <p className="muted">Working tree clean — no changed files.</p>
       ) : (
-        <>
-        {files.length > 1 && (
-          <FileFilter
-            value={treeQuery}
-            onChange={setTreeQuery}
-            list="tree"
-            label="Filter changed files"
-            search
-          />
-        )}
-        <div className="git-layout">
-          <ul className="card-list git-file-list" data-git-list="tree">
-            {shownFiles.length === 0 && <li className="muted">No changed files match.</li>}
-            {shownFiles.map((f) => (
-              <li
-                key={f.path}
-                className={f.path === selectedPath ? 'selected' : ''}
-                onClick={() => setSelectedPath(f.path)}
-              >
-                {/* The row's focus target (Tab, j/k, Enter); its click
-                    bubbles to the <li>, which also takes clicks on padding. */}
-                <button
-                  type="button"
-                  className="git-tree-row"
-                  data-git-item=""
-                  data-path={f.path}
-                  aria-current={f.path === selectedPath ? 'true' : undefined}
-                >
-                  <span className="badge git-status-badge">{f.status}</span>
-                  <span className="git-file-path">{fileLabel(f)}</span>
-                  <span className="muted git-file-label">{statusLabel(f.status)}</span>
-                </button>
-              </li>
-            ))}
-          </ul>
-          <div className="git-diff-pane" tabIndex={0} data-git-diff="tree" aria-label="Diff">
-            {selected !== null ? (
-              <DiffPane
-                projectId={projectId}
-                path={selected.path}
-                worktree={selectedWorktree}
-                repo={repo}
+        <GitWorkingTree
+          projectId={projectId}
+          repo={repo}
+          repoView={view.repo}
+          branch={status.branch}
+          ahead={status.ahead}
+          behind={status.behind}
+          worktreePath={worktreePath}
+          diffWorktree={selectedWorktree}
+          query={treeQuery}
+          toolbarStart={
+            files.length > 1 ? (
+              <FileFilter
+                value={treeQuery}
+                onChange={setTreeQuery}
+                list="tree"
+                label="Filter changed files"
+                search
               />
-            ) : (
-              <p className="muted">Select a file to see its diff.</p>
-            )}
-          </div>
-        </div>
-        </>
+            ) : null
+          }
+          refetch={refetch}
+          onSelectedPath={setSelectedPath}
+          backRef={treeBack}
+        />
       )}
       </div>
       </div>

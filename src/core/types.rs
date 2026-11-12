@@ -1477,6 +1477,10 @@ pub struct GitFile {
     pub path: String,
     /// Rename/copy source path ('2' lines only), else None.
     pub orig_path: Option<String>,
+    /// The entry is a submodule: porcelain v2's `<sub>` field starts with
+    /// `S`. Defaulted so JSON written before this field still reads.
+    #[serde(default)]
+    pub submodule: bool,
 }
 
 /// The live repo behind a project's `local_path`: the sidebar summary plus
@@ -1488,6 +1492,10 @@ pub struct GitRepoView {
     pub status: GitStatus,
     /// Same order git printed them (stable enough; UI does not re-sort).
     pub files: Vec<GitFile>,
+    /// An operation in progress in this worktree: exactly one of `"merge"`,
+    /// `"rebase"`, `"cherry-pick"`, `"revert"`, `"bisect"`, else None.
+    #[serde(default)]
+    pub operation: Option<String>,
 }
 
 /// One entry from `git worktree list --porcelain` (see

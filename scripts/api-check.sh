@@ -213,6 +213,24 @@ raw POST "/api/kb/merge" -H 'Content-Type: application/json' -d '{"keep":"topics
 grep -q 'Check lsof first.' "$TMP/kb/topics/dup/one.md" || fail "kb merge: the drop's new line was not folded in"
 ok "kb usage/dupes/merge: served; bad threshold 422; foreign Host and Origin 403; merge needs JSON, checks first, folds and deletes"
 
+# ---- Git write routes (naru task 2738): agent-grade gate, JSON, validation ----
+for op in stage unstage discard; do
+  raw POST "/api/projects/$PROJ/git/$op" -H 'Origin: http://evil.example' -H 'Content-Type: application/json' \
+    -d '{"worktree":"/x","paths":["a"]}'
+  [ "$STATUS" = "403" ] || fail "git $op with a foreign Origin: expected 403, got $STATUS ($BODY)"
+  raw POST "/api/projects/$PROJ/git/$op" -H 'Host: evil.example' -H 'Content-Type: application/json' \
+    -d '{"worktree":"/x","paths":["a"]}'
+  [ "$STATUS" = "403" ] || fail "git $op with a foreign Host: expected 403, got $STATUS"
+  raw POST "/api/projects/$PROJ/git/$op" -d 'worktree=/x'
+  [ "$STATUS" = "415" ] || fail "git $op without JSON Content-Type: expected 415, got $STATUS"
+  api 422 POST "/api/projects/$PROJ/git/$op" '{"paths":["a"]}'
+  [ "$(jqb .error.code)" = "validation" ] || fail "git $op without a worktree: error.code ($BODY)"
+  api 404 POST "/api/projects/$PROJ/git/$op" '{"worktree":"/x","paths":["a"]}'
+done
+raw GET "/api/projects/$PROJ/git/stage"
+[ "$STATUS" = "405" ] || fail "git stage must not answer a GET, got $STATUS"
+ok "git write routes: foreign Origin/Host 403, JSON required, worktree required 422, no folder 404, never a GET"
+
 # ---- Content-Type gate (cross-site form posts) ----
 
 # No Content-Type at all.

@@ -14,4 +14,9 @@ status: GitStatus,
 /**
  * Same order git printed them (stable enough; UI does not re-sort).
  */
-files: Array<GitFile>, };
+files: Array<GitFile>, 
+/**
+ * An operation in progress in this worktree: exactly one of `"merge"`,
+ * `"rebase"`, `"cherry-pick"`, `"revert"`, `"bisect"`, else None.
+ */
+operation: string | null, };

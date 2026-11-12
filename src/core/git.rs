@@ -209,73 +209,125 @@ fn parse_status(porcelain: &str) -> GitStatus {
 }
 
 /// Full working-tree view of the repo at `dir` (branch summary + per-file
-/// change list), or `None` when `dir` is not a git repo / git is unavailable.
-/// Same single porcelain call as `status_of`.
+/// change list + any operation in progress), or `None` when `dir` is not a
+/// git repo / git is unavailable. One `git status --porcelain=v2 --branch -z`
+/// call: `-z` keeps every path verbatim (never C-quoted), so a space, quote,
+/// tab, unicode or leading-`-` name round-trips byte-exact (a non-UTF-8 name
+/// is lossy). Untracked mode stays git's default (`normal`).
 pub fn view_of(dir: &str) -> Option<GitRepoView> {
     let out = Command::new("git")
-        .args(["-C", dir, "status", "--porcelain=v2", "--branch"])
+        .args(["-C", dir, "status", "--porcelain=v2", "--branch", "-z"])
         .stdin(Stdio::null())
         .output()
         .ok()?;
     if !out.status.success() {
         return None;
     }
-    Some(parse_view(&String::from_utf8_lossy(&out.stdout)))
+    let mut view = parse_view(&String::from_utf8_lossy(&out.stdout));
+    view.operation = operation_of(dir);
+    Some(view)
+}
+
+/// The operation in progress in `dir`'s worktree, read from its own git dir
+/// (a linked worktree has one of its own), or `None`.
+fn operation_of(dir: &str) -> Option<String> {
+    let out = Command::new("git")
+        .args(["-C", dir, "rev-parse", "--absolute-git-dir"])
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    operation_in(std::path::Path::new(
+        String::from_utf8_lossy(&out.stdout).trim(),
+    ))
+}
+
+/// Pure on a git dir: `rebase-merge/` or `rebase-apply/rebasing` is a rebase
+/// (`rebase-apply/` alone is a `git am` session, which is not reported; a rebase
+/// wins, since a rebase can sit on a `MERGE_HEAD` or `CHERRY_PICK_HEAD` of
+/// its own), then `MERGE_HEAD`, `CHERRY_PICK_HEAD`, `REVERT_HEAD`,
+/// `BISECT_LOG`.
+fn operation_in(git_dir: &std::path::Path) -> Option<String> {
+    let has = |n: &str| git_dir.join(n).exists();
+    let op = if has("rebase-merge") || has("rebase-apply/rebasing") {
+        "rebase"
+    } else if has("MERGE_HEAD") {
+        "merge"
+    } else if has("CHERRY_PICK_HEAD") {
+        "cherry-pick"
+    } else if has("REVERT_HEAD") {
+        "revert"
+    } else if has("BISECT_LOG") {
+        "bisect"
+    } else {
+        return None;
+    };
+    Some(op.to_string())
 }
 
 /// Kept pure (text in, view out) so the porcelain contract is unit-testable
-/// without spawning git, like `parse_status`.
+/// without spawning git, like `parse_status`. Input is `-z` output: every
+/// record is NUL-terminated, and a rename (`2 …`) record is followed by one
+/// more NUL-terminated field, the original path. `operation` is filled by
+/// `view_of`, which alone can see the git dir.
 fn parse_view(porcelain: &str) -> GitRepoView {
     let mut files = Vec::new();
-    for line in porcelain.lines() {
+    let mut headers = Vec::new();
+    let mut it = porcelain.split('\0');
+    while let Some(rec) = it.next() {
         // '1 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <path>'
-        if let Some(rest) = line.strip_prefix("1 ") {
-            let mut it = rest.splitn(8, ' ');
-            let status = it.next().unwrap_or("").to_string();
-            if let Some(path) = it.nth(6) {
+        if let Some(rest) = rec.strip_prefix("1 ") {
+            let f: Vec<&str> = rest.splitn(8, ' ').collect();
+            if f.len() == 8 {
                 files.push(GitFile {
-                    status,
-                    path: path.to_string(),
+                    status: f[0].to_string(),
+                    path: f[7].to_string(),
                     orig_path: None,
+                    submodule: f[1].starts_with('S'),
                 });
             }
-        // '2 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <Xscore> <path>\t<origPath>'
-        } else if let Some(rest) = line.strip_prefix("2 ") {
-            let mut it = rest.splitn(9, ' ');
-            let status = it.next().unwrap_or("").to_string();
-            if let Some(paths) = it.nth(7) {
-                let (path, orig) = match paths.split_once('\t') {
-                    Some((p, o)) => (p, Some(o.to_string())),
-                    None => (paths, None),
-                };
+        // '2 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <Xscore> <path>' NUL '<origPath>'
+        } else if let Some(rest) = rec.strip_prefix("2 ") {
+            let orig = it.next().map(str::to_string);
+            let f: Vec<&str> = rest.splitn(9, ' ').collect();
+            if f.len() == 9 {
                 files.push(GitFile {
-                    status,
-                    path: path.to_string(),
+                    status: f[0].to_string(),
+                    path: f[8].to_string(),
                     orig_path: orig,
+                    submodule: f[1].starts_with('S'),
                 });
             }
         // 'u <XY> <sub> <m1> <m2> <m3> <mW> <h1> <h2> <h3> <path>'
-        } else if let Some(rest) = line.strip_prefix("u ") {
-            let mut it = rest.splitn(10, ' ');
-            let status = it.next().unwrap_or("").to_string();
-            if let Some(path) = it.nth(8) {
+        } else if let Some(rest) = rec.strip_prefix("u ") {
+            let f: Vec<&str> = rest.splitn(10, ' ').collect();
+            if f.len() == 10 {
                 files.push(GitFile {
-                    status,
-                    path: path.to_string(),
+                    status: f[0].to_string(),
+                    path: f[9].to_string(),
                     orig_path: None,
+                    submodule: f[1].starts_with('S'),
                 });
             }
-        } else if let Some(path) = line.strip_prefix("? ") {
+        } else if let Some(path) = rec.strip_prefix("? ") {
             files.push(GitFile {
                 status: "??".to_string(),
                 path: path.to_string(),
                 orig_path: None,
+                submodule: false,
             });
+        } else if rec.starts_with('#') {
+            headers.push(rec);
         }
     }
+    let mut status = parse_status(&headers.join("\n"));
+    status.dirty = files.len() as i64;
     GitRepoView {
-        status: parse_status(porcelain),
+        status,
         files,
+        operation: None,
     }
 }
 
@@ -789,16 +841,69 @@ pub fn diff_of(dir: &str, path: &str, untracked: bool) -> Option<String> {
 /// Runs one read-only `git -C <dir> <args…>`, accepting the listed exit
 /// codes; lossy UTF-8 stdout, capped at [`DIFF_CAP`] on a char boundary.
 fn run_diff(dir: &str, args: &[&str], ok_codes: &[i32]) -> Option<String> {
-    let out = Command::new("git")
-        .args(["-C", dir])
-        .args(args)
-        .stdin(Stdio::null())
-        .output()
-        .ok()?;
+    run_diff_with(dir, args, ok_codes, false)
+}
+
+/// [`run_diff`] with `GIT_LITERAL_PATHSPECS=1` when `literal`, so `*` and
+/// `:(magic)` in a file name are plain characters.
+fn run_diff_with(dir: &str, args: &[&str], ok_codes: &[i32], literal: bool) -> Option<String> {
+    let mut cmd = Command::new("git");
+    cmd.args(["-C", dir]).args(args).stdin(Stdio::null());
+    if literal {
+        cmd.env("GIT_LITERAL_PATHSPECS", "1");
+    }
+    let out = cmd.output().ok()?;
     if !ok_codes.contains(&out.status.code()?) {
         return None;
     }
     Some(capped(&out.stdout))
+}
+
+/// The diff for one listed file when the caller picks a side (naru task
+/// 2738). `staged: None` is [`diff_of`] unchanged. Otherwise, every path
+/// after `--` and literal:
+/// - conflicted: `git diff HEAD`, whatever `staged` says. Against HEAD git
+///   prints a plain `diff --git` of the working file with its conflict
+///   markers (bare `git diff` would print a `diff --cc` combined diff the
+///   client's parser cannot render). Where HEAD offers nothing (a file
+///   deleted by us) the diff is empty, never an error.
+/// - untracked: the `--no-index` all-added diff, whatever `staged` says.
+/// - `staged: true`: `git diff --cached` (works on an unborn HEAD); a staged
+///   rename passes both paths with `-M` so it renders as a rename.
+/// - `staged: false`: `git diff`, index against working tree.
+pub fn diff_of_file(
+    dir: &str,
+    file: &GitFile,
+    wanted: &str,
+    staged: Option<bool>,
+) -> Option<String> {
+    let Some(staged) = staged else {
+        return diff_of(dir, wanted, file.status == "??");
+    };
+    let path = file.path.as_str();
+    if is_conflicted(file) {
+        return run_diff_with(dir, &["diff", "HEAD", "--", path], &[0], true);
+    }
+    if file.status == "??" {
+        return run_diff_with(
+            dir,
+            &["diff", "--no-index", "--", "/dev/null", path],
+            &[0, 1],
+            true,
+        );
+    }
+    if !staged {
+        return run_diff_with(dir, &["diff", "--", path], &[0], true);
+    }
+    match file.orig_path.as_deref() {
+        Some(orig) => run_diff_with(
+            dir,
+            &["diff", "--cached", "-M", "--", orig, path],
+            &[0],
+            true,
+        ),
+        None => run_diff_with(dir, &["diff", "--cached", "--", path], &[0], true),
+    }
 }
 
 /// Lossy UTF-8, truncated to [`DIFF_CAP`] on a char boundary (the hooks
@@ -811,6 +916,304 @@ fn capped(bytes: &[u8]) -> String {
         s.push_str("\n[diff truncated]");
     }
     s
+}
+
+// --- Writes (naru task 2738) -------------------------------------------
+//
+// The first places Naru changes a repo. Every write is `git -C <dir>` as an
+// argv (never a shell) with `GIT_LITERAL_PATHSPECS=1` and
+// `GIT_TERMINAL_PROMPT=0`; paths go in NUL-separated on stdin
+// (`--pathspec-from-file=- --pathspec-file-nul`) so any number of them is ONE
+// git call and a leading `-` can never be a flag. Never retried, never
+// removes `index.lock`. Callers (the API) have already checked each path
+// against a fresh status; Git 6/8 and 7/8 reuse `run_write`.
+
+/// Cap on the git error text a failed write carries.
+const WRITE_ERR_CAP: usize = 4 * 1024;
+
+/// Most argv bytes one `git clean` call carries (it has no
+/// `--pathspec-from-file`); more paths are cleaned in further calls.
+const CLEAN_ARGV_CAP: usize = 100 * 1024;
+
+/// What a write route does to the chosen paths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteOp {
+    Stage,
+    Unstage,
+    Discard,
+}
+
+/// A conflicted (`u` record) entry: an unmerged XY pair. `U` appears in no
+/// other record kind, and `AA`/`DD` are only ever unmerged.
+pub fn is_conflicted(f: &GitFile) -> bool {
+    f.status.contains('U') || f.status == "AA" || f.status == "DD"
+}
+
+/// The `X` (staged) and `Y` (unstaged) columns of a file's status.
+fn xy(f: &GitFile) -> (char, char) {
+    let mut c = f.status.chars();
+    (c.next().unwrap_or('.'), c.next().unwrap_or('.'))
+}
+
+/// Something `git restore --staged` / `git rm --cached` can act on: a staged
+/// change (not an untracked `?`).
+fn has_staged(f: &GitFile) -> bool {
+    !matches!(xy(f).0, '.' | '?')
+}
+
+/// A tracked file whose working copy differs from the index.
+fn has_unstaged_tracked(f: &GitFile) -> bool {
+    // `A` in the unstaged column is intent-to-add: `restore --worktree` is a
+    // silent no-op there, so it counts as nothing to discard.
+    f.status != "??" && !matches!(xy(f).1, '.' | 'A')
+}
+
+/// The status entry a write acts on for `path`. One path can be listed twice
+/// (`D. keep.txt` plus `?? keep.txt` after `git rm --cached` and a re-create):
+/// stage and discard prefer the untracked copy (so it can be staged or
+/// deleted), unstage the entry that has something staged. `None` when the
+/// path is not listed at all.
+pub fn pick_entry<'a>(op: WriteOp, files: &'a [GitFile], path: &str) -> Option<&'a GitFile> {
+    let same: Vec<&GitFile> = files.iter().filter(|f| f.path == path).collect();
+    let want: fn(&GitFile) -> bool = match op {
+        WriteOp::Stage | WriteOp::Discard => |f| f.status == "??",
+        WriteOp::Unstage => has_staged,
+    };
+    same.iter()
+        .copied()
+        .find(|f| want(f))
+        .or(same.first().copied())
+}
+
+/// The files `all: true` stands for, computed from a fresh status: stage-all
+/// is every non-conflict file with an unstaged change or untracked;
+/// unstage-all every non-conflict file with a staged change. Never discard.
+/// An explicit list (never `git add -A` / a bare `git reset`) so a conflict
+/// is never marked resolved and a merge in progress is never aborted.
+pub fn eligible_for_all(op: WriteOp, files: &[GitFile]) -> Vec<GitFile> {
+    files
+        .iter()
+        .filter(|f| !is_conflicted(f))
+        .filter(|f| match op {
+            WriteOp::Stage => xy(f).1 != '.',
+            WriteOp::Unstage => has_staged(f),
+            WriteOp::Discard => false,
+        })
+        .cloned()
+        .collect()
+}
+
+/// The per-file rules, checked before any write; `Err` is a validation
+/// message (nothing was spawned). A conflicted file is refused for all three
+/// ops; discard also refuses a submodule and a tracked file with nothing
+/// unstaged (discard never touches the index).
+pub fn check_write(op: WriteOp, files: &[GitFile]) -> Result<(), String> {
+    for f in files {
+        if is_conflicted(f) {
+            return Err(format!(
+                "{} has conflicts; resolve it in the terminal",
+                f.path
+            ));
+        }
+        if op == WriteOp::Discard {
+            if f.submodule {
+                return Err(format!("{} is a submodule; it cannot be discarded", f.path));
+            }
+            if f.status != "??" && !has_unstaged_tracked(f) {
+                return Err(format!("{}: nothing to discard", f.path));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Runs `op` on `files` (already allowlisted and checked). `Err` is git's own
+/// stderr, trimmed and capped.
+pub fn apply_write(dir: &str, op: WriteOp, files: &[GitFile]) -> Result<(), String> {
+    match op {
+        WriteOp::Stage => stage(dir, files),
+        WriteOp::Unstage => unstage(dir, files),
+        WriteOp::Discard => discard(dir, files),
+    }
+}
+
+/// `git add` of the paths: modifications, deletions and untracked files or
+/// folders; a rename whose unstaged column is `R` adds its source too. A
+/// submodule entry stages only its gitlink (a plain add of the entry).
+pub fn stage(dir: &str, files: &[GitFile]) -> Result<(), String> {
+    let mut paths = Vec::new();
+    for f in files {
+        paths.push(f.path.as_str());
+        if xy(f).1 == 'R' {
+            paths.extend(f.orig_path.as_deref());
+        }
+    }
+    run_pathspec_write(dir, &["add"], &paths)
+}
+
+/// Takes the paths out of the index, leaving the working files alone:
+/// `git restore --staged`, or on an unborn HEAD (where `restore` has no
+/// source) `git rm --cached -f -q`. A rename whose staged column is `R`
+/// unstages both sides. Files with nothing staged are skipped.
+pub fn unstage(dir: &str, files: &[GitFile]) -> Result<(), String> {
+    let mut paths = Vec::new();
+    for f in files.iter().filter(|f| has_staged(f)) {
+        paths.push(f.path.as_str());
+        if xy(f).0 == 'R' {
+            paths.extend(f.orig_path.as_deref());
+        }
+    }
+    let born = !head_is_unborn(dir)?;
+    if born {
+        run_pathspec_write(dir, &["restore", "--staged"], &paths)
+    } else {
+        run_pathspec_write(dir, &["rm", "--cached", "-f", "-q"], &paths)
+    }
+}
+
+/// Exit code and trimmed stdout of one read-only `git -C <dir> <args>`.
+fn probe(dir: &str, args: &[&str]) -> Option<(i32, String)> {
+    let out = Command::new("git")
+        .args(["-C", dir])
+        .args(args)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    Some((
+        out.status.code()?,
+        String::from_utf8_lossy(&out.stdout).trim().to_string(),
+    ))
+}
+
+/// True only for a genuinely unborn branch: HEAD is a symbolic ref whose
+/// target ref does not exist. A HEAD that resolves is born; anything else
+/// (a ref whose commit is missing, an unreadable HEAD) is an `Err`, because
+/// `git rm --cached` on a born repo would stage deletions.
+fn head_is_unborn(dir: &str) -> Result<bool, String> {
+    if probe(dir, &["rev-parse", "--verify", "-q", "HEAD^{commit}"]).is_some_and(|(c, _)| c == 0) {
+        return Ok(false);
+    }
+    let unreadable = || "cannot tell whether HEAD is unborn; nothing was changed".to_string();
+    let (code, target) = probe(dir, &["symbolic-ref", "-q", "HEAD"]).ok_or_else(unreadable)?;
+    if code != 0 || target.is_empty() {
+        return Err(unreadable());
+    }
+    match probe(dir, &["rev-parse", "--verify", "-q", &target]) {
+        Some((1, _)) => Ok(true),
+        Some((0, _)) => Err(format!(
+            "{target} points at a missing commit; nothing was changed"
+        )),
+        _ => Err(unreadable()),
+    }
+}
+
+/// Throws working-tree changes away, never touching the index: tracked paths
+/// go back to their INDEX version (`git restore --worktree`, staged changes
+/// kept); untracked paths are removed with `git clean -f -d -q -- <paths>`,
+/// limited to exactly those (an untracked folder entry `dir/` removes that
+/// folder; git itself refuses a nested repo). Never `-x`, never pathless.
+pub fn discard(dir: &str, files: &[GitFile]) -> Result<(), String> {
+    let tracked: Vec<&str> = files
+        .iter()
+        .filter(|f| has_unstaged_tracked(f))
+        .map(|f| f.path.as_str())
+        .collect();
+    run_pathspec_write(dir, &["restore", "--worktree"], &tracked)?;
+    let untracked: Vec<&str> = files
+        .iter()
+        .filter(|f| f.status == "??")
+        .map(|f| f.path.as_str())
+        .collect();
+    let mut chunk: Vec<&str> = Vec::new();
+    let mut size = 0;
+    for p in untracked {
+        if !chunk.is_empty() && size + p.len() > CLEAN_ARGV_CAP {
+            run_clean(dir, &chunk)?;
+            chunk.clear();
+            size = 0;
+        }
+        size += p.len() + 1;
+        chunk.push(p);
+    }
+    if chunk.is_empty() {
+        Ok(())
+    } else {
+        run_clean(dir, &chunk)
+    }
+}
+
+fn run_clean(dir: &str, paths: &[&str]) -> Result<(), String> {
+    let mut args = vec!["clean", "-f", "-d", "-q", "--"];
+    args.extend_from_slice(paths);
+    run_write(dir, &args, None)
+}
+
+/// One `git <args> --pathspec-from-file=- --pathspec-file-nul` call with the
+/// distinct `paths` on stdin; no paths, no call.
+fn run_pathspec_write(dir: &str, args: &[&str], paths: &[&str]) -> Result<(), String> {
+    let mut seen = HashSet::new();
+    let mut stdin = Vec::new();
+    for p in paths.iter().filter(|p| seen.insert(**p)) {
+        stdin.extend_from_slice(p.as_bytes());
+        stdin.push(0);
+    }
+    if stdin.is_empty() {
+        return Ok(());
+    }
+    let mut full = args.to_vec();
+    full.extend(["--pathspec-from-file=-", "--pathspec-file-nul"]);
+    run_write(dir, &full, Some(stdin))
+}
+
+/// The one place a write spawns git (`-C <dir>`, literal pathspecs, no
+/// prompt). `Err` carries git's stderr, lossy UTF-8, trimmed, capped at
+/// [`WRITE_ERR_CAP`]; the caller reports it and never retries.
+pub fn run_write(dir: &str, args: &[&str], stdin: Option<Vec<u8>>) -> Result<(), String> {
+    use std::io::Write;
+    let mut cmd = Command::new("git");
+    cmd.args(["-C", dir])
+        .args(args)
+        .env("GIT_LITERAL_PATHSPECS", "1")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .stdin(if stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        });
+    let mut child = cmd.spawn().map_err(|e| format!("could not run git: {e}"))?;
+    // Feed stdin from a thread so a git that fills its stderr pipe first
+    // cannot deadlock against a big path list.
+    let feeder = stdin.and_then(|data| {
+        let mut pipe = child.stdin.take()?;
+        Some(std::thread::spawn(move || {
+            let _ = pipe.write_all(&data);
+        }))
+    });
+    let out = child
+        .wait_with_output()
+        .map_err(|e| format!("could not run git: {e}"))?;
+    if let Some(t) = feeder {
+        let _ = t.join();
+    }
+    if out.status.success() {
+        return Ok(());
+    }
+    let mut msg = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    if msg.is_empty() {
+        msg = format!(
+            "git {} failed ({})",
+            args.first().unwrap_or(&""),
+            out.status
+        );
+    }
+    if msg.len() > WRITE_ERR_CAP {
+        let cut = (0..=WRITE_ERR_CAP).rev().find(|i| msg.is_char_boundary(*i));
+        msg.truncate(cut.unwrap_or(0));
+    }
+    Err(msg)
 }
 
 /// Recent commit log (`git -C <dir> log -n LOG_CAP --date=iso-strict
@@ -1661,24 +2064,26 @@ mod tests {
     #[test]
     fn parse_view_reads_headers_and_all_file_line_kinds() {
         let v = parse_view(
-            "# branch.oid 1111111111111111111111111111111111111111\n\
-             # branch.head main\n\
-             # branch.upstream origin/main\n\
-             # branch.ab +2 -1\n\
-             1 .M N... 100644 100644 100644 aaa bbb src/lib.rs\n\
-             1 MM N... 100644 100644 100644 aaa bbb with space.txt\n\
-             2 R. N... 100644 100644 100644 aaa bbb R100 new.rs\told.rs\n\
-             u UU N... 100644 100644 100644 100644 aaa bbb ccc conflict.rs\n\
-             ? untracked.txt\n",
+            "# branch.oid 1111111111111111111111111111111111111111\0\
+             # branch.head main\0\
+             # branch.upstream origin/main\0\
+             # branch.ab +2 -1\0\
+             1 .M N... 100644 100644 100644 aaa bbb src/lib.rs\0\
+             1 MM N... 100644 100644 100644 aaa bbb with space.txt\0\
+             2 R. N... 100644 100644 100644 aaa bbb R100 new.rs\0old.rs\0\
+             u UU N... 100644 100644 100644 100644 aaa bbb ccc conflict.rs\0\
+             ? untracked.txt\0",
         );
         assert_eq!(v.status.branch, "main");
         assert_eq!(v.status.ahead, 2);
         assert_eq!(v.status.behind, 1);
         assert_eq!(v.status.dirty, 5);
         assert_eq!(v.files.len(), 5);
+        assert_eq!(v.operation, None);
         assert_eq!(v.files[0].status, ".M");
         assert_eq!(v.files[0].path, "src/lib.rs");
         assert_eq!(v.files[0].orig_path, None);
+        assert!(!v.files[0].submodule);
         assert_eq!(v.files[1].status, "MM");
         assert_eq!(v.files[1].path, "with space.txt");
         assert_eq!(v.files[2].status, "R.");
@@ -1692,13 +2097,53 @@ mod tests {
     }
 
     #[test]
+    fn parse_view_keeps_odd_paths_and_flags_submodules() {
+        // `-z` paths are verbatim: quote, tab, newline, unicode, leading `-`,
+        // and a rename's original path is the NEXT NUL field.
+        let v = parse_view(
+            "# branch.head main\0\
+             1 .M S.M. 160000 160000 160000 aaa bbb sub\0\
+             1 .M N... 100644 100644 100644 aaa bbb a\"q\"\tb\nc é.txt\0\
+             2 R. N... 100644 100644 100644 aaa bbb R100 -new file\0-old file\0\
+             ? -dash\0",
+        );
+        assert_eq!(v.files.len(), 4);
+        assert!(v.files[0].submodule);
+        assert_eq!(v.files[0].path, "sub");
+        assert!(!v.files[1].submodule);
+        assert_eq!(v.files[1].path, "a\"q\"\tb\nc é.txt");
+        assert_eq!(v.files[2].path, "-new file");
+        assert_eq!(v.files[2].orig_path.as_deref(), Some("-old file"));
+        assert_eq!(v.files[3].path, "-dash");
+        assert_eq!(v.status.dirty, 4);
+    }
+
+    #[test]
     fn parse_view_of_clean_repo_is_empty() {
         let v = parse_view(
-            "# branch.oid 2222222222222222222222222222222222222222\n\
-             # branch.head feature/x\n",
+            "# branch.oid 2222222222222222222222222222222222222222\0\
+             # branch.head feature/x\0",
         );
         assert_eq!(v.status.branch, "feature/x");
         assert!(v.files.is_empty());
+    }
+
+    #[test]
+    fn operation_in_names_each_state_and_rebase_wins() {
+        let d = tempfile::tempdir().unwrap();
+        assert_eq!(operation_in(d.path()), None);
+        for (marker, want) in [
+            ("BISECT_LOG", "bisect"),
+            ("REVERT_HEAD", "revert"),
+            ("CHERRY_PICK_HEAD", "cherry-pick"),
+            ("MERGE_HEAD", "merge"),
+        ] {
+            std::fs::write(d.path().join(marker), "x").unwrap();
+            assert_eq!(operation_in(d.path()).as_deref(), Some(want));
+        }
+        std::fs::create_dir_all(d.path().join("rebase-apply")).unwrap();
+        std::fs::write(d.path().join("rebase-apply/rebasing"), "").unwrap();
+        assert_eq!(operation_in(d.path()).as_deref(), Some("rebase"));
     }
 
     #[test]
@@ -3449,5 +3894,537 @@ mod tests {
         assert_eq!((fer5, fer300), (1, 1));
         assert_eq!(total5, total300, "git calls must not grow with branches");
         assert_eq!(total5, 2, "one for-each-ref plus one `git remote`");
+    }
+
+    // --- Writes (naru task 2738), on real throwaway repos ----------------
+
+    fn wgit(dir: &std::path::Path, args: &[&str]) {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// A repo on `trunk`; with `commit`, one commit holding `base.txt`.
+    fn wrepo(commit: bool) -> tempfile::TempDir {
+        let d = tempfile::tempdir().unwrap();
+        wgit(d.path(), &["init", "-q", "-b", "trunk"]);
+        if commit {
+            std::fs::write(d.path().join("base.txt"), "base\n").unwrap();
+            wgit(d.path(), &["add", "base.txt"]);
+            wgit(d.path(), &["commit", "-q", "-m", "base"]);
+        }
+        d
+    }
+
+    fn dstr(d: &tempfile::TempDir) -> &str {
+        d.path().to_str().unwrap()
+    }
+
+    /// The status as `"XY path"` lines, from `view_of`.
+    fn sts(d: &tempfile::TempDir) -> Vec<String> {
+        view_of(dstr(d))
+            .unwrap()
+            .files
+            .iter()
+            .map(|f| format!("{} {}", f.status, f.path))
+            .collect()
+    }
+
+    /// The listed files with these exact paths, as the route would pick them.
+    fn pick(d: &tempfile::TempDir, names: &[&str]) -> Vec<GitFile> {
+        let all = view_of(dstr(d)).unwrap().files;
+        names
+            .iter()
+            .map(|n| {
+                all.iter()
+                    .find(|f| f.path == *n)
+                    .unwrap_or_else(|| panic!("{n} not in {all:?}"))
+                    .clone()
+            })
+            .collect()
+    }
+
+    fn put(d: &tempfile::TempDir, rel: &str, text: &str) {
+        let p = d.path().join(rel);
+        if let Some(parent) = p.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(p, text).unwrap();
+    }
+
+    #[test]
+    fn stage_covers_modified_deleted_untracked_file_and_folder() {
+        let d = wrepo(true);
+        put(&d, "gone.txt", "g\n");
+        wgit(d.path(), &["add", "gone.txt"]);
+        wgit(d.path(), &["commit", "-q", "-m", "g"]);
+        put(&d, "base.txt", "changed\n");
+        std::fs::remove_file(d.path().join("gone.txt")).unwrap();
+        put(&d, "new.txt", "n\n");
+        put(&d, "dir/a.txt", "a\n");
+        assert_eq!(
+            sts(&d),
+            [".M base.txt", ".D gone.txt", "?? dir/", "?? new.txt"]
+        );
+        let f = pick(&d, &["base.txt", "gone.txt", "dir/", "new.txt"]);
+        stage(dstr(&d), &f).unwrap();
+        assert_eq!(
+            sts(&d),
+            ["M. base.txt", "A. dir/a.txt", "D. gone.txt", "A. new.txt"]
+        );
+    }
+
+    #[test]
+    fn unstage_keeps_the_working_file_born_and_unborn() {
+        let d = wrepo(true);
+        put(&d, "base.txt", "changed\n");
+        put(&d, "new.txt", "n\n");
+        wgit(d.path(), &["add", "base.txt", "new.txt"]);
+        let f = pick(&d, &["base.txt", "new.txt"]);
+        unstage(dstr(&d), &f).unwrap();
+        assert_eq!(sts(&d), [".M base.txt", "?? new.txt"]);
+        assert_eq!(
+            std::fs::read_to_string(d.path().join("new.txt")).unwrap(),
+            "n\n"
+        );
+
+        // Unborn HEAD: `restore --staged` has no source, `rm --cached` does it.
+        let u = wrepo(false);
+        put(&u, "a.txt", "a\n");
+        wgit(u.path(), &["add", "a.txt"]);
+        assert_eq!(sts(&u), ["A. a.txt"]);
+        unstage(dstr(&u), &pick(&u, &["a.txt"])).unwrap();
+        assert_eq!(sts(&u), ["?? a.txt"]);
+        assert_eq!(
+            std::fs::read_to_string(u.path().join("a.txt")).unwrap(),
+            "a\n"
+        );
+    }
+
+    #[test]
+    fn stage_all_and_unstage_all_use_explicit_lists_born_and_unborn() {
+        for commit in [true, false] {
+            let d = wrepo(commit);
+            put(&d, "x.txt", "x\n");
+            put(&d, "y/z.txt", "z\n");
+            if commit {
+                put(&d, "base.txt", "changed\n");
+            }
+            let files = view_of(dstr(&d)).unwrap().files;
+            let eligible = eligible_for_all(WriteOp::Stage, &files);
+            assert_eq!(eligible.len(), files.len());
+            assert!(eligible_for_all(WriteOp::Unstage, &files).is_empty());
+            stage(dstr(&d), &eligible).unwrap();
+            assert!(
+                sts(&d).iter().all(|l| l.starts_with(['A', 'M'])),
+                "{:?}",
+                sts(&d)
+            );
+            let files = view_of(dstr(&d)).unwrap().files;
+            assert!(eligible_for_all(WriteOp::Stage, &files).is_empty());
+            let staged = eligible_for_all(WriteOp::Unstage, &files);
+            unstage(dstr(&d), &staged).unwrap();
+            if commit {
+                assert_eq!(sts(&d), [".M base.txt", "?? x.txt", "?? y/"]);
+            } else {
+                assert_eq!(sts(&d), ["?? x.txt", "?? y/"]);
+            }
+            assert!(d.path().join("x.txt").exists());
+        }
+    }
+
+    #[test]
+    fn discard_tracked_keeps_the_index_and_untracked_goes() {
+        let d = wrepo(true);
+        put(&d, "base.txt", "staged\n");
+        wgit(d.path(), &["add", "base.txt"]);
+        put(&d, "base.txt", "staged\nworktree\n");
+        put(&d, "u.txt", "u\n");
+        put(&d, "udir/inner/f.txt", "f\n");
+        put(&d, "keep.txt", "k\n");
+        assert_eq!(
+            sts(&d),
+            ["MM base.txt", "?? keep.txt", "?? u.txt", "?? udir/"]
+        );
+        let f = pick(&d, &["base.txt", "u.txt", "udir/"]);
+        check_write(WriteOp::Discard, &f).unwrap();
+        discard(dstr(&d), &f).unwrap();
+        // Working tree back to the index version; the staged change survives.
+        assert_eq!(sts(&d), ["M. base.txt", "?? keep.txt"]);
+        assert_eq!(
+            std::fs::read_to_string(d.path().join("base.txt")).unwrap(),
+            "staged\n"
+        );
+        assert!(!d.path().join("udir").exists());
+    }
+
+    #[test]
+    fn discard_restores_a_deleted_file_and_works_on_unborn_untracked() {
+        let d = wrepo(true);
+        std::fs::remove_file(d.path().join("base.txt")).unwrap();
+        discard(dstr(&d), &pick(&d, &["base.txt"])).unwrap();
+        assert!(sts(&d).is_empty());
+        let u = wrepo(false);
+        put(&u, "a.txt", "a\n");
+        discard(dstr(&u), &pick(&u, &["a.txt"])).unwrap();
+        assert!(!u.path().join("a.txt").exists());
+    }
+
+    #[test]
+    fn check_write_refuses_conflicts_submodules_and_nothing_to_discard() {
+        let f = |status: &str, sub: bool| GitFile {
+            status: status.into(),
+            path: "p".into(),
+            orig_path: None,
+            submodule: sub,
+        };
+        for op in [WriteOp::Stage, WriteOp::Unstage, WriteOp::Discard] {
+            let e = check_write(op, &[f("UU", false)]).unwrap_err();
+            assert!(
+                e.contains("has conflicts; resolve it in the terminal"),
+                "{e}"
+            );
+            assert!(check_write(op, &[f("AA", false)]).is_err());
+            assert!(check_write(op, &[f("DU", false)]).is_err());
+        }
+        assert!(check_write(WriteOp::Discard, &[f(".M", true)]).is_err());
+        assert!(check_write(WriteOp::Stage, &[f(".M", true)]).is_ok());
+        let e = check_write(WriteOp::Discard, &[f("M.", false)]).unwrap_err();
+        assert!(e.contains("nothing to discard"), "{e}");
+        assert!(check_write(WriteOp::Discard, &[f("??", false)]).is_ok());
+        assert!(check_write(WriteOp::Discard, &[f("MM", false)]).is_ok());
+    }
+
+    #[test]
+    fn a_staged_rename_unstages_and_stages_both_sides() {
+        let d = wrepo(true);
+        wgit(d.path(), &["mv", "base.txt", "moved.txt"]);
+        assert_eq!(sts(&d), ["R. moved.txt"]);
+        let f = pick(&d, &["moved.txt"]);
+        assert_eq!(f[0].orig_path.as_deref(), Some("base.txt"));
+        unstage(dstr(&d), &f).unwrap();
+        assert_eq!(sts(&d), [".D base.txt", "?? moved.txt"]);
+        assert!(d.path().join("moved.txt").exists());
+        // Stage both sides again: base.txt's deletion plus the new file.
+        let both = pick(&d, &["base.txt", "moved.txt"]);
+        stage(dstr(&d), &both).unwrap();
+        assert_eq!(sts(&d), ["R. moved.txt"]);
+        // A rename carrying an unstaged `R` (intent-to-add plus a deleted
+        // source) stages its source too.
+        unstage(dstr(&d), &pick(&d, &["moved.txt"])).unwrap();
+        wgit(d.path(), &["add", "-N", "moved.txt"]);
+        let r = pick(&d, &["moved.txt"]);
+        assert_eq!(r[0].status, ".R", "{:?}", sts(&d));
+        stage(dstr(&d), &r).unwrap();
+        assert_eq!(sts(&d), ["R. moved.txt"]);
+    }
+
+    #[test]
+    fn awkward_names_round_trip_and_globs_stay_literal() {
+        let d = wrepo(true);
+        let names = [
+            "with space.txt",
+            "dq\"uote.txt",
+            "ünï-çødé.txt",
+            "-leading.txt",
+            "tab\tname.txt",
+            "star*.txt",
+        ];
+        for n in names {
+            put(&d, n, "x\n");
+        }
+        // The sibling `star*` must not match.
+        put(&d, "starfish.txt", "y\n");
+        for n in names {
+            assert!(
+                sts(&d).contains(&format!("?? {n}")),
+                "{n} lost in {:?}",
+                sts(&d)
+            );
+        }
+        stage(dstr(&d), &pick(&d, &names)).unwrap();
+        let st = sts(&d);
+        for n in names {
+            assert!(st.contains(&format!("A. {n}")), "{n} not staged: {st:?}");
+        }
+        assert!(st.contains(&"?? starfish.txt".to_string()), "{st:?}");
+        // Unstage only the star file; the rest stay staged.
+        unstage(dstr(&d), &pick(&d, &["star*.txt"])).unwrap();
+        let st = sts(&d);
+        assert!(st.contains(&"?? star*.txt".to_string()), "{st:?}");
+        assert!(st.contains(&"A. -leading.txt".to_string()), "{st:?}");
+        // Discard an untracked name with a glob; its sibling survives.
+        discard(dstr(&d), &pick(&d, &["star*.txt"])).unwrap();
+        assert!(!d.path().join("star*.txt").exists());
+        assert!(d.path().join("starfish.txt").exists());
+    }
+
+    /// A merge of `feature` into `trunk` that conflicts on `base.txt`.
+    fn conflicted() -> tempfile::TempDir {
+        let d = wrepo(true);
+        wgit(d.path(), &["checkout", "-q", "-b", "feature"]);
+        put(&d, "base.txt", "feature\n");
+        wgit(d.path(), &["commit", "-q", "-am", "f"]);
+        wgit(d.path(), &["checkout", "-q", "trunk"]);
+        put(&d, "base.txt", "trunk\n");
+        wgit(d.path(), &["commit", "-q", "-am", "t"]);
+        let out = Command::new("git")
+            .args(["-C", dstr(&d), "merge", "feature"])
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(!out.status.success());
+        d
+    }
+
+    #[test]
+    fn a_merge_conflict_reports_its_operation_and_diffs_with_markers() {
+        let d = conflicted();
+        let v = view_of(dstr(&d)).unwrap();
+        assert_eq!(v.operation.as_deref(), Some("merge"));
+        let f = pick(&d, &["base.txt"]);
+        assert_eq!(f[0].status, "UU");
+        assert!(is_conflicted(&f[0]));
+        for staged in [None, Some(true), Some(false)] {
+            let diff = diff_of_file(dstr(&d), &f[0], "base.txt", staged).unwrap();
+            assert!(diff.contains("<<<<<<<"), "{staged:?}: {diff}");
+            assert!(diff.starts_with("diff --git"), "{staged:?}: {diff}");
+            assert!(!diff.contains("diff --cc"), "{staged:?}: {diff}");
+        }
+        // stage-all must leave the conflict alone and the merge standing.
+        put(&d, "other.txt", "o\n");
+        let files = view_of(dstr(&d)).unwrap().files;
+        let all = eligible_for_all(WriteOp::Stage, &files);
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].path, "other.txt");
+        stage(dstr(&d), &all).unwrap();
+        assert_eq!(sts(&d), ["A. other.txt", "UU base.txt"]);
+        assert!(eligible_for_all(WriteOp::Unstage, &view_of(dstr(&d)).unwrap().files).len() == 1);
+        assert_eq!(
+            view_of(dstr(&d)).unwrap().operation.as_deref(),
+            Some("merge")
+        );
+    }
+
+    #[test]
+    fn a_delete_modify_conflict_still_yields_a_plain_diff_or_empty() {
+        let d = wrepo(true);
+        wgit(d.path(), &["checkout", "-q", "-b", "feature"]);
+        wgit(d.path(), &["rm", "-q", "base.txt"]);
+        wgit(d.path(), &["commit", "-q", "-m", "rm"]);
+        wgit(d.path(), &["checkout", "-q", "trunk"]);
+        put(&d, "base.txt", "edited\n");
+        wgit(d.path(), &["commit", "-q", "-am", "edit"]);
+        let _ = Command::new("git")
+            .args(["-C", dstr(&d), "merge", "feature"])
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        let f = pick(&d, &["base.txt"]);
+        assert_eq!(f[0].status, "UD");
+        let diff = diff_of_file(dstr(&d), &f[0], "base.txt", Some(true)).unwrap();
+        assert!(!diff.contains("diff --cc"), "{diff}");
+    }
+
+    #[test]
+    fn diff_of_file_picks_the_side_and_is_literal() {
+        let d = wrepo(true);
+        put(&d, "base.txt", "staged\n");
+        wgit(d.path(), &["add", "base.txt"]);
+        put(&d, "base.txt", "staged\nworktree\n");
+        put(&d, "new*.txt", "brand new\n");
+        let f = pick(&d, &["base.txt", "new*.txt"]);
+        let staged = diff_of_file(dstr(&d), &f[0], "base.txt", Some(true)).unwrap();
+        assert!(
+            staged.contains("+staged") && !staged.contains("+worktree"),
+            "{staged}"
+        );
+        let unstaged = diff_of_file(dstr(&d), &f[0], "base.txt", Some(false)).unwrap();
+        assert!(
+            unstaged.contains("+worktree") && !unstaged.contains("-base"),
+            "{unstaged}"
+        );
+        // Absent: staged and unstaged together, as before.
+        let both = diff_of_file(dstr(&d), &f[0], "base.txt", None).unwrap();
+        assert!(
+            both.contains("-base") && both.contains("+worktree"),
+            "{both}"
+        );
+        // Untracked: the all-added diff whatever `staged` says.
+        for s in [None, Some(true), Some(false)] {
+            let u = diff_of_file(dstr(&d), &f[1], "new*.txt", s).unwrap();
+            assert!(u.contains("+brand new"), "{s:?}: {u}");
+        }
+        // A staged rename renders as a rename.
+        let r = wrepo(true);
+        wgit(r.path(), &["mv", "base.txt", "moved.txt"]);
+        let f = pick(&r, &["moved.txt"]);
+        let diff = diff_of_file(dstr(&r), &f[0], "moved.txt", Some(true)).unwrap();
+        assert!(diff.contains("rename from base.txt"), "{diff}");
+        // Unborn HEAD: the staged diff still works.
+        let u = wrepo(false);
+        put(&u, "a.txt", "a\n");
+        wgit(u.path(), &["add", "a.txt"]);
+        let f = pick(&u, &["a.txt"]);
+        assert!(
+            diff_of_file(dstr(&u), &f[0], "a.txt", Some(true))
+                .unwrap()
+                .contains("+a")
+        );
+    }
+
+    #[test]
+    fn a_held_index_lock_fails_with_gits_message_and_stays() {
+        let d = wrepo(true);
+        put(&d, "new.txt", "n\n");
+        let lock = d.path().join(".git/index.lock");
+        std::fs::write(&lock, "").unwrap();
+        let e = stage(dstr(&d), &pick(&d, &["new.txt"])).unwrap_err();
+        assert!(e.contains("index.lock"), "{e}");
+        assert!(e.len() <= WRITE_ERR_CAP);
+        assert!(lock.exists(), "the lock must never be removed");
+    }
+
+    #[test]
+    fn five_thousand_files_stage_and_unstage_in_one_call_each() {
+        let d = wrepo(true);
+        for i in 0..5000 {
+            put(&d, &format!("bulk/f{i:04}.txt"), "x\n");
+        }
+        let listed: Vec<GitFile> = (0..5000)
+            .map(|i| GitFile {
+                status: "??".into(),
+                path: format!("bulk/f{i:04}.txt"),
+                orig_path: None,
+                submodule: false,
+            })
+            .collect();
+        let t = Instant::now();
+        stage(dstr(&d), &listed).unwrap();
+        let files = view_of(dstr(&d)).unwrap().files;
+        assert_eq!(files.len(), 5000);
+        assert!(files.iter().all(|f| f.status == "A."));
+        unstage(dstr(&d), &files).unwrap();
+        assert_eq!(sts(&d), ["?? bulk/"]);
+        assert!(t.elapsed() < Duration::from_secs(60), "{:?}", t.elapsed());
+    }
+
+    #[test]
+    fn unstage_refuses_a_born_repo_whose_head_commit_is_missing() {
+        let d = wrepo(true);
+        put(&d, "base.txt", "changed\n");
+        wgit(d.path(), &["add", "base.txt"]);
+        let sha = String::from_utf8(
+            Command::new("git")
+                .args(["-C", dstr(&d), "rev-parse", "HEAD"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        let sha = sha.trim();
+        let obj = d
+            .path()
+            .join(".git/objects")
+            .join(&sha[..2])
+            .join(&sha[2..]);
+        std::fs::remove_file(&obj).unwrap();
+        assert!(
+            head_is_unborn(dstr(&d))
+                .unwrap_err()
+                .contains("missing commit")
+        );
+        let f = GitFile {
+            status: "M.".into(),
+            path: "base.txt".into(),
+            orig_path: None,
+            submodule: false,
+        };
+        assert!(unstage(dstr(&d), &[f]).is_err());
+        // The index still holds the staged change: nothing was written.
+        let st = Command::new("git")
+            .args(["-C", dstr(&d), "ls-files", "-s", "base.txt"])
+            .output()
+            .unwrap();
+        assert!(!st.stdout.is_empty());
+        assert!(head_is_unborn(dstr(&wrepo(false))).unwrap());
+        assert!(!head_is_unborn(dstr(&wrepo(true))).unwrap());
+    }
+
+    #[test]
+    fn intent_to_add_has_nothing_to_discard_and_a_doubled_path_picks_by_op() {
+        let d = wrepo(true);
+        put(&d, "ita.txt", "i\n");
+        wgit(d.path(), &["add", "-N", "ita.txt"]);
+        let f = pick(&d, &["ita.txt"]);
+        assert_eq!(f[0].status, ".A");
+        assert!(
+            check_write(WriteOp::Discard, &f)
+                .unwrap_err()
+                .contains("nothing to discard")
+        );
+
+        // `D. base.txt` (index delete) plus `?? base.txt` (re-created).
+        let r = wrepo(true);
+        wgit(r.path(), &["rm", "--cached", "-q", "base.txt"]);
+        put(&r, "base.txt", "again\n");
+        let files = view_of(dstr(&r)).unwrap().files;
+        assert_eq!(files.len(), 2, "{files:?}");
+        let status = |op| pick_entry(op, &files, "base.txt").unwrap().status.clone();
+        assert_eq!(status(WriteOp::Discard), "??");
+        assert_eq!(status(WriteOp::Stage), "??");
+        assert_eq!(status(WriteOp::Unstage), "D.");
+        assert!(pick_entry(WriteOp::Stage, &files, "nope").is_none());
+        // Discard deletes the untracked copy and leaves the index delete.
+        let d1 = pick_entry(WriteOp::Discard, &files, "base.txt")
+            .unwrap()
+            .clone();
+        check_write(WriteOp::Discard, std::slice::from_ref(&d1)).unwrap();
+        discard(dstr(&r), &[d1]).unwrap();
+        assert_eq!(sts(&r), ["D. base.txt"]);
+        // Unstage acts on the tracked entry: the file comes back to the index.
+        put(&r, "base.txt", "again\n");
+        let files = view_of(dstr(&r)).unwrap().files;
+        let u = pick_entry(WriteOp::Unstage, &files, "base.txt")
+            .unwrap()
+            .clone();
+        unstage(dstr(&r), &[u]).unwrap();
+        assert_eq!(sts(&r), [".M base.txt"]);
+        // Stage of the untracked copy stages the path.
+        let r2 = wrepo(true);
+        wgit(r2.path(), &["rm", "--cached", "-q", "base.txt"]);
+        put(&r2, "base.txt", "again\n");
+        let files = view_of(dstr(&r2)).unwrap().files;
+        let s1 = pick_entry(WriteOp::Stage, &files, "base.txt")
+            .unwrap()
+            .clone();
+        stage(dstr(&r2), &[s1]).unwrap();
+        assert_eq!(sts(&r2), ["M. base.txt"]);
+    }
+
+    #[test]
+    fn git_am_is_not_a_rebase() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir(d.path().join("rebase-apply")).unwrap();
+        assert_eq!(operation_in(d.path()), None);
+        std::fs::write(d.path().join("rebase-apply/rebasing"), "").unwrap();
+        assert_eq!(operation_in(d.path()).as_deref(), Some("rebase"));
+        let m = tempfile::tempdir().unwrap();
+        std::fs::create_dir(m.path().join("rebase-merge")).unwrap();
+        assert_eq!(operation_in(m.path()).as_deref(), Some("rebase"));
     }
 }

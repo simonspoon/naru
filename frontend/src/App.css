@@ -15838,3 +15838,514 @@ button.git-side-retry:hover:not(:disabled) {
     align-items: center;
   }
 }
+
+/* ---- The Git tab's working-tree view (GitWorkingTree.tsx, naru task 2738,
+   docs/git-tab.md "Working tree view"). Tokens only. The column is a flex
+   child of `.git-layout`: target line, toolbar, selection bar, then one
+   scroller whose sticky section headers (`.git-side-headbar`) stick to it. ---- */
+.git-wt {
+  flex: none;
+  width: 19rem;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  overflow-wrap: anywhere;
+}
+
+@media (min-width: 861px) {
+  .git-wt {
+    width: 25rem;
+  }
+}
+
+.git-wt-target {
+  margin: 0;
+  font-size: 0.78rem;
+}
+
+.git-wt-target-path {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+}
+
+.git-wt-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.git-wt-toolbar .git-file-filter {
+  flex: 1;
+  width: auto;
+  min-width: 0;
+  margin: 0;
+}
+
+.git-wt-viewtoggle {
+  display: flex;
+  flex: none;
+}
+
+.git-wt-viewtoggle button {
+  padding: 0.2rem 0.55rem;
+  font-size: 0.78rem;
+  border-radius: 0;
+}
+
+.git-wt-viewtoggle button:first-child {
+  border-radius: var(--r-sm) 0 0 var(--r-sm);
+}
+
+.git-wt-viewtoggle button:last-child {
+  border-radius: 0 var(--r-sm) var(--r-sm) 0;
+}
+
+.git-wt-viewtoggle button.active {
+  color: var(--bg);
+  background: var(--cyan);
+  border-color: var(--cyan);
+}
+
+.git-wt-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  background: var(--surface);
+}
+
+.git-wt-hint {
+  margin: 0;
+  padding: 0.4rem 0.6rem;
+  font-size: 0.8rem;
+}
+
+.git-wt-section + .git-wt-section {
+  border-top: 1px solid var(--hairline);
+}
+
+.git-wt-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.git-wt-row {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  padding-left: calc(var(--depth, 0) * 0.9rem);
+  border-left: 2px solid transparent;
+  user-select: none;
+}
+
+.git-wt-row:hover {
+  background: var(--surface-hover);
+}
+
+.git-wt-row.selected {
+  background: var(--surface-raised);
+}
+
+.git-wt-row.primary {
+  border-left-color: var(--cyan);
+}
+
+button.git-wt-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.22rem 0.5rem;
+  color: var(--text);
+  font-size: 0.85rem;
+}
+
+button.git-wt-main:hover:not(:disabled) {
+  background: none;
+  box-shadow: none;
+}
+
+.git-wt-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.git-wt-name {
+  font-family: var(--font-mono);
+  color: var(--text-h);
+}
+
+.git-wt-dir {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+}
+
+.git-wt-word {
+  flex: none;
+  font-size: 0.72rem;
+}
+
+.git-wt-word.conflict {
+  color: var(--red);
+  font-weight: 600;
+}
+
+.git-wt-tag {
+  margin-left: 0.35rem;
+  font-size: 0.7rem;
+}
+
+.git-wt-badge {
+  flex: none;
+  width: 1.3rem;
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  font-weight: 700;
+  border-radius: var(--r-sm);
+  border: 1px solid currentColor;
+}
+
+.git-wt-badge.tone-modified {
+  color: var(--amber);
+}
+
+.git-wt-badge.tone-added,
+.git-wt-badge.tone-untracked {
+  color: var(--green);
+}
+
+.git-wt-badge.tone-deleted,
+.git-wt-badge.tone-conflict {
+  color: var(--red);
+}
+
+.git-wt-badge.tone-renamed,
+.git-wt-badge.tone-copied {
+  color: var(--cyan);
+}
+
+.git-wt-badge.tone-typechange {
+  color: var(--violet);
+}
+
+.git-wt-badge.tone-unknown {
+  color: var(--muted);
+}
+
+.git-wt-badge.tone-untracked {
+  border-style: dashed;
+}
+
+.git-wt-dirrow .git-side-count {
+  margin-left: 0;
+}
+
+/* Row actions: on hover, keyboard focus or the selected row on a pointer
+   device; always there when there is no hover (touch). */
+.git-wt-actions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 0.2rem;
+  padding-right: 0.3rem;
+}
+
+button.git-wt-act {
+  padding: 0.1rem 0.45rem;
+  font-size: 0.78rem;
+  line-height: 1.3;
+}
+
+.git-wt-actions button.git-wt-act {
+  min-width: 1.6rem;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .git-wt-actions {
+    visibility: hidden;
+  }
+
+  .git-wt-row:hover .git-wt-actions,
+  .git-wt-row:focus-within .git-wt-actions,
+  .git-wt-row.selected .git-wt-actions {
+    visibility: visible;
+  }
+}
+
+.git-wt-selbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.3rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface-raised);
+}
+
+.git-wt-selcount {
+  margin-right: auto;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+button.git-wt-showall {
+  padding-left: 1.2rem;
+}
+
+.git-wt-banner {
+  margin: 0 0 0.5rem;
+  padding: 0.45rem 0.7rem;
+  font-size: 0.85rem;
+  color: var(--amber);
+  border: 1px solid rgba(var(--amber-rgb), 0.5);
+  border-radius: var(--r-sm);
+  background: rgba(var(--amber-rgb), 0.08);
+}
+
+.git-wt-alert {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  margin: 0 0 0.5rem;
+  padding: 0.45rem 0.7rem;
+  font-size: 0.85rem;
+  border: 1px solid rgba(var(--red-rgb), 0.5);
+  border-radius: var(--r-sm);
+  background: rgba(var(--red-rgb), 0.08);
+}
+
+.git-wt-alert-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.git-wt-alert-msg {
+  margin: 0.25rem 0 0;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+button.git-wt-alert-close {
+  flex: none;
+  padding: 0 0.5rem;
+}
+
+/* Destructive confirm. The backdrop is `.create-task-backdrop` (z-index 1250,
+   suppresses the global shortcuts); this is a small centred card, and a bottom
+   sheet on a phone instead of that class's full-screen takeover. */
+.create-task-backdrop.git-confirm-backdrop {
+  align-items: center;
+}
+
+.git-confirm {
+  width: min(30rem, 92vw);
+  max-height: 85vh;
+  overflow-y: auto;
+  box-sizing: border-box;
+  padding: 1rem 1.1rem;
+  background: var(--panel);
+  border: 1px solid rgba(var(--red-rgb), 0.5);
+  border-radius: var(--r-md);
+  box-shadow: 0 0 32px rgba(var(--red-rgb), 0.18);
+}
+
+.git-confirm-title {
+  margin: 0 0 0.5rem;
+  font-size: 1.05rem;
+  color: var(--text-h);
+}
+
+.git-confirm-target {
+  margin: 0 0 0.5rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.git-confirm-paths {
+  list-style: none;
+  margin: 0 0 0.6rem;
+  padding: 0.35rem 0.6rem;
+  max-height: 10rem;
+  overflow-y: auto;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+}
+
+.git-confirm-consequence {
+  margin: 0 0 0.4rem;
+  font-size: 0.88rem;
+}
+
+.git-confirm-irreversible {
+  margin: 0.2rem 0 0.8rem;
+  font-weight: 700;
+  color: var(--red);
+}
+
+.git-confirm-buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
+@media (max-width: 860px) {
+  .git-wt {
+    width: auto;
+  }
+
+  .git-wt-scroll {
+    flex: none;
+    max-height: 60vh;
+  }
+}
+
+@media (max-width: 600px) {
+  .create-task-backdrop.git-confirm-backdrop {
+    align-items: flex-end;
+  }
+
+  .git-confirm {
+    width: 100%;
+    max-height: 90vh;
+    border-radius: var(--r-md) var(--r-md) 0 0;
+    padding-bottom: calc(1rem + env(safe-area-inset-bottom));
+  }
+
+  .git-confirm-buttons button,
+  button.git-wt-act,
+  button.git-wt-main,
+  .git-wt-viewtoggle button,
+  button.git-wt-alert-close,
+  .git-wt-headbar button {
+    min-height: 44px;
+  }
+
+  .git-wt-actions button.git-wt-act {
+    min-width: 44px;
+  }
+}
+
+/* ---- Working tree: container-driven layout (naru task 2738 QA). The size
+   container is `.git-wt-root`, INSIDE `.git-content` (`.git-shell` must not
+   become one: the phone drawer's `position: fixed` would anchor to it). ---- */
+.git-wt-root {
+  container-type: inline-size;
+}
+
+.git-wt-target {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  white-space: nowrap;
+}
+
+.git-wt-target-path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* An alert or banner never eats the list: cap and scroll inside. */
+.git-wt-alert {
+  max-height: 7rem;
+  overflow-y: auto;
+}
+
+.git-wt-alert-body strong {
+  overflow-wrap: anywhere;
+}
+
+.git-wt-banner {
+  max-height: 5rem;
+  overflow-y: auto;
+}
+
+/* Header: title truncates, count and bulk button never overlap. */
+.git-wt-headbar button.git-side-head {
+  overflow: hidden;
+}
+
+.git-wt-headbar .git-side-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.git-wt-headbar .git-side-count {
+  flex: none;
+  padding-right: 0.4rem;
+}
+
+.git-wt-headbar .git-side-actions {
+  flex: none;
+  position: relative;
+  z-index: 1;
+}
+
+button.git-wt-bulk {
+  white-space: nowrap;
+}
+
+/* Wide container in a Custom-layout pane: hand the pane's box to the layout
+   (it used to be a direct child of `.git-content`), with a floor so a short
+   pane plus a banner and alert still leave several rows. */
+@media (min-width: 861px) {
+  @container (min-width: 52.01rem) {
+    .project-pane-body > .git-view > .git-shell > .git-content > .git-wt-root > .git-layout {
+      height: auto;
+      flex: 1;
+      min-height: 16rem;
+    }
+  }
+
+  .project-pane-body > .git-view > .git-shell > .git-content > .git-wt-root {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    /* Narrow container: the stacked layout is taller than the pane. */
+    overflow-y: auto;
+  }
+}
+
+/* Narrow container (a pane, or a phone): list above diff, each with a
+   usable height; the pane / page scrolls. Same stacking the tab does at
+   phone width. */
+@container (max-width: 52rem) {
+  .git-wt-root > .git-layout {
+    flex-direction: column;
+    height: auto;
+    min-height: 0;
+    flex: none;
+  }
+
+  .git-wt-root .git-wt {
+    width: auto;
+  }
+
+  .git-wt-root .git-wt-scroll {
+    flex: none;
+    min-height: 10rem;
+    max-height: 24rem;
+  }
+
+  .git-wt-root .git-diff-pane {
+    flex: none;
+    height: 30rem;
+    min-height: 0;
+  }
+}
