@@ -55,6 +55,29 @@ pub fn changed_dir(canon_root: &Path, path: &Path) -> Option<String> {
     Some(parts.join("/"))
 }
 
+/// The notify callback: reduce one raw event to debounce messages.
+fn forward(
+    canon_root: &Path,
+    res: ::notify::Result<::notify::Event>,
+    msg_tx: &mpsc::UnboundedSender<Msg>,
+) {
+    match res {
+        Ok(ev) => {
+            if ev.need_rescan() {
+                let _ = msg_tx.send(Msg::Everything);
+            }
+            for p in &ev.paths {
+                if let Some(d) = changed_dir(canon_root, p) {
+                    let _ = msg_tx.send(Msg::Dir(d));
+                }
+            }
+        }
+        Err(_) => {
+            let _ = msg_tx.send(Msg::Everything);
+        }
+    }
+}
+
 pub struct Hub {
     // Dropping the watcher ends the OS watch and the callback's sender,
     // which ends the debounce task.
@@ -68,24 +91,11 @@ impl Hub {
         let (msg_tx, msg_rx) = mpsc::unbounded_channel::<Msg>();
         let (tx, _) = broadcast::channel(16);
         let cb_root = canon.clone();
-        let mut watcher = ::notify::recommended_watcher(
-            move |res: ::notify::Result<::notify::Event>| match res {
-                Ok(ev) => {
-                    if ev.need_rescan() {
-                        let _ = msg_tx.send(Msg::Everything);
-                    }
-                    for p in &ev.paths {
-                        if let Some(d) = changed_dir(&cb_root, p) {
-                            let _ = msg_tx.send(Msg::Dir(d));
-                        }
-                    }
-                }
-                Err(_) => {
-                    let _ = msg_tx.send(Msg::Everything);
-                }
-            },
-        )
-        .map_err(io::Error::other)?;
+        let mut watcher =
+            ::notify::recommended_watcher(move |res: ::notify::Result<::notify::Event>| {
+                forward(&cb_root, res, &msg_tx)
+            })
+            .map_err(io::Error::other)?;
         watcher
             .watch(&canon, RecursiveMode::Recursive)
             .map_err(io::Error::other)?;
@@ -180,48 +190,52 @@ mod tests {
         assert_eq!(changed_dir(&root, Path::new("/other/a.txt")), None);
     }
 
-    #[tokio::test]
+    // Drives the real callback (`forward`) and `debounce` with synthetic
+    // notify events on a paused clock, so it does not depend on how fast the
+    // OS delivers events: a saturated fseventsd on a dev Mac delivered them
+    // seconds late or not at all (naru task 2799). The OS wiring itself is
+    // only `recommended_watcher(..).watch(..)` in `Hub::new`.
+    #[tokio::test(start_paused = true)]
     async fn burst_yields_one_event_and_excluded_is_silent() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().to_str().unwrap().to_string();
-        std::fs::create_dir(tmp.path().join("target")).unwrap();
-        let reg = WatchRegistry::new();
-        let mut sub = reg.subscribe(&root).unwrap();
-        // Let the stream start, and drain setup noise until it is quiet: on a
-        // loaded runner FSEvents can deliver an event for the root directory
-        // itself (mapped to `""`) after the stream starts (CI run 42954144689).
-        // Only a `""` event is tolerated here; nothing non-excluded exists
-        // under the root yet, so it can only be the root itself.
-        let settle = tokio::time::Instant::now() + Duration::from_secs(10);
-        while let Ok(ev) = tokio::time::timeout(Duration::from_millis(1000), sub.rx.recv()).await {
-            assert_eq!(ev.unwrap().dirs, Some(vec![String::new()]), "setup noise");
-            assert!(
-                tokio::time::Instant::now() < settle,
-                "watcher never went quiet"
-            );
-        }
+        use ::notify::event::{CreateKind, EventKind, ModifyKind, RemoveKind, RenameMode};
+        let root = PathBuf::from("/r");
+        let (msg_tx, msg_rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = broadcast::channel(16);
+        tokio::spawn(debounce(msg_rx, tx));
+        let send = |kind: EventKind, paths: &[&str]| {
+            let ev = paths
+                .iter()
+                .fold(::notify::Event::new(kind), |e, p| e.add_path(root.join(p)));
+            forward(&root, Ok(ev), &msg_tx);
+        };
+        let gap = || tokio::time::sleep(Duration::from_millis(50));
 
         // Excluded-only writes: nothing within 1.5s.
-        std::fs::write(tmp.path().join("target/x.o"), b"x").unwrap();
-        let quiet = tokio::time::timeout(Duration::from_millis(1500), sub.rx.recv()).await;
+        send(EventKind::Create(CreateKind::File), &["target/x.o"]);
+        let quiet = tokio::time::timeout(Duration::from_millis(1500), rx.recv()).await;
         assert!(quiet.is_err(), "event for excluded dir: {quiet:?}");
 
-        let p = tmp.path();
-        std::fs::write(p.join("a.txt"), b"a").unwrap();
-        std::fs::rename(p.join("a.txt"), p.join("b.txt")).unwrap();
-        std::fs::write(p.join("c.txt"), b"c").unwrap();
-        std::fs::remove_file(p.join("c.txt")).unwrap();
-        std::fs::write(p.join("target/y.o"), b"y").unwrap();
+        // A burst spread over 250ms, inside one debounce window.
+        send(EventKind::Create(CreateKind::File), &["a.txt"]);
+        gap().await;
+        send(
+            EventKind::Modify(ModifyKind::Name(RenameMode::Both)),
+            &["a.txt", "b.txt"],
+        );
+        gap().await;
+        send(EventKind::Create(CreateKind::File), &["c.txt"]);
+        gap().await;
+        send(EventKind::Remove(RemoveKind::File), &["c.txt"]);
+        gap().await;
+        send(EventKind::Create(CreateKind::File), &["target/y.o"]);
 
-        let ev = tokio::time::timeout(Duration::from_secs(2), sub.rx.recv())
+        let ev = tokio::time::timeout(Duration::from_secs(2), rx.recv())
             .await
             .expect("no event within 2s")
             .unwrap();
-        let dirs = ev.dirs.expect("expected a dir list");
-        assert!(dirs.contains(&String::new()), "{dirs:?}");
-        assert!(dirs.iter().all(|d| !d.starts_with("target")), "{dirs:?}");
+        assert_eq!(ev.dirs, Some(vec![String::new()]));
         // No second burst follows.
-        let more = tokio::time::timeout(Duration::from_millis(900), sub.rx.recv()).await;
+        let more = tokio::time::timeout(Duration::from_millis(900), rx.recv()).await;
         assert!(more.is_err(), "burst split across windows: {more:?}");
     }
 
