@@ -9296,7 +9296,7 @@ button:focus-visible,
   }
 
   .project-pane-body > .files-view > .files-layout,
-  .project-pane-body > .git-view > .git-layout {
+  .project-pane-body > .git-view > .git-shell > .git-content > .git-layout {
     height: auto;
     flex: 1;
     min-height: 0;
@@ -15143,14 +15143,14 @@ button.git-file-row.selected {
 
 /* Pane wide tier: hand the viewport box down a rung, like .git-layout above. */
 @media (min-width: 861px) {
-  .project-pane-body > .git-view > .git-history {
+  .project-pane-body > .git-view > .git-shell > .git-content > .git-history {
     flex: 1;
     min-height: 0;
     display: flex;
     flex-direction: column;
   }
 
-  .project-pane-body > .git-view > .git-history > .git-history-layout {
+  .project-pane-body > .git-view > .git-shell > .git-content > .git-history > .git-history-layout {
     height: auto;
     flex: 1;
     min-height: 0;
@@ -15415,5 +15415,426 @@ button.git-tree-row .git-file-label {
   .git-jump-go,
   .git-keys-button {
     min-height: 44px;
+  }
+}
+
+/* ---- Git tab side panel: worktrees, branches, stashes (naru task 2737,
+   docs/git-tab.md "Side panel"). `.git-shell` wraps the panel and the
+   Working tree / History content. It is deliberately NOT a size container:
+   layout containment would anchor the phone drawer's `position: fixed` to the
+   shell instead of the viewport. GitView measures the shell (useGitSide) and
+   picks `.git-shell-inline` (>= 60rem) or `.git-shell-drawer`. Colour comes
+   from theme tokens only. ---- */
+.git-shell {
+  display: flex;
+  gap: 1rem;
+  align-items: flex-start;
+  position: relative;
+  min-width: 0;
+}
+
+.git-content {
+  flex: 1;
+  min-width: 0;
+  outline: none;
+}
+.git-content:focus,
+.git-content:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+
+.git-refs-button {
+  flex: none;
+}
+
+.git-refs-button.active {
+  color: var(--bg);
+  background: var(--cyan);
+  border-color: var(--cyan);
+  box-shadow: 0 0 10px var(--cyan-dim);
+}
+
+.git-mode-row > .git-refs-button {
+  margin: 0 0.5rem 0.75rem 0;
+}
+
+.git-mode-row > .git-mode-toggle {
+  margin-right: auto;
+}
+
+.git-side {
+  flex: none;
+  width: 19rem;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  height: var(--tab-viewport-height);
+  min-height: var(--tab-viewport-min);
+  font-size: 0.85rem;
+}
+
+.git-side[hidden] {
+  display: none;
+}
+
+.git-side-scrim {
+  display: none;
+}
+
+.git-side-section {
+  flex: none;
+}
+
+.git-side-headbar {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  background: var(--surface);
+  border-bottom: 1px solid var(--hairline);
+}
+
+button.git-side-head {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.45rem 0.6rem;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  color: var(--text);
+  font-weight: 600;
+  text-align: left;
+}
+
+button.git-side-head:hover:not(:disabled) {
+  background: var(--surface-hover);
+  box-shadow: none;
+}
+
+.git-side-chevron {
+  flex: none;
+  width: 1em;
+  color: var(--muted);
+}
+
+.git-side-count {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-weight: 400;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.git-side-actions {
+  flex: none;
+  display: flex;
+  gap: 0.25rem;
+  padding-right: 0.4rem;
+}
+
+.git-side-body {
+  padding: 0.25rem 0 0.5rem;
+}
+
+.git-side-list {
+  display: flex;
+  flex-direction: column;
+}
+
+button.git-side-row,
+.git-side-row-skel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0.35rem 0.6rem 0.35rem calc(0.6rem - 2px);
+  border: 0;
+  border-left: 2px solid transparent;
+  border-radius: 0;
+  background: none;
+  color: var(--text);
+  font-weight: 400;
+  text-align: left;
+  min-width: 0;
+}
+
+button.git-side-row:hover:not(:disabled) {
+  background: var(--surface-hover);
+  box-shadow: none;
+}
+
+button.git-side-row.selected,
+button.git-side-row.selected:hover:not(:disabled) {
+  background: var(--surface-raised);
+  border-left-color: var(--cyan);
+  box-shadow: none;
+}
+
+button.git-side-row:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.git-side-line,
+.git-side-sub {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
+  min-height: 1.35rem;
+}
+
+.git-side-name {
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.git-side-cell,
+.git-side-line .git-ahead,
+.git-side-line .git-behind {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+}
+
+.git-side-mono {
+  flex: none;
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+}
+
+.git-side-sub {
+  min-height: 1.2rem;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+.git-side-sub-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.git-side-sub-text .git-ahead,
+.git-side-sub-text .git-behind {
+  margin-right: 0.25rem;
+}
+
+/* Task 8/8 puts its row actions here; empty until then, and out of the way. */
+.git-side-row-menu {
+  flex: none;
+}
+
+.git-side .badge.git-ref {
+  flex: none;
+}
+
+button.git-side-group {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0.3rem 0.6rem;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  color: var(--muted);
+  font-weight: 600;
+  text-align: left;
+}
+
+button.git-side-group:hover:not(:disabled) {
+  background: var(--surface-hover);
+  box-shadow: none;
+}
+
+button.git-side-more,
+button.git-side-retry {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0.3rem 0.6rem;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  color: var(--muted);
+  font-weight: 400;
+  font-size: 0.8rem;
+  text-align: left;
+}
+
+button.git-side-more:hover:not(:disabled),
+button.git-side-retry:hover:not(:disabled) {
+  background: var(--surface-hover);
+  color: var(--text);
+  box-shadow: none;
+}
+
+.git-side-note button.git-side-retry {
+  display: inline;
+  width: auto;
+  padding: 0 0.25rem;
+  text-decoration: underline;
+}
+
+.git-side-filter {
+  display: block;
+  width: calc(100% - 1.2rem);
+  box-sizing: border-box;
+  margin: 0.25rem 0.6rem 0.35rem;
+}
+
+.git-side-note {
+  margin: 0.25rem 0.6rem;
+  font-size: 0.8rem;
+}
+
+.git-side-foot {
+  margin: auto 0 0;
+  padding: 0.6rem;
+  font-size: 0.72rem;
+  border-top: 1px solid var(--hairline);
+}
+
+/* Skeleton bars: fixed width, same line box as the text they stand for.
+   Stepped to ~30 updates/s, see wf-step-pulse (naru task 2606). */
+.git-skel {
+  display: inline-block;
+  flex: none;
+  max-width: 100%;
+  height: 0.7em;
+  vertical-align: middle;
+  border-radius: var(--r-sm);
+  background: var(--surface-hover);
+  animation: git-skel-pulse 1.6s steps(6) infinite;
+}
+
+@keyframes git-skel-pulse {
+  12.5%,
+  87.5% {
+    opacity: 0.92;
+  }
+  25%,
+  75% {
+    opacity: 0.68;
+  }
+  37.5%,
+  62.5% {
+    opacity: 0.43;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .git-skel {
+    animation: none;
+  }
+}
+
+.git-branch-chip {
+  align-self: center;
+}
+
+/* Wide tier in a Custom-layout pane: the panel and the content share the
+   pane's viewport box, so each scrolls inside itself. */
+@media (min-width: 861px) {
+  .project-pane-body > .git-view > .git-shell {
+    flex: 1;
+    min-height: 0;
+    align-items: stretch;
+  }
+
+  .project-pane-body > .git-view > .git-shell > .git-content {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+
+  .project-pane-body > .git-view > .git-shell > .git-side {
+    height: auto;
+    min-height: 0;
+  }
+}
+
+/* Drawer mode (a narrow pane): over the content, inside the shell. */
+.git-shell-drawer.side-open {
+  min-height: 28rem;
+}
+
+.git-shell-drawer .git-side {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 6;
+  height: auto;
+  min-height: 0;
+  width: 19rem;
+  max-width: min(20rem, 88%);
+  /* Opaque: `--surface` is a tint, and the drawer sits over page content. */
+  background: var(--panel);
+  box-shadow: 0 0 24px rgba(var(--bg-rgb), 0.6);
+}
+
+.git-shell-drawer .git-side-scrim {
+  display: block;
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  background: rgba(var(--bg-rgb), 0.6);
+  touch-action: none;
+}
+
+/* Phone: the drawer owns the viewport above the tab bar, on the app's ladder
+   (scrim 1150 < drawer 1200 < tab bar 1220, docs/mobile.md). */
+@media (max-width: 600px) {
+  .git-shell-drawer .git-side {
+    position: fixed;
+    top: 0;
+    bottom: var(--phone-tabbar-reserve);
+    z-index: 1200;
+    max-width: min(20rem, 88%);
+  }
+
+  .git-shell-drawer .git-side-scrim {
+    position: fixed;
+    z-index: 1150;
+  }
+
+  button.git-side-row,
+  button.git-side-head,
+  button.git-side-group,
+  button.git-side-more,
+  button.git-side-retry,
+  .git-refs-button {
+    min-height: 44px;
+  }
+
+  .git-side-note button.git-side-retry {
+    min-height: 44px;
+    display: inline-flex;
+    align-items: center;
   }
 }

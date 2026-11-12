@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { getProjectGitLog } from './api'
 import { PARENT_HUNT_PAGES, focusRefreshable, mergePage } from './gitHistory'
 import { filtersKey, type LogFilters } from './gitSearch'
+import type { BranchScope } from './gitPanel'
 import type { GitCommit } from './types/GitCommit'
 
 /** The loaded history of one (project, repo, worktree, all-branches) scope. */
@@ -44,10 +45,16 @@ export function useCommitLog(
   repo: string | undefined,
   all: boolean,
   filters: LogFilters,
+  /** A branch picked in the side panel (task 2737); wins over `all`. */
+  branch: BranchScope | null = null,
 ) {
   const scope = `${projectId}|${repo ?? ''}|${worktree ?? ''}`
-  // Filters are part of the key, so a reply for an older search is dropped.
-  const key = `${scope}|${all ? 'all' : 'cur'}|${filtersKey(filters)}`
+  // The branch scope and filters are part of the key, so a reply for an
+  // older search or branch is dropped. `branch` and `all` are never both sent.
+  const sendAll = all && branch === null
+  const key = `${scope}|${branch ? `b:${branch.kind}:${branch.name}` : sendAll ? 'all' : 'cur'}|${filtersKey(filters)}`
+  const branchName = branch?.name
+  const branchKind = branch?.kind
   const [st, setSt] = useState<CommitLogState | null>(null)
   const [nonce, setNonce] = useState(0)
   const stRef = useRef<CommitLogState | null>(null)
@@ -64,7 +71,12 @@ export function useCommitLog(
     inflight.current = null
     let cancelled = false
     const fetchFirst = () =>
-      getProjectGitLog(projectId, worktree ?? undefined, repo, { all, filters })
+      getProjectGitLog(projectId, worktree ?? undefined, repo, {
+        all: sendAll,
+        filters,
+        branch: branchName,
+        branchKind,
+      })
     const base = { key, scope, rawCount: 0, pages: 1, moreError: null, loadingMore: false }
     fetchFirst().then(
       (log) => {
@@ -139,9 +151,11 @@ export function useCommitLog(
     }
     try {
       const log = await getProjectGitLog(projectId, worktree ?? undefined, repo, {
-        all,
+        all: sendAll,
         skip,
         filters,
+        branch: branchName,
+        branchKind,
       })
       if (stale()) return false
       const cur = stRef.current!
@@ -169,7 +183,7 @@ export function useCommitLog(
       setSt(stRef.current)
       return false
     }
-  }, [projectId, worktree, repo, all, filters])
+  }, [projectId, worktree, repo, sendAll, filters, branchName, branchKind])
 
   /** Load the next page; a call while one is in flight awaits that one. */
   const loadMore = useCallback((): Promise<boolean> => {

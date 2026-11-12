@@ -57,6 +57,9 @@ import type { DirListing } from './types/DirListing'
 import type { FileContentView } from './types/FileContentView'
 import type { FileTreeEntry } from './types/FileTreeEntry'
 import type { GitCommitDetail } from './types/GitCommitDetail'
+import type { ProjectGitBranches } from './types/ProjectGitBranches'
+import type { ProjectGitStashes } from './types/ProjectGitStashes'
+import type { ProjectGitWorktreeDetails } from './types/ProjectGitWorktreeDetails'
 import type { GitCommitFile } from './types/GitCommitFile'
 import type { GitFileDiff } from './types/GitFileDiff'
 import type { InboxItem } from './types/InboxItem'
@@ -531,7 +534,17 @@ export function getProjectGitLog(
   id: number,
   worktree?: string,
   repo?: string,
-  opts?: { all?: boolean; skip?: number; filters?: LogFilters },
+  opts?: {
+    all?: boolean
+    skip?: number
+    filters?: LogFilters
+    /** A branch row's `name` (local or remote): that branch's log, not the
+     * worktree's HEAD. Never together with `all` (422). */
+    branch?: string
+    /** Which namespace `branch` is in, so `origin/main` is not read as a
+     * local branch of that name. Sent as `branch_kind`. */
+    branchKind?: 'local' | 'remote'
+  },
 ): Promise<ProjectGitLog> {
   // Blank filters are dropped by gitQuery; the server reads them as absent too.
   const f = opts?.filters
@@ -541,6 +554,8 @@ export function getProjectGitLog(
       repo,
       all: opts?.all ? 'true' : undefined,
       skip: opts?.skip ? String(opts.skip) : undefined,
+      branch: opts?.branch,
+      branch_kind: opts?.branch ? opts?.branchKind : undefined,
       q: f?.q.trim(),
       author: f?.author.trim(),
       path: f?.path.trim(),
@@ -548,6 +563,40 @@ export function getProjectGitLog(
       until: f?.until.trim(),
     })}`,
   )
+}
+
+/** The slow per-worktree facts (changed count, ahead/behind the main
+ * checkout's branch, HEAD subject/date), one entry per worktree keyed by
+ * `path`; the cheap worktree list is `getProjectGit`'s. Ladder: path null =
+ * no local_path; details null = folder gone / not a repo. Ahead/behind is as
+ * of the last fetch (Naru never fetches). Takes no worktree: it covers all. */
+export function getProjectGitWorktreeDetails(
+  id: number,
+  repo?: string,
+): Promise<ProjectGitWorktreeDetails> {
+  return request(`/api/projects/${id}/git/worktrees${gitQuery({ repo })}`)
+}
+
+/** Every local and remote branch (one git call server-side). `is_head` and
+ * `merged` are relative to the selected worktree. branches null = no
+ * local_path / folder gone / not a repo. */
+export function getProjectGitBranches(
+  id: number,
+  worktree?: string,
+  repo?: string,
+): Promise<ProjectGitBranches> {
+  return request(`/api/projects/${id}/git/branches${gitQuery({ worktree, repo })}`)
+}
+
+/** The repo's stashes, newest first; a stash's `hash` works with
+ * getProjectGitCommit / ...CommitFiles / ...CommitDiff (tracked changes
+ * only: `-u` untracked files are not shown). stashes null = no local_path /
+ * folder gone / not a repo. */
+export function getProjectGitStashes(
+  id: number,
+  repo?: string,
+): Promise<ProjectGitStashes> {
+  return request(`/api/projects/${id}/git/stashes${gitQuery({ repo })}`)
 }
 
 /** One commit's header and full message (the History detail panel). 404s on

@@ -2,7 +2,7 @@
 
 The **Git** tab on a project page (web UI) shows the working tree of the
 project's `local_path`: branch/ahead-behind + changed-file list, with a
-per-file diff pane ("Diff view" below), plus a **worktree selector** (below) and a
+per-file diff pane ("Diff view" below), plus a **Refs side panel** (worktrees, branches, stashes; "Side panel" below) and a
 **History** sub-view (toggle, default Working tree) that browses commit
 history. Like `/api/git-status` it reads **external** state via read-only
 `git` shell-outs (`view_of`/`diff_of`/`worktrees_of`/`commit_log_of`/
@@ -45,7 +45,9 @@ nothing.
   like the agents endpoint: no `local_path` → `{path: null, repo: null,
   worktrees: null}`; dead folder or non-repo → `{path, repo: null, worktrees:
   null}`; never an error. `worktrees` lists every worktree of the repo behind
-  `local_path` (`GitWorktree { path, branch, head, is_current }`,
+  `local_path` (`GitWorktree { path, branch, head, is_current, is_main, detached, bare,
+  locked, lock_reason, prunable, prunable_reason }` — the extra flags are
+  parsed from the same `worktree list --porcelain` call, task 2737;
   `is_current` = the worktree AT `local_path` — the one Naru is anchored to,
   regardless of `?worktree=`), always computed from `local_path` even when
   `?worktree=` selects a different one (`git worktree list` reports the same
@@ -92,7 +94,20 @@ nothing.
   `local_path`'s, validated by the same `worktrees` allowlist as the view/diff
   routes (`resolve_git_dir`) — an unlisted value is 404 `not_found`. `path` in
   the response is always the project's own `local_path`. Cached 5s per
-  `(folder actually read, all, skip, filters)` (`AppState.git_log_cache`).
+  `(folder actually read, all, skip, filters, branch)` (`AppState.git_log_cache`).
+  - **`?branch=<name>`** (naru task 2737) logs that branch instead of the
+    worktree's HEAD, read-only. The value must be byte-equal to the `name` of
+    a local or remote row of `/git/branches` for the directory read (else 404
+    `not_found`; the cached branch list is the allowlist) and is handed to
+    git as the row's FULL refname (`refs/heads/<name>` /
+    `refs/remotes/<name>`) as its own argv entry, so a branch named `-x`
+    can never be read as a flag. `branch` with `all=true` is 422 `validation`
+    (a branch log is not an all-refs log). Filters and `skip` keep working;
+    `refs[].is_head` stays relative to the directory's HEAD. A blank `branch`
+    is absent. `?branch_kind=local|remote` picks the row when a local and a
+    remote branch share a short name (a local branch literally named
+    `origin/main`): absent = the first match (local rows sort first), present
+    = name AND kind must match (else 404), anything else 422 `validation`.
   - **Search filters** (naru task 2736): `?q=` (commit message), `?author=`
     (name or email), `?path=` (a file or folder), `?since=` / `?until=`
     (`YYYY-MM-DD`, inclusive days) narrow the log **on the server, over the
@@ -198,6 +213,72 @@ nothing.
 - Every `sha` accepted from a request path is validated by
   `git::is_valid_commit_id` (7–64 hex chars) **before** any `git` subprocess
   is spawned, so it can never be read as a flag or a path.
+
+## Branches, worktrees and stashes (naru task 2737)
+
+Three more read-only GET routes, every one behind the same empty-state ladder
+(no `local_path` -> `path: null` and a null payload; dead folder / non-repo ->
+`path` and a null payload; never an error) and the `?repo=` selector (an
+unlisted one is 404). Each is cached 5 s (`AppState.git_wt_details_cache`,
+`git_branches_cache`, `git_stashes_cache`; same eviction cap as the others).
+**Ahead/behind is as of the last fetch: Naru never fetches** (no fetch, pull,
+push, checkout, merge or stash push anywhere in the tab).
+
+- `GET /api/projects/{id}/git/worktrees[?repo=]` -> `ProjectGitWorktreeDetails
+  { path, base_branch, details: [GitWorktreeDetail { path, changed, ahead,
+  behind, subject, date }] }` via `git::worktree_details_of`: the slow
+  per-worktree facts the cheap list on `/git` leaves out, one entry per
+  worktree in list order, keyed by `path`. `base_branch` is the branch the
+  main checkout (first entry git lists) is on, null when detached or bare.
+  `changed` = entries of `git status --porcelain=v2` in that worktree; `ahead`
+  / `behind` = `git rev-list --left-right --count <main HEAD sha>...<its HEAD
+  sha>` (shas only, so nothing reads as a flag), null for the main entry
+  itself. Every field is null when it does not apply: a bare, prunable or
+  folder-missing worktree runs nothing (so a deleted worktree folder never
+  errors), an unborn HEAD has no subject/date, a failed call is null. All
+  HEAD subjects and committer dates (ISO strict) come from ONE `git log
+  --no-walk=unsorted` (shared, so one unreadable worktree HEAD blanks every
+  subject/date); the status calls run on up to 8 threads, each killed after 5 s (that
+  worktree's `changed` is then null), and every git call added for these routes
+  runs with `GIT_OPTIONAL_LOCKS=0` so none takes `index.lock`. Concurrent
+  requests for one directory share a single computation (single-flight). **Measured:
+  50 linked worktrees (5 dirty) take ~0.6 s** (`cargo test --lib
+  worktree_details_of_50 -- --ignored --nocapture`, one run on the dev box,
+  603 ms). Takes no `?worktree=`: it covers all of them.
+- `GET /api/projects/{id}/git/branches[?repo=][&worktree=]` ->
+  `ProjectGitBranches { path, branches: [GitBranch { name, kind, remote, hash,
+  short_hash, date, subject, upstream, upstream_gone, ahead, behind, is_head,
+  worktree, merged }] }` via `git::branches_of`: **one `git
+  for-each-ref` over `refs/heads refs/remotes`** on the normal path (a second,
+  retried without the `ahead-behind` atom, only on an unborn HEAD or git <
+  2.41), plus one `git remote` per request — never a per-branch call, asserted
+  by a test that counts invocations through a wrapper for 5 vs 300 branches; `git::parse_branches` is pure and
+  tested against one call's output. Fields are NUL-separated and each record
+  ends `\0\x1e` + the newline for-each-ref prints (the only free-text field,
+  the subject, has no newline, so the sequence cannot occur inside a record).
+  `name` is the short name (`feat/x`, `origin/feat/x`), `kind` is `local` |
+  `remote`; symbolic refs (`origin/HEAD`) are skipped. `remote` is the longest
+  `git remote` name that prefixes the name + `/` (a remote or a branch may
+  contain `/`), else the first segment. `upstream` / `upstream_gone` /
+  `ahead` / `behind` come from `%(upstream:short)` and `%(upstream:track)`
+  (`[ahead N, behind M]`, `[gone]`); ahead/behind are null with no upstream or
+  a gone one. `worktree` is `%(worktreepath)`: where it is checked out.
+  `is_head` and `merged` (`%(ahead-behind:HEAD)` ahead = 0, git 2.41+) are
+  relative to the directory read, so `?worktree=` (same allowlist as the view
+  route) selects whose HEAD. If the call with that atom fails (old git,
+  unborn HEAD) it is retried once without it and `merged` is null, still
+  zero per-row calls. An unborn HEAD lists whatever refs exist; detached
+  HEAD has no `is_head` row. Order is git's refname order.
+- `GET /api/projects/{id}/git/stashes[?repo=]` -> `ProjectGitStashes { path,
+  stashes: [GitStash { index, name, hash, message, branch, date }] }` via
+  `git stash list`. `name` is `stash@{N}`; `branch` and `message` come from
+  the reflog subject: `WIP on <branch>: <sha> <subject>` gives the subject
+  (sha dropped), `On <branch>: <message>` the message; `(no branch)` or any
+  other subject gives `branch: null` and the whole subject. No stashes (or an
+  unborn HEAD) is `[]`. A stash is a commit: its `hash` works with
+  `/git/commits/{sha}`, `/files` and `/diff` (first-parent diff = the stashed
+  tracked changes). **Untracked files stashed with `-u` live in the stash's
+  third parent and are not shown.**
 
 ## Diff view (naru task 2734)
 
@@ -347,3 +428,88 @@ Logic is in `frontend/src/gitSearch.ts` (pure, `gitSearch.test.ts`).
   `Esc` or `↓` hands focus to its list. `shouldIgnoreShortcut` is consulted
   (modals, workflow canvas). Rows are `<button>`s (Tab reaches them) and use
   the app's shared `:focus-visible` ring.
+
+## Side panel (naru task 2737)
+
+The worktree chip row is gone; a read-only **Refs** panel replaces it (the
+`.git-repo-list` repo picker is separate and unchanged). Component
+`frontend/src/components/GitSidePanel.tsx`; every rule (ordering, grouping,
+filtering, caps, texts, tooltips) is pure in `frontend/src/gitPanel.ts`
+(`gitPanel.test.ts`); open/drawer state is `useGitSide.ts`. It reads the three
+routes above and never changes the repo (no checkout, fetch or stash apply).
+
+- **Layout.** `.git-shell` is a flex row: `.git-side` (19rem, `role="region"`
+  `aria-label="Refs"`, `--surface`, one scroller, sticky section headers) on
+  the left, `.git-content` (the Working tree / History UI) filling the rest.
+  The shell's measured width (ResizeObserver, since a viewport query cannot
+  see a Custom-layout pane) picks **inline** (>= 60rem) or **drawer**. It is
+  not a CSS size container: layout containment would anchor the phone
+  drawer's `position: fixed` to the shell.
+- **Refs button** (first in `.git-mode-row`, `aria-expanded`,
+  `aria-controls="git-side"`) shows/hides the panel. Inline: the flag is kept
+  in `localStorage` `naru-git-side` (default open). Drawer: default closed,
+  not persisted; it closes on a row pick, a scrim tap (`.git-side-scrim`) and
+  Esc, and focus returns to the Refs button on every one of those routes (the
+  focused row is unmounted, so focus would otherwise fall to the page); on
+  open, focus moves to the first section header. Inline, the panel stays
+  mounted when hidden (state and data kept, no refetch on toggle). In a narrow pane the drawer is
+  `position: absolute` inside the shell; at <= 600px it is `position: fixed`
+  above the tab bar on the mobile ladder (scrim 1150, drawer 1200,
+  `docs/mobile.md`), `max-width: min(20rem, 88%)`, scrim `touch-action: none`.
+- **Sections** (`button.git-side-head`, chevron, title, count,
+  `aria-expanded`; open state in `naru-git-side-sections`, JSON by section id;
+  an empty `.git-side-actions` is reserved for task 8/8). Rows are
+  `button.git-side-row` with two lines; `.selected` = `--surface-raised` and a
+  2px cyan left edge.
+  - **Worktrees** (`data-git-list="worktrees"`): main pinned first; branch or
+    8-char sha, `detached` / `locked` / `prunable` / `bare` badges, changed
+    count (`clean` at 0), `↑n ↓n` against `base_branch` (the main checkout's
+    branch; hidden at 0/0, none for main); line two is the short folder, HEAD
+    subject and relative time. Bare and prunable rows are disabled with a
+    reason. Selected = the picked one, else `is_current`; a click selects it
+    for the whole tab and clears the branch scope (re-clicking the selected one
+  changes nothing). The panel and the shell stay mounted across a worktree
+  switch (the tab keeps the previous view while the new one loads; only the
+  content area shows Loading), so the filter text, group state, show-more
+  counts and scroll survive; the branch list of the previous worktree stays
+  on screen until the new one's arrives. In drawer mode the panel is opaque
+  (`--panel`; `--surface` is a tint). The cheap list comes with
+    `GET /git`; the slow cells with `/git/worktrees`: `.git-skel` bars (fixed
+    width, stepped pulse, none under reduced motion) fill in without changing
+    row height, a refetch keeps old values, a failure shows muted `—` cells
+    and one "Details unavailable. Retry" button.
+  - **Branches** (`data-git-list="branches"`): "Filter branches" box
+    (case-insensitive substring over all names, "N of M", "No branches
+    match." + Clear; matching groups auto-expand), plain names first, then one
+    collapsible `.git-side-group` per first `/` segment, then one per remote
+    (collapsed by default). Each group shows 50, "Show N more"
+    (`button.git-side-more`) adds 100. Badges: `current`, `in worktree` (checked
+    out in another worktree; tooltip = path), `merged`; line two is the
+    upstream track (`↑a ↓b` or `gone`), upstream, subject, time. A click scopes
+    History to the branch (below); it never checks out.
+  - **Stashes** (`data-git-list="stashes"`): message (or `(no message)`) +
+    `stash@{n}`, `on <branch>` + time. A click switches to History and opens the
+    stash commit (files + diff) the way Go to commit opens a commit that is not
+    in the list. The request is consumed on use (a later History remount does
+    not replay it), a quicker second click wins over a late reply for the
+    first, and an unknown commit says "No commit ... in this repo.".
+  - A section that fails to load shows "Couldn't load. Retry" and leaves the
+    rest alone. Refetch follows `useFetch`: mount, key change and window focus;
+    branches refetch when the selected worktree changes. The footnote says
+    ahead/behind is as of the last fetch.
+- **Branch scope.** Picking a branch sets History's `branch` scope (a state,
+  not the URL; with its `kind`, so `origin/main` is not a local `main`). A
+  `branch: <name> ×` chip (`aria-label="Remove branch scope <name>"`) sits by the
+  Current | All switch, and neither switch shows selected while it is set;
+  either switch, or the chip, clears it. The scope is part of `useCommitLog`'s
+  key and is sent as `branch` + `branch_kind`, never with `all`. It clears when
+  the selected worktree (or repo) changes. The empty text names the branch.
+- **Keys** (extend the tab's `onKeyDown`): the three lists use
+  `data-git-list` / `data-git-item`, so `j` `k` `↑` `↓` move within one and
+  `Enter` is the row's click (it does not hand focus to a diff). Group headers
+  and "Show more" are items too; disabled worktree rows are skipped. `/` in the
+  panel focuses the branch filter; `Esc` or `↓` in it moves to the branches
+  list; `Esc` in the panel returns focus to the content (and closes the
+  drawer; with the `?` list open it closes that first); `[` `]` are ignored there. The `?` list shows them.
+- All repo text (names, subjects, paths, messages) is rendered as plain text
+  nodes; colours are theme tokens only.

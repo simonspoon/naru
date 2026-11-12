@@ -10,8 +10,8 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use crate::core::types::{
-    DiffStat, GitCommit, GitCommitDetail, GitCommitFile, GitFile, GitRef, GitRefKind, GitRepo,
-    GitRepoView, GitStatus, GitWorktree,
+    DiffStat, GitBranch, GitBranchKind, GitCommit, GitCommitDetail, GitCommitFile, GitFile, GitRef,
+    GitRefKind, GitRepo, GitRepoView, GitStash, GitStatus, GitWorktree, GitWorktreeDetail,
 };
 
 /// Diff text is capped so one huge file can't balloon the JSON response
@@ -305,42 +305,465 @@ pub fn worktrees_of(dir: &str) -> Option<Vec<GitWorktree>> {
 /// longer exists).
 fn parse_worktrees(porcelain: &str, dir: &str) -> Vec<GitWorktree> {
     let dir_canon = std::fs::canonicalize(dir).ok();
-    let mut worktrees = Vec::new();
-    let mut path: Option<String> = None;
-    let mut head = String::new();
-    let mut branch: Option<String> = None;
+    let mut worktrees: Vec<GitWorktree> = Vec::new();
+    let mut cur: Option<GitWorktree> = None;
 
-    let mut flush = |path: &mut Option<String>, head: &mut String, branch: &mut Option<String>| {
-        if let Some(p) = path.take() {
-            let is_current = match (&dir_canon, std::fs::canonicalize(&p).ok()) {
+    let mut flush = |cur: &mut Option<GitWorktree>| {
+        if let Some(mut w) = cur.take() {
+            w.is_current = match (&dir_canon, std::fs::canonicalize(&w.path).ok()) {
                 (Some(a), Some(b)) => *a == b,
-                _ => p == dir,
+                _ => w.path == dir,
             };
-            worktrees.push(GitWorktree {
-                path: p,
-                branch: branch.take(),
-                head: std::mem::take(head),
-                is_current,
-            });
+            // The first block git lists is always the main checkout.
+            w.is_main = worktrees.is_empty();
+            worktrees.push(w);
         }
     };
 
     for line in porcelain.lines() {
         if line.is_empty() {
-            flush(&mut path, &mut head, &mut branch);
+            flush(&mut cur);
             continue;
         }
         if let Some(rest) = line.strip_prefix("worktree ") {
-            flush(&mut path, &mut head, &mut branch);
-            path = Some(rest.to_string());
-        } else if let Some(rest) = line.strip_prefix("HEAD ") {
-            head = rest.to_string();
+            flush(&mut cur);
+            cur = Some(GitWorktree {
+                path: rest.to_string(),
+                branch: None,
+                head: String::new(),
+                is_current: false,
+                is_main: false,
+                detached: false,
+                bare: false,
+                locked: false,
+                lock_reason: None,
+                prunable: false,
+                prunable_reason: None,
+            });
+            continue;
+        }
+        let Some(w) = cur.as_mut() else { continue };
+        if let Some(rest) = line.strip_prefix("HEAD ") {
+            w.head = rest.to_string();
         } else if let Some(rest) = line.strip_prefix("branch ") {
-            branch = Some(rest.strip_prefix("refs/heads/").unwrap_or(rest).to_string());
+            w.branch = Some(rest.strip_prefix("refs/heads/").unwrap_or(rest).to_string());
+        } else if line == "detached" {
+            w.detached = true;
+        } else if line == "bare" {
+            w.bare = true;
+        } else if line == "locked" || line.starts_with("locked ") {
+            w.locked = true;
+            w.lock_reason = line.strip_prefix("locked ").map(str::to_string);
+        } else if line == "prunable" || line.starts_with("prunable ") {
+            w.prunable = true;
+            w.prunable_reason = line.strip_prefix("prunable ").map(str::to_string);
         }
     }
-    flush(&mut path, &mut head, &mut branch);
+    flush(&mut cur);
     worktrees
+}
+
+/// Most workers the per-worktree detail pass runs at once (naru task 2737):
+/// each does a `git status`, so this bounds the processes spawned together.
+const DETAIL_WORKERS: usize = 8;
+
+/// The slow, per-worktree half of the Worktrees view (naru task 2737), kept
+/// off the list route so the list stays one cheap `git worktree list`.
+/// Returns the main checkout's branch (`base_branch`, None when detached or
+/// bare) and one [`GitWorktreeDetail`] per entry of `worktrees`, same order.
+/// Bare, prunable and folder-missing entries get `changed: None`; everything
+/// is `None` rather than an error when git fails. Every worktree's HEAD
+/// subject and date come from ONE `git log --no-walk` call; ahead/behind is
+/// against the commit the main checkout is on (shas only, so nothing is read
+/// as a flag) and is as of the last fetch (Naru never fetches). The
+/// `git status` calls run on up to [`DETAIL_WORKERS`] threads.
+pub fn worktree_details_of(
+    dir: &str,
+    worktrees: &[GitWorktree],
+) -> (Option<String>, Vec<GitWorktreeDetail>) {
+    let main = worktrees.iter().find(|w| w.is_main);
+    let base_branch = main.filter(|m| !m.bare).and_then(|m| m.branch.clone());
+    let live_head = |w: &GitWorktree| -> Option<String> {
+        let ok = !w.bare
+            && !w.prunable
+            && is_valid_commit_id(&w.head)
+            && w.head.bytes().any(|b| b != b'0');
+        ok.then(|| w.head.clone())
+    };
+    let main_sha = main.and_then(live_head);
+
+    // One call for every HEAD's subject/date.
+    let mut shas: Vec<String> = worktrees.iter().filter_map(live_head).collect();
+    shas.sort();
+    shas.dedup();
+    let mut heads: HashMap<String, (String, String)> = HashMap::new();
+    if !shas.is_empty() {
+        let out = Command::new("git")
+            .args([
+                "-C",
+                dir,
+                "log",
+                "--no-walk=unsorted",
+                "--format=%H%x00%cI%x00%s",
+            ])
+            .args(&shas)
+            .arg("--")
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output();
+        if let Some(out) = out.ok().filter(|o| o.status.success()) {
+            for line in String::from_utf8_lossy(&out.stdout).lines() {
+                let mut it = line.splitn(3, '\0');
+                if let (Some(h), Some(d), Some(s)) = (it.next(), it.next(), it.next()) {
+                    heads.insert(h.to_string(), (d.to_string(), s.to_string()));
+                }
+            }
+        }
+    }
+
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let slots: std::sync::Mutex<Vec<Option<GitWorktreeDetail>>> =
+        std::sync::Mutex::new(vec![None; worktrees.len()]);
+    std::thread::scope(|s| {
+        for _ in 0..DETAIL_WORKERS.min(worktrees.len()) {
+            s.spawn(|| {
+                loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(w) = worktrees.get(i) else { break };
+                    let sha = live_head(w);
+                    let runnable = !w.bare && !w.prunable && std::path::Path::new(&w.path).is_dir();
+                    let changed = runnable.then(|| worktree_changed(&w.path)).flatten();
+                    let (ahead, behind) = match (&main_sha, &sha) {
+                        (Some(m), Some(t)) if !w.is_main && runnable => {
+                            ahead_behind(&w.path, m, t).unzip()
+                        }
+                        _ => (None, None),
+                    };
+                    let head = sha.as_ref().and_then(|h| heads.get(h));
+                    let detail = GitWorktreeDetail {
+                        path: w.path.clone(),
+                        changed,
+                        ahead,
+                        behind,
+                        subject: head.map(|(_, s)| s.clone()),
+                        date: head.map(|(d, _)| d.clone()),
+                    };
+                    slots.lock().unwrap()[i] = Some(detail);
+                }
+            });
+        }
+    });
+    let slots = slots.into_inner().unwrap();
+    let details = worktrees
+        .iter()
+        .zip(slots)
+        .map(|(w, d)| {
+            d.unwrap_or(GitWorktreeDetail {
+                path: w.path.clone(),
+                changed: None,
+                ahead: None,
+                behind: None,
+                subject: None,
+                date: None,
+            })
+        })
+        .collect();
+    (base_branch, details)
+}
+
+/// Changed-file count of the worktree at `path` (`git status --porcelain=v2`
+/// entries); `None` when git fails.
+fn worktree_changed(path: &str) -> Option<u32> {
+    worktree_changed_within(path, DETAIL_STATUS_TIMEOUT)
+}
+
+/// How long one worktree's `git status` may run before it is killed and that
+/// worktree's `changed` is `None` (a hung or locked one must not stall the
+/// whole details call).
+const DETAIL_STATUS_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// [`worktree_changed`] with an explicit timeout. `GIT_OPTIONAL_LOCKS=0` so
+/// the status never takes `index.lock` to refresh the index behind the
+/// user's back.
+fn worktree_changed_within(path: &str, timeout: Duration) -> Option<u32> {
+    let mut cmd = Command::new("git");
+    cmd.args(["-C", path, "status", "--porcelain=v2"])
+        .env("GIT_OPTIONAL_LOCKS", "0");
+    let (stdout, ok, _timed_out) = output_within(cmd, Some(timeout))?;
+    if !ok {
+        return None;
+    }
+    Some(count_status_entries(&String::from_utf8_lossy(&stdout)))
+}
+
+/// Pure: entries in `git status --porcelain=v2` output (no `#` headers).
+fn count_status_entries(porcelain: &str) -> u32 {
+    porcelain
+        .lines()
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .count() as u32
+}
+
+/// `(ahead, behind)` of commit `head` against `base` (both full shas), run in
+/// `dir`; `None` when git fails.
+fn ahead_behind(dir: &str, base: &str, head: &str) -> Option<(u32, u32)> {
+    let out = Command::new("git")
+        .args(["-C", dir, "rev-list", "--left-right", "--count"])
+        .arg(format!("{base}...{head}"))
+        .arg("--")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    // "<only in base>\t<only in head>": head is behind by the first.
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut it = text.split_whitespace();
+    let behind = it.next()?.parse().ok()?;
+    let ahead = it.next()?.parse().ok()?;
+    Some((ahead, behind))
+}
+
+/// Fields of the one `git for-each-ref` call behind the Branches view
+/// (naru task 2737), NUL-separated. `%(ahead-behind:HEAD)` (git 2.41+) is the
+/// last, optional one. Each record ends with `\0\x1e` and the newline for-each-ref itself
+/// adds ([`BRANCH_END`]): the only free text field is the subject, which has
+/// no newline, so that sequence cannot occur inside a record.
+const BRANCH_FIELDS: &str = "%(refname)%00%(objectname)%00%(objectname:short)%00\
+%(committerdate:iso-strict)%00%(contents:subject)%00%(upstream:short)%00%(upstream:track)%00\
+%(HEAD)%00%(worktreepath)%00%(symref)";
+const BRANCH_AHEAD_BEHIND: &str = "%00%(ahead-behind:HEAD)";
+const BRANCH_END_FMT: &str = "%00%1e";
+const BRANCH_END: &str = "\0\u{1e}\n";
+
+/// Every local and remote-tracking branch of the repo at `dir`, from exactly
+/// ONE `git for-each-ref` (plus one `git remote` to tell a remote's name from
+/// a `/` in a branch name): zero git calls per row. `merged` needs the
+/// `ahead-behind:HEAD` atom; when that call fails (old git, unborn HEAD) it is
+/// retried once without and `merged` is `None`. `None` when `dir` is not a
+/// repo / git fails both times. `HEAD`-relative fields follow `dir`'s HEAD.
+pub fn branches_of(dir: &str) -> Option<Vec<GitBranch>> {
+    branches_with("git", dir)
+}
+
+/// [`branches_of`] with the git program injectable, so a test can count the
+/// invocations through a wrapper without touching the process-wide PATH.
+fn branches_with(program: &str, dir: &str) -> Option<Vec<GitBranch>> {
+    let run = |with_ab: bool| -> Option<String> {
+        let mut fmt = format!(
+            "{BRANCH_FIELDS}{}",
+            if with_ab { BRANCH_AHEAD_BEHIND } else { "" }
+        );
+        fmt.push_str(BRANCH_END_FMT);
+        let out = Command::new(program)
+            .args(["-C", dir, "for-each-ref"])
+            .arg(format!("--format={fmt}"))
+            .args(["refs/heads", "refs/remotes"])
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+    };
+    let text = run(true).or_else(|| run(false))?;
+    let remotes = remotes_of(program, dir);
+    Some(parse_branches(&text, &remotes))
+}
+
+/// `git remote` names; empty when there are none or git fails.
+fn remotes_of(program: &str, dir: &str) -> Vec<String> {
+    Command::new(program)
+        .args(["-C", dir, "remote"])
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .filter(|l| !l.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Pure parser of [`branches_of`]'s one call. Symbolic refs
+/// (`refs/remotes/origin/HEAD`) are skipped. A remote branch's `remote` is the
+/// longest entry of `remotes` that prefixes its name + `/` (a remote may
+/// itself contain `/`), else its first path segment.
+fn parse_branches(text: &str, remotes: &[String]) -> Vec<GitBranch> {
+    let mut rows = Vec::new();
+    for rec in text.split(BRANCH_END) {
+        if rec.is_empty() {
+            continue;
+        }
+        let f: Vec<&str> = rec.splitn(11, '\0').collect();
+        if f.len() < 10 {
+            continue;
+        }
+        let (refname, symref) = (f[0], f[9]);
+        if !symref.is_empty() {
+            continue;
+        }
+        let (kind, name) = if let Some(n) = refname.strip_prefix("refs/heads/") {
+            (GitBranchKind::Local, n)
+        } else if let Some(n) = refname.strip_prefix("refs/remotes/") {
+            (GitBranchKind::Remote, n)
+        } else {
+            continue;
+        };
+        let remote = (kind == GitBranchKind::Remote).then(|| {
+            remotes
+                .iter()
+                .filter(|r| {
+                    name.strip_prefix(r.as_str())
+                        .is_some_and(|t| t.starts_with('/'))
+                })
+                .max_by_key(|r| r.len())
+                .cloned()
+                .unwrap_or_else(|| name.split('/').next().unwrap_or(name).to_string())
+        });
+        let (ahead, behind, gone) = parse_track(f[6]);
+        let upstream = Some(f[5]).filter(|u| !u.is_empty()).map(str::to_string);
+        let has_up = upstream.is_some() && !gone;
+        let merged = f.get(10).and_then(|ab| {
+            let n: u32 = ab.split_whitespace().next()?.parse().ok()?;
+            Some(n == 0)
+        });
+        rows.push(GitBranch {
+            name: name.to_string(),
+            kind,
+            remote,
+            hash: f[1].to_string(),
+            short_hash: f[2].to_string(),
+            date: f[3].to_string(),
+            subject: f[4].to_string(),
+            upstream,
+            upstream_gone: gone,
+            // `upstream:track` is empty when in sync, so a tracked branch
+            // with no ahead/behind text is 0/0.
+            ahead: has_up.then_some(ahead),
+            behind: has_up.then_some(behind),
+            is_head: f[7] == "*",
+            worktree: Some(f[8]).filter(|w| !w.is_empty()).map(str::to_string),
+            merged,
+        });
+    }
+    rows
+}
+
+/// `%(upstream:track)`: `[ahead N, behind M]`, `[ahead N]`, `[behind M]`,
+/// `[gone]` or empty -> `(ahead, behind, gone)`.
+fn parse_track(track: &str) -> (u32, u32, bool) {
+    let inner = track.trim().trim_start_matches('[').trim_end_matches(']');
+    if inner == "gone" {
+        return (0, 0, true);
+    }
+    let (mut ahead, mut behind) = (0, 0);
+    for part in inner.split(',') {
+        let part = part.trim();
+        if let Some(n) = part.strip_prefix("ahead ") {
+            ahead = n.trim().parse().unwrap_or(0);
+        } else if let Some(n) = part.strip_prefix("behind ") {
+            behind = n.trim().parse().unwrap_or(0);
+        }
+    }
+    (ahead, behind, false)
+}
+
+/// The full refname `git log` is given for a branch row: it starts with
+/// `refs/`, so a branch named `-x` can never be read as a flag.
+pub fn branch_refname(b: &GitBranch) -> String {
+    match b.kind {
+        GitBranchKind::Local => format!("refs/heads/{}", b.name),
+        GitBranchKind::Remote => format!("refs/remotes/{}", b.name),
+    }
+}
+
+/// Every stash of the repo at `dir`, newest first (`git stash list`); `None`
+/// when git fails (not a repo). No stashes (or an unborn HEAD) is `Some([])`.
+/// A stash is a commit, so its `hash` works with the commit routes; files
+/// stashed with `-u` live in the stash's third parent and are not listed.
+pub fn stashes_of(dir: &str) -> Option<Vec<GitStash>> {
+    let out = Command::new("git")
+        .args([
+            "-C",
+            dir,
+            "stash",
+            "list",
+            "--format=%H%x00%gd%x00%gs%x00%cI",
+        ])
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(parse_stashes(&String::from_utf8_lossy(&out.stdout)))
+}
+
+/// Pure parser of [`stashes_of`]. The reflog subject is `WIP on <branch>:
+/// <sha> <subject>` or `On <branch>: <message>`; branch names cannot hold
+/// `:`, so the first `: ` ends the branch. `branch` is None for `(no branch)`
+/// or any other subject, whose `message` is then the whole subject; for a WIP
+/// subject the leading short sha is dropped from `message`.
+fn parse_stashes(text: &str) -> Vec<GitStash> {
+    let mut stashes = Vec::new();
+    for line in text.lines() {
+        let mut it = line.splitn(4, '\0');
+        let (Some(hash), Some(name), Some(subject), Some(date)) =
+            (it.next(), it.next(), it.next(), it.next())
+        else {
+            continue;
+        };
+        let Some(index) = name
+            .strip_prefix("stash@{")
+            .and_then(|r| r.strip_suffix('}'))
+            .and_then(|n| n.parse().ok())
+        else {
+            continue;
+        };
+        let (branch, message) = parse_stash_subject(subject);
+        stashes.push(GitStash {
+            index,
+            name: name.to_string(),
+            hash: hash.to_string(),
+            message,
+            branch,
+            date: date.to_string(),
+        });
+    }
+    stashes
+}
+
+fn parse_stash_subject(subject: &str) -> (Option<String>, String) {
+    let (rest, wip) = match (subject.strip_prefix("WIP on "), subject.strip_prefix("On ")) {
+        (Some(r), _) => (r, true),
+        (None, Some(r)) => (r, false),
+        _ => return (None, subject.to_string()),
+    };
+    let Some((branch, msg)) = rest.split_once(": ") else {
+        return (None, subject.to_string());
+    };
+    let message = if wip {
+        msg.split_once(' ').map_or(msg, |(_, s)| s).to_string()
+    } else {
+        msg.to_string()
+    };
+    let branch = (branch != "(no branch)").then(|| branch.to_string());
+    (branch, message)
 }
 
 /// Unified diff for one path from the status list — staged + unstaged as one
@@ -527,10 +950,24 @@ pub struct LogPage {
 /// empty-on-any-failure contract as [`commit_log_of`] (unborn HEAD
 /// included).
 pub fn commit_log_page(dir: &str, all: bool, skip: usize, filter: &LogFilter) -> LogPage {
+    commit_log_page_for(dir, all, skip, filter, None)
+}
+
+/// [`commit_log_page`] reading `rev` (a FULL refname from [`branch_refname`],
+/// naru task 2737) instead of `dir`'s HEAD. The caller has already checked it
+/// against the branch list; it starts with `refs/`, so it is never a flag.
+/// Meaningless together with `all`.
+pub fn commit_log_page_for(
+    dir: &str,
+    all: bool,
+    skip: usize,
+    filter: &LogFilter,
+    rev: Option<&str>,
+) -> LogPage {
     // Only a search is bounded: an unfiltered page reads at most 101 commits
     // past `skip`, as before task 2736.
     let timeout = (!filter.is_empty()).then_some(LOG_TIMEOUT);
-    commit_log_page_within(dir, all, skip, filter, timeout)
+    commit_log_page_within(dir, all, skip, filter, rev, timeout)
 }
 
 fn commit_log_page_within(
@@ -538,6 +975,7 @@ fn commit_log_page_within(
     all: bool,
     skip: usize,
     filter: &LogFilter,
+    rev: Option<&str>,
     timeout: Option<Duration>,
 ) -> LogPage {
     let mut extra = Vec::new();
@@ -548,6 +986,9 @@ fn commit_log_page_within(
         extra.push(format!("--skip={skip}"));
     }
     extra.extend(filter.args());
+    if let Some(r) = rev {
+        extra.push(r.to_string());
+    }
     let mut cmd = log_command(dir, filter.path.as_deref(), &extra, LOG_CAP + 1, true);
     cmd.env("GIT_LITERAL_PATHSPECS", "1");
     let Some((stdout, ok, timed_out)) = output_within(cmd, timeout) else {
@@ -2584,5 +3025,429 @@ mod tests {
         assert_eq!(d.subject, "sub\u{1f}ject");
         assert_eq!(d.parents, vec![first]);
         assert_eq!(d.body, "body");
+    }
+
+    // ---- naru task 2737: branches, worktrees, stashes ----
+
+    fn rec(f: &[&str]) -> String {
+        format!("{}{BRANCH_END}", f.join("\0"))
+    }
+
+    #[test]
+    fn parse_worktrees_reads_main_bare_locked_prunable_and_detached() {
+        let wts = parse_worktrees(
+            "worktree /r/bare.git\nbare\n\n\
+             worktree /r/a\nHEAD 1111111111111111111111111111111111111111\ndetached\nlocked\n\n\
+             worktree /r/b\nHEAD 2222222222222222222222222222222222222222\nbranch refs/heads/b\n\
+             locked on a usb stick\n\n\
+             worktree /r/c\nHEAD 3333333333333333333333333333333333333333\nbranch refs/heads/c\n\
+             prunable gitdir file points to non-existent location\n",
+            "/r/a",
+        );
+        assert_eq!(wts.len(), 4);
+        assert!(wts[0].is_main && wts[0].bare && wts[0].head.is_empty());
+        assert!(!wts[1].is_main && wts[1].detached && wts[1].locked);
+        assert_eq!(wts[1].lock_reason, None);
+        assert_eq!(wts[2].lock_reason.as_deref(), Some("on a usb stick"));
+        assert!(wts[3].prunable && !wts[3].locked);
+        assert_eq!(
+            wts[3].prunable_reason.as_deref(),
+            Some("gitdir file points to non-existent location")
+        );
+    }
+
+    #[test]
+    fn parse_track_reads_every_form() {
+        assert_eq!(parse_track(""), (0, 0, false));
+        assert_eq!(parse_track("[ahead 2, behind 3]"), (2, 3, false));
+        assert_eq!(parse_track("[ahead 2]"), (2, 0, false));
+        assert_eq!(parse_track("[behind 5]"), (0, 5, false));
+        assert_eq!(parse_track("[gone]"), (0, 0, true));
+    }
+
+    #[test]
+    fn parse_branches_fills_every_row_from_one_calls_output() {
+        let h = "a".repeat(40);
+        let text = [
+            rec(&[
+                "refs/heads/main",
+                &h,
+                "aaaaaaa",
+                "2024-01-01T00:00:00+00:00",
+                "s1",
+                "origin/main",
+                "[ahead 1, behind 2]",
+                "*",
+                "/w/main",
+                "",
+                "0 4",
+            ]),
+            rec(&[
+                "refs/heads/feat/\u{e9}x",
+                &h,
+                "aaaaaaa",
+                "2024-01-01T00:00:00+00:00",
+                "s2",
+                "origin/gone",
+                "[gone]",
+                " ",
+                "",
+                "",
+                "3 0",
+            ]),
+            rec(&[
+                "refs/heads/plain",
+                &h,
+                "aaaaaaa",
+                "2024-01-01T00:00:00+00:00",
+                "",
+                "",
+                "",
+                " ",
+                "",
+                "",
+                "0 0",
+            ]),
+            rec(&[
+                "refs/remotes/origin/HEAD",
+                &h,
+                "aaaaaaa",
+                "2024-01-01T00:00:00+00:00",
+                "s",
+                "",
+                "",
+                " ",
+                "",
+                "refs/remotes/origin/main",
+                "0 0",
+            ]),
+            rec(&[
+                "refs/remotes/up/stream/topic",
+                &h,
+                "aaaaaaa",
+                "2024-01-01T00:00:00+00:00",
+                "s3",
+                "",
+                "",
+                " ",
+                "",
+                "",
+                "1 0",
+            ]),
+        ]
+        .concat();
+        let rows = parse_branches(&text, &["up".into(), "up/stream".into(), "origin".into()]);
+        assert_eq!(rows.len(), 4, "the origin/HEAD symref is skipped");
+        for r in &rows {
+            assert_eq!(r.hash.len(), 40);
+            assert_eq!(r.short_hash, "aaaaaaa");
+            assert!(!r.date.is_empty());
+            assert!(r.merged.is_some());
+        }
+        assert_eq!(rows[0].ahead, Some(1));
+        assert_eq!(rows[0].behind, Some(2));
+        assert!(rows[0].is_head && rows[0].worktree.as_deref() == Some("/w/main"));
+        assert_eq!(rows[0].merged, Some(true));
+        assert!(rows[1].upstream_gone && rows[1].ahead.is_none());
+        assert_eq!(rows[1].name, "feat/\u{e9}x");
+        assert_eq!(rows[1].merged, Some(false));
+        assert!(
+            rows[2].upstream.is_none() && rows[2].ahead.is_none() && rows[2].subject.is_empty()
+        );
+        assert_eq!(rows[3].kind, GitBranchKind::Remote);
+        assert_eq!(rows[3].name, "up/stream/topic");
+        assert_eq!(rows[3].remote.as_deref(), Some("up/stream"));
+        // Without the atom (old git) merged is None.
+        let old = rec(&["refs/heads/m", "h", "h", "d", "s", "", "", "*", "", ""]);
+        assert_eq!(parse_branches(&old, &[])[0].merged, None);
+    }
+
+    #[test]
+    fn parse_stashes_reads_wip_on_named_detached_and_odd_subjects() {
+        let t = "h1\0stash@{0}\0On main: keep this: ok\0d1\n\
+                 h2\0stash@{1}\0WIP on feat/x: abc1234 the subject\0d2\n\
+                 h3\0stash@{2}\0WIP on (no branch): abc1234 s\0d3\n\
+                 h4\0stash@{3}\0custom\0d4\n";
+        let s = parse_stashes(t);
+        assert_eq!(s.len(), 4);
+        assert_eq!((s[0].index, s[0].branch.as_deref()), (0, Some("main")));
+        assert_eq!(s[0].message, "keep this: ok");
+        assert_eq!(s[1].branch.as_deref(), Some("feat/x"));
+        assert_eq!(s[1].message, "the subject");
+        assert_eq!(s[2].branch, None);
+        assert_eq!(
+            (s[3].branch.clone(), s[3].message.as_str()),
+            (None, "custom")
+        );
+    }
+
+    fn seeded(branch: &str) -> (tempfile::TempDir, String) {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("repo");
+        std::fs::create_dir_all(&p).unwrap();
+        let p = p.to_str().unwrap().to_string();
+        g(&p, &["init", "-q", "-b", branch]);
+        g(&p, &["config", "commit.gpgsign", "false"]);
+        commit_file(&p, "f.txt", "1", "seed");
+        (tmp, p)
+    }
+
+    #[test]
+    fn worktree_details_cover_detached_locked_prunable_and_missing_folders() {
+        let (tmp, p) = seeded("main");
+        let w = |n: &str| tmp.path().join(n).to_str().unwrap().to_string();
+        g(&p, &["worktree", "add", "-q", &w("det"), "--detach"]);
+        g(&p, &["worktree", "add", "-q", "-b", "lk", &w("lk")]);
+        g(&p, &["worktree", "lock", "--reason", "on usb", &w("lk")]);
+        g(&p, &["worktree", "add", "-q", "-b", "gone", &w("gone")]);
+        commit_file(&w("lk"), "g.txt", "x", "on lk");
+        std::fs::write(std::path::Path::new(&w("det")).join("u.txt"), "u").unwrap();
+        std::fs::remove_dir_all(w("gone")).unwrap();
+
+        let wts = worktrees_of(&p).unwrap();
+        assert_eq!(wts.len(), 4);
+        assert!(wts[0].is_main);
+        let by = |suffix: &str| wts.iter().find(|x| x.path.ends_with(suffix)).unwrap();
+        assert!(by("/det").detached && by("/det").branch.is_none());
+        assert!(by("/lk").locked && by("/lk").lock_reason.as_deref() == Some("on usb"));
+        assert!(by("/gone").prunable);
+
+        let (base, details) = worktree_details_of(&p, &wts);
+        assert_eq!(base.as_deref(), Some("main"));
+        assert_eq!(details.len(), 4);
+        let d = |suffix: &str| details.iter().find(|x| x.path.ends_with(suffix)).unwrap();
+        assert_eq!(details[0].ahead, None);
+        assert_eq!(details[0].subject.as_deref(), Some("seed"));
+        assert_eq!(d("/det").changed, Some(1));
+        assert_eq!((d("/det").ahead, d("/det").behind), (Some(0), Some(0)));
+        assert_eq!((d("/lk").ahead, d("/lk").behind), (Some(1), Some(0)));
+        assert_eq!(d("/lk").subject.as_deref(), Some("on lk"));
+        assert!(d("/lk").date.is_some());
+        // Prunable: folder gone, nothing run, no error.
+        assert_eq!(d("/gone").changed, None);
+        assert_eq!(d("/gone").ahead, None);
+        assert_eq!(d("/gone").subject, None);
+    }
+
+    #[test]
+    fn worktrees_of_a_bare_main_with_a_linked_worktree_and_an_unborn_repo() {
+        let (tmp, p) = seeded("main");
+        let bare = tmp.path().join("b.git").to_str().unwrap().to_string();
+        g(&p, &["clone", "-q", "--bare", &p, &bare]);
+        let wt = tmp.path().join("wt").to_str().unwrap().to_string();
+        g(&bare, &["worktree", "add", "-q", &wt, "main"]);
+        let wts = worktrees_of(&bare).unwrap();
+        assert_eq!(wts.len(), 2);
+        assert!(wts[0].is_main && wts[0].bare && wts[0].head.is_empty());
+        let (base, details) = worktree_details_of(&bare, &wts);
+        assert_eq!(base, None);
+        assert_eq!(details[0].changed, None);
+        assert_eq!(details[0].subject, None);
+        assert_eq!(details[1].changed, Some(0));
+        assert_eq!(details[1].ahead, None, "no main HEAD to compare with");
+        assert_eq!(details[1].subject.as_deref(), Some("seed"));
+        let br = branches_of(&bare).unwrap();
+        assert!(br.iter().any(|b| b.name == "main"));
+
+        // Unborn HEAD: nothing to list, nothing errors.
+        let e = tempfile::tempdir().unwrap();
+        let ep = e.path().to_str().unwrap();
+        g(ep, &["init", "-q", "-b", "main"]);
+        assert_eq!(branches_of(ep), Some(vec![]));
+        assert_eq!(stashes_of(ep), Some(vec![]));
+        let ewt = worktrees_of(ep).unwrap();
+        let (b, d) = worktree_details_of(ep, &ewt);
+        assert_eq!(b.as_deref(), Some("main"));
+        assert_eq!(d[0].changed, Some(0));
+        assert_eq!((d[0].subject.clone(), d[0].date.clone()), (None, None));
+        let none = tempfile::tempdir().unwrap();
+        assert_eq!(branches_of(none.path().to_str().unwrap()), None);
+        assert_eq!(stashes_of(none.path().to_str().unwrap()), None);
+    }
+
+    #[test]
+    fn branches_of_reads_upstreams_gone_upstreams_odd_names_and_merged() {
+        let (tmp, p) = seeded("main");
+        // No remotes, no upstream yet.
+        let rows = branches_of(&p).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            (
+                rows[0].upstream.clone(),
+                rows[0].ahead,
+                rows[0].remote.clone()
+            ),
+            (None, None, None)
+        );
+        assert!(rows[0].is_head && rows[0].merged == Some(true));
+
+        let remote = tmp.path().join("remote.git").to_str().unwrap().to_string();
+        g(&p, &["init", "-q", "--bare", &remote]);
+        g(&p, &["remote", "add", "origin", &remote]);
+        g(&p, &["push", "-q", "-u", "origin", "main"]);
+        g(&p, &["push", "-q", "origin", "main:gone-soon"]);
+        g(
+            &p,
+            &["branch", "-q", "--track", "gone-soon", "origin/gone-soon"],
+        );
+        g(&p, &["branch", "feat/\u{e9}t\u{e9}"]);
+        g(&p, &["update-ref", "refs/heads/-weird", "HEAD"]);
+        commit_file(&p, "f.txt", "2", "ahead of origin");
+        g(&p, &["update-ref", "-d", "refs/remotes/origin/gone-soon"]);
+        let rows = branches_of(&p).unwrap();
+        let get = |n: &str| rows.iter().find(|b| b.name == n).unwrap();
+        assert_eq!((get("main").ahead, get("main").behind), (Some(1), Some(0)));
+        assert_eq!(get("main").upstream.as_deref(), Some("origin/main"));
+        assert!(get("gone-soon").upstream_gone);
+        assert_eq!(get("gone-soon").ahead, None);
+        assert!(get("-weird").upstream.is_none());
+        assert_eq!(get("feat/\u{e9}t\u{e9}").kind, GitBranchKind::Local);
+        let remote_row = get("origin/main");
+        assert_eq!(remote_row.kind, GitBranchKind::Remote);
+        assert_eq!(remote_row.remote.as_deref(), Some("origin"));
+        assert!(
+            rows.iter()
+                .all(|b| b.name != "origin/HEAD" && b.name != "origin")
+        );
+        // origin/main is behind HEAD, so it is merged; main itself too.
+        assert_eq!(remote_row.merged, Some(true));
+
+        // `-weird` is listed, and logs by its full refname without being
+        // read as a flag.
+        let weird = branches_of(&p)
+            .unwrap()
+            .into_iter()
+            .find(|b| b.name == "-weird")
+            .unwrap();
+        let full = branch_refname(&weird);
+        assert_eq!(full, "refs/heads/-weird");
+        let page = commit_log_page_for(&p, false, 0, &LogFilter::default(), Some(&full));
+        assert_eq!(page.commits.len(), 1);
+        assert_eq!(page.commits[0].subject, "seed");
+        // The filters keep working with a branch.
+        let f = LogFilter {
+            text: Some("nomatch".into()),
+            ..Default::default()
+        };
+        assert!(
+            commit_log_page_for(&p, false, 0, &f, Some(&full))
+                .commits
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn many_branches_come_from_one_call() {
+        let (_tmp, p) = seeded("main");
+        for i in 0..300 {
+            g(&p, &["update-ref", &format!("refs/heads/b/{i}"), "HEAD"]);
+        }
+        assert_eq!(branches_of(&p).unwrap().len(), 301);
+    }
+
+    #[test]
+    fn stashes_list_two_and_their_commits_are_diffable() {
+        let (_tmp, p) = seeded("main");
+        assert_eq!(stashes_of(&p), Some(vec![]));
+        std::fs::write(std::path::Path::new(&p).join("f.txt"), "named").unwrap();
+        g(&p, &["stash", "push", "-q", "-m", "msg"]);
+        std::fs::write(std::path::Path::new(&p).join("f.txt"), "plain").unwrap();
+        g(&p, &["stash", "push", "-q"]);
+        let s = stashes_of(&p).unwrap();
+        assert_eq!(s.len(), 2);
+        assert_eq!((s[0].index, s[0].name.as_str()), (0, "stash@{0}"));
+        assert_eq!(s[0].branch.as_deref(), Some("main"));
+        assert_eq!(s[0].message, "seed", "a plain WIP stash drops the sha");
+        assert_eq!(s[1].message, "msg");
+        assert_eq!(s[1].branch.as_deref(), Some("main"));
+        assert!(!s[1].date.is_empty());
+        for st in &s {
+            let files = commit_files_of(&p, &st.hash).unwrap();
+            assert_eq!(files.len(), 1);
+            assert_eq!(files[0].path, "f.txt");
+            let diff = commit_file_diff_of(&p, &st.hash, "f.txt").unwrap();
+            assert!(diff.contains("+named") || diff.contains("+plain"), "{diff}");
+        }
+    }
+
+    /// Benchmark-style: details for 50 linked worktrees (5 dirty). Run with
+    /// `cargo test --lib worktree_details_of_50 -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn worktree_details_of_50_worktrees_wall_time() {
+        let (tmp, p) = seeded("main");
+        for i in 0..50 {
+            let w = tmp
+                .path()
+                .join(format!("w{i}"))
+                .to_str()
+                .unwrap()
+                .to_string();
+            g(&p, &["worktree", "add", "-q", "-b", &format!("wb{i}"), &w]);
+            if i % 10 == 0 {
+                std::fs::write(std::path::Path::new(&w).join("dirty.txt"), "d").unwrap();
+            }
+        }
+        let wts = worktrees_of(&p).unwrap();
+        assert_eq!(wts.len(), 51);
+        let t = Instant::now();
+        let (_, details) = worktree_details_of(&p, &wts);
+        println!("worktree_details_of 50 linked worktrees: {:?}", t.elapsed());
+        assert_eq!(details.iter().filter(|d| d.changed == Some(1)).count(), 5);
+        assert!(details.iter().all(|d| d.subject.is_some()));
+    }
+
+    #[test]
+    fn a_status_that_times_out_is_none_and_does_not_fail_the_details() {
+        let (_tmp, p) = seeded("main");
+        assert_eq!(
+            worktree_changed_within(&p, Duration::from_secs(30)),
+            Some(0)
+        );
+        // Killed before git can answer: None, never a panic or an error.
+        assert_eq!(worktree_changed_within(&p, Duration::ZERO), None);
+        let wts = worktrees_of(&p).unwrap();
+        let (_, details) = worktree_details_of(&p, &wts);
+        assert_eq!(details.len(), 1);
+        assert_eq!(details[0].subject.as_deref(), Some("seed"));
+    }
+
+    /// Counts `git` invocations through a wrapper script (the program is
+    /// injected, PATH untouched): the branch listing is ONE `for-each-ref`
+    /// (+ one `git remote`) whether there are 5 branches or 300.
+    #[test]
+    fn branch_listing_is_one_for_each_ref_regardless_of_branch_count() {
+        let count = |n: usize| -> (usize, usize) {
+            let (tmp, p) = seeded("main");
+            for i in 0..n {
+                g(&p, &["update-ref", &format!("refs/heads/b/{i}"), "HEAD"]);
+            }
+            let log = tmp.path().join("calls.log");
+            let wrapper = tmp.path().join("counting-git");
+            std::fs::write(
+                &wrapper,
+                format!(
+                    "#!/bin/sh\necho \"$@\" >> '{}'\nexec git \"$@\"\n",
+                    log.display()
+                ),
+            )
+            .unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let rows = branches_with(wrapper.to_str().unwrap(), &p).unwrap();
+            assert_eq!(rows.len(), n + 1);
+            let calls = std::fs::read_to_string(&log).unwrap();
+            let total = calls.lines().count();
+            let fer = calls
+                .lines()
+                .filter(|l| l.contains(" for-each-ref "))
+                .count();
+            (fer, total)
+        };
+        let (fer5, total5) = count(5);
+        let (fer300, total300) = count(300);
+        assert_eq!((fer5, fer300), (1, 1));
+        assert_eq!(total5, total300, "git calls must not grow with branches");
+        assert_eq!(total5, 2, "one for-each-ref plus one `git remote`");
     }
 }

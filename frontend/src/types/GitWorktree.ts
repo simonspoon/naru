@@ -21,4 +21,25 @@ head: string,
  * True for the worktree at the project's own `local_path` — the one
  * mesa is anchored to, highlighted in the UI as "current".
  */
-is_current: boolean, };
+is_current: boolean, 
+/**
+ * The first entry git lists: the main checkout (or the bare repo).
+ */
+is_main: boolean, 
+/**
+ * HEAD is detached (`branch` is None).
+ */
+detached: boolean, 
+/**
+ * A bare repository entry (`head` is empty, there is no working tree).
+ */
+bare: boolean, 
+/**
+ * `git worktree lock`ed; `lock_reason` is its text, if any.
+ */
+locked: boolean, lock_reason: string | null, 
+/**
+ * Git considers it prunable (its folder is gone); `prunable_reason` is
+ * git's explanation.
+ */
+prunable: boolean, prunable_reason: string | null, };

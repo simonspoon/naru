@@ -12,12 +12,17 @@ import type { GitCommit } from '../types/GitCommit'
 import type { GitCommitFile } from '../types/GitCommitFile'
 import type { GitFile } from '../types/GitFile'
 import type { GitRepo } from '../types/GitRepo'
-import type { GitWorktree } from '../types/GitWorktree'
+import type { GitBranch } from '../types/GitBranch'
+import type { GitStash } from '../types/GitStash'
 import { useLiveContext } from '../liveContext'
 import { LiveFocus } from './LiveFocus'
 import { useFetch } from '../useFetch'
 import { DiffView } from '../components/DiffView'
 import { CommitList } from '../components/CommitGraph'
+import { GitSidePanel } from '../components/GitSidePanel'
+import { useGitSide } from '../useGitSide'
+import { activeWorktreePath } from '../gitPanel'
+import type { BranchScope } from '../gitPanel'
 import { statTotals, subjectOrPlaceholder, totalsLabel } from '../gitHistory'
 import { usePhoneTier } from '../phoneTier'
 import { useCommitLog } from '../useCommitLog'
@@ -608,12 +613,23 @@ function HistoryPane({
   worktree,
   repo,
   branch,
+  branchScope,
+  onClearBranchScope,
+  openRequest,
+  onRequestConsumed,
   backRef,
 }: {
   projectId: number
   worktree: string | null
   repo: string | undefined
   branch: string
+  /** A branch picked in the side panel: its log, instead of HEAD / all. */
+  branchScope: BranchScope | null
+  onClearBranchScope: () => void
+  /** A commit the side panel asks to open (a stash); `nonce` makes a repeat count. */
+  openRequest: { sha: string; nonce: number } | null
+  /** The request was taken up: the owner drops it, so a remount cannot replay it. */
+  onRequestConsumed: () => void
   /** Where the tab's key handler finds this pane's "back a level". */
   backRef: MutableRefObject<((from: HTMLElement) => boolean) | null>
 }) {
@@ -647,6 +663,7 @@ function HistoryPane({
     repo,
     all,
     applied,
+    branchScope,
   )
   const rootRef = useRef<HTMLDivElement>(null)
   // Enter opened a commit: its detail focuses its first file once loaded.
@@ -671,10 +688,13 @@ function HistoryPane({
   // component is not remounted on project change (nor on a worktree switch)
   // while History mode stays open, so a stale commit selection from one scope
   // must not leak into the next.
-  const scope = `${projectId} ${repo ?? ''} ${worktree ?? ''}`
+  const [requestError, setRequestError] = useState<string | null>(null)
+  const jumpSeq = useRef(0)
+  const scope = `${projectId} ${repo ?? ''} ${worktree ?? ''} ${branchScope?.kind ?? ''} ${branchScope?.name ?? ''}`
   const [prevScope, setPrevScope] = useState(scope)
   if (scope !== prevScope) {
     setPrevScope(scope)
+    setRequestError(null)
     setSelectedCommit(null)
     setSelectedCommitPath(null)
   }
@@ -726,9 +746,13 @@ function HistoryPane({
     }
   })
 
+  const state = current ?? previous
+
   // Go to commit: a loaded row by unique prefix, else ask the server (any
   // commit in the repo, loaded or not). Null on success, else what to say.
   const onJump = async (sha: string): Promise<string | null> => {
+    // A later jump supersedes this one: a late reply for the older sha is dropped.
+    const mine = ++jumpSeq.current
     const open = (c: GitCommit) => {
       setSelectedCommit(c)
       setSelectedCommitPath(null)
@@ -746,6 +770,7 @@ function HistoryPane({
     }
     try {
       const d = await getProjectGitCommit(projectId, sha, repo)
+      if (mine !== jumpSeq.current) return null
       const fromList = state?.commits?.find((c) => c.hash === d.hash)
       open(
         fromList ?? {
@@ -760,18 +785,36 @@ function HistoryPane({
       )
       return null
     } catch {
-      return `No commit ${sha} in this repo.`
+      return mine === jumpSeq.current ? `No commit ${sha} in this repo.` : null
     }
   }
 
+  // The side panel asked for a commit that is not in the list (a stash).
+  const onJumpRef = useRef(onJump)
+  useEffect(() => {
+    onJumpRef.current = onJump
+  })
+  useEffect(() => {
+    if (openRequest === null) return
+    onRequestConsumed()
+    void onJumpRef.current(openRequest.sha).then(setRequestError)
+  }, [openRequest, onRequestConsumed])
+
   const setMode = (next: boolean) => {
+    if (branchScope !== null) {
+      // Either switch leaves the branch scope.
+      onClearBranchScope()
+      setAll(next)
+      setSelectedCommit(null)
+      setSelectedCommitPath(null)
+      return
+    }
     if (next === all) return
     setAll(next)
     setSelectedCommit(null)
     setSelectedCommitPath(null)
   }
 
-  const state = current ?? previous
   if (state && state.path === null && state.commits === null && state.error === null) {
     return <NoLocalPathPlaceholder projectId={projectId} />
   }
@@ -793,20 +836,35 @@ function HistoryPane({
       <div className="git-mode-toggle" role="group" aria-label="Branches shown">
         <button
           type="button"
-          className={all ? '' : 'active'}
-          aria-pressed={!all}
+          className={all || branchScope !== null ? '' : 'active'}
+          aria-pressed={!all && branchScope === null}
           onClick={() => setMode(false)}
         >
           Current branch
         </button>
         <button
           type="button"
-          className={all ? 'active' : ''}
-          aria-pressed={all}
+          className={all && branchScope === null ? 'active' : ''}
+          aria-pressed={all && branchScope === null}
           onClick={() => setMode(true)}
         >
           All branches
         </button>
+        {branchScope !== null && (
+          <button
+            type="button"
+            className="git-filter-chip git-branch-chip"
+            aria-label={`Remove branch scope ${branchScope.name}`}
+            title="Remove branch scope"
+            onClick={() => {
+              onClearBranchScope()
+              setSelectedCommit(null)
+              setSelectedCommitPath(null)
+            }}
+          >
+            <span>branch: {branchScope.name}</span> <span aria-hidden="true">×</span>
+          </button>
+        )}
       </div>
     </div>
   )
@@ -839,7 +897,13 @@ function HistoryPane({
     )
   } else if (commits.length === 0 && !filtered) {
     body = (
-      <p className="muted">{all ? 'No commits yet.' : `No commits yet on ${branch}.`}</p>
+      <p className="muted">
+        {branchScope !== null
+          ? `No commits on ${branchScope.name}.`
+          : all
+            ? 'No commits yet.'
+            : `No commits yet on ${branch}.`}
+      </p>
     )
   } else {
     const level = selectedCommit === null ? 'list' : selectedCommitPath === null ? 'detail' : 'diff'
@@ -945,6 +1009,7 @@ function HistoryPane({
       }}
     >
       {toolbar}
+      {requestError !== null && <p className="error git-search-note">{requestError}</p>}
       {shown && (filtered || shown.timedOut) && shown.commits !== null && shown.commits.length > 0 && (
         <p className="muted git-search-count" role="status">
           {resultLabel(shown.commits.length, shown.hasMore, shown.timedOut)}
@@ -955,59 +1020,13 @@ function HistoryPane({
   )
 }
 
-/** Short label for one worktree row: branch name, or the first 8 chars of
- * its HEAD sha when detached (same "short id stands in for a branch name"
- * convention as `parse_status`'s detached-HEAD branch field). */
-function worktreeLabel(w: GitWorktree): string {
-  return w.branch ?? w.head.slice(0, 8)
-}
-
-/**
- * Worktree selector: one row of chips, one per `git worktree list` entry,
- * highlighting whichever is active — the explicitly `selected` one, or (no
- * explicit selection yet) the repo's own `is_current` entry, i.e. the
- * worktree at the project's `local_path`. Hidden entirely when the repo has
- * only one worktree (the common case) — nothing to select between (S2-style
- * quiet default, mirrors the History toggle only mattering once there's
- * history to browse).
- */
-function WorktreeList({
-  worktrees,
-  selected,
-  onSelect,
-}: {
-  worktrees: GitWorktree[]
-  selected: string | null
-  onSelect: (path: string) => void
-}) {
-  if (worktrees.length <= 1) return null
-  return (
-    <div className="git-worktree-list">
-      {worktrees.map((w) => {
-        const active = selected === null ? w.is_current : w.path === selected
-        return (
-          <button
-            key={w.path}
-            type="button"
-            className={active ? 'active' : ''}
-            title={w.path}
-            onClick={() => onSelect(w.path)}
-          >
-            {worktreeLabel(w)}
-            {w.is_current && <span className="muted"> (current)</span>}
-          </button>
-        )
-      })}
-    </div>
-  )
-}
-
 /**
  * The GIT tab: working-tree status of the project's linked folder — branch +
  * ahead/behind header, changed/untracked file list on the left, the selected
  * file's diff on the right — plus a History sub-view (commit list → changed
  * files → diff) reachable via a toggle, without leaving the tab (M1/S2). A
- * worktree selector (`WorktreeList`) sits above both: picking a worktree
+ * side panel (`GitSidePanel`, task 2737) lists worktrees, branches and
+ * stashes beside both: picking a worktree
  * re-points the branch header, file list, and diff pane at that worktree's
  * directory instead of the project's own `local_path` (server-validated —
  * `getProjectGit`/`getProjectGitDiff`'s `worktree` param only ever accepts a
@@ -1034,6 +1053,12 @@ function GitRepoPane({
     () => getProjectGit(projectId, selectedWorktree ?? undefined, repo),
     `git-${projectId}-${repo ?? ''}-${selectedWorktree ?? ''}`,
   )
+  // The last view that loaded. A worktree switch changes the fetch key and
+  // `data` goes null while the new one loads; the shell and the side panel
+  // stay mounted on this (their filter text, groups and scroll must not
+  // reset) and only the content area shows its loading state.
+  const [lastView, setLastView] = useState<typeof data>(null)
+  if (data !== null && data !== lastView) setLastView(data)
   // Selected path is component state, not URL (no deep-linking a file).
   const [selectedPath, setSelectedPath] = useState<string | null>(null)
   // Working tree | History — default Working tree (today's behavior,
@@ -1045,15 +1070,37 @@ function GitRepoPane({
   // would carry project A's file into project B. Reset it when the project
   // changes — during render, off the changed prop.
   const [prevProject, setPrevProject] = useState(projectId)
+  // A branch picked in the side panel scopes History; it clears with the
+  // worktree (and the repo, which remounts this component).
+  const [branchScope, setBranchScope] = useState<BranchScope | null>(null)
+  // A stash the panel asked History to open; `nonce` lets a repeat count.
+  const [openRequest, setOpenRequest] = useState<{ sha: string; nonce: number } | null>(null)
   if (projectId !== prevProject) {
     setPrevProject(projectId)
     setSelectedPath(null)
     setSelectedWorktree(null)
+    setBranchScope(null)
+    setOpenRequest(null)
+    setLastView(null)
   }
+  const onRequestConsumed = useCallback(() => setOpenRequest(null), [])
+  const { shellRef, inline: sideInline, open: sideOpen, toggle: toggleSide, closeDrawer } = useGitSide()
+  const contentRef = useRef<HTMLDivElement>(null)
+  const refsButtonRef = useRef<HTMLButtonElement>(null)
   const [treeQuery, setTreeQuery] = useState('')
   const [showKeys, setShowKeys] = useState(false)
   const rootRef = useRef<HTMLDivElement>(null)
   const historyBack = useRef<((from: HTMLElement) => boolean) | null>(null)
+  // Closing the drawer unmounts the focused row: keep keyboard focus alive on
+  // the Refs button, and put it on the panel when the drawer opens.
+  const closeAndFocus = () => {
+    closeDrawer()
+    if (!sideInline) refsButtonRef.current?.focus()
+  }
+  useEffect(() => {
+    if (sideInline || !sideOpen) return
+    rootRef.current?.querySelector<HTMLElement>('#git-side .git-side-head')?.focus()
+  }, [sideInline, sideOpen])
 
   /**
    * The tab's keys (docs/git-tab.md "Keyboard"). Bound on the tab's own root,
@@ -1087,7 +1134,8 @@ function GitRepoPane({
       if (!item) return
       handled()
       item.click()
-      if (!item.closest('[data-git-list="commits"]')) {
+      // A commit row or a side-panel row does not hand focus to a diff.
+      if (!item.closest('[data-git-list="commits"], .git-side')) {
         setTimeout(() => root.querySelector<HTMLElement>('[data-git-diff]')?.focus(), 0)
       }
       return
@@ -1097,6 +1145,12 @@ function GitRepoPane({
     if (showKeys && e.key === 'Escape') {
       setShowKeys(false)
       root.querySelector<HTMLElement>('.git-keys-button')?.focus()
+      return handled()
+    }
+    if (e.key === 'Escape' && t.closest('.git-side')) {
+      // Esc in the refs panel: back to the content (a drawer closes).
+      if (sideInline) contentRef.current?.focus()
+      else closeAndFocus()
       return handled()
     }
     switch (action) {
@@ -1131,6 +1185,7 @@ function GitRepoPane({
       }
       case 'prevFile':
       case 'nextFile': {
+        if (t.closest('.git-side')) return
         const list = root.querySelector('[data-git-list="tree"], [data-git-list="files"]')
         if (!list) return
         const items = Array.from(list.querySelectorAll<HTMLElement>('[data-git-item]'))
@@ -1167,28 +1222,32 @@ function GitRepoPane({
     }
   }
 
-  if (error && !data) return <p className="error">{error}</p>
-  if (!data) return <p className="muted">Loading…</p>
+  const view = data ?? lastView
+  if (error && !view) return <p className="error">{error}</p>
+  if (!view) return <p className="muted">Loading…</p>
 
   // Quiet empty states (M5) — data shapes, not errors.
-  if (data.path === null) {
+  if (view.path === null) {
     return <NoLocalPathPlaceholder projectId={projectId} />
   }
-  if (data.repo === null) {
-    return <NotARepoPlaceholder path={data.path} />
+  if (view.repo === null) {
+    return <NotARepoPlaceholder path={view.path} />
   }
 
-  const { status, files } = data.repo
+  // `fresh` = this worktree's own view has loaded; otherwise `view` is the
+  // previous worktree's, good only for the shell and the panel.
+  const fresh = data !== null
+  const { status, files } = view.repo
   // Selection survives refetches by path; a file that left the list (e.g.
   // committed from a terminal) simply drops back to "select a file" instead
   // of fetching a diff the server would now 404.
   const selected =
-    selectedPath !== null
+    fresh && selectedPath !== null
       ? (files.find((f) => f.path === selectedPath) ?? null)
       : null
   // Header shows the directory `repo` actually reflects: the selected
   // worktree once one's picked, else the project's own local_path.
-  const repoPath = selectedWorktree ?? data.path
+  const repoPath = selectedWorktree ?? view.path
   const shownFiles = filterByPath(files, treeQuery)
 
   return (
@@ -1207,26 +1266,65 @@ function GitRepoPane({
         />
       )}
       <p className="git-repo-header">
-        <span className="git-branch">{status.branch}</span>
-        {status.ahead > 0 && <span className="git-ahead">↑{status.ahead}</span>}
-        {status.behind > 0 && (
-          <span className="git-behind">↓{status.behind}</span>
+        {fresh && (
+          <>
+            <span className="git-branch">{status.branch}</span>
+            {status.ahead > 0 && <span className="git-ahead">↑{status.ahead}</span>}
+            {status.behind > 0 && <span className="git-behind">↓{status.behind}</span>}
+          </>
         )}
         <span className="muted git-repo-path">{repoPath}</span>
       </p>
 
-      {data.worktrees !== null && (
-        <WorktreeList
-          worktrees={data.worktrees}
-          selected={selectedWorktree}
-          onSelect={(path) => {
-            setSelectedWorktree(path)
-            setSelectedPath(null)
+      <div
+        className={`git-shell ${sideInline ? 'git-shell-inline' : 'git-shell-drawer'}${sideOpen ? ' side-open' : ''}`}
+        ref={shellRef}
+      >
+      {sideOpen && !sideInline && (
+        <div className="git-side-scrim" onClick={closeAndFocus} aria-hidden="true" />
+      )}
+      {(sideOpen || sideInline) && (
+        <GitSidePanel
+          hidden={!sideOpen}
+          projectId={projectId}
+          repo={repo}
+          worktrees={view.worktrees}
+          selectedWorktree={selectedWorktree}
+          scope={branchScope}
+          onPickWorktree={(path) => {
+            // Only an actual change resets the selection and the branch scope.
+            if (path !== activeWorktreePath(view.worktrees ?? [], selectedWorktree)) {
+              setSelectedWorktree(path)
+              setSelectedPath(null)
+              setBranchScope(null)
+            }
+            closeAndFocus()
+          }}
+          onPickBranch={(b: GitBranch) => {
+            setBranchScope({ name: b.name, kind: b.kind })
+            setMode('history')
+            closeAndFocus()
+          }}
+          onPickStash={(st: GitStash) => {
+            setMode('history')
+            setOpenRequest((r) => ({ sha: st.hash, nonce: (r?.nonce ?? 0) + 1 }))
+            closeAndFocus()
           }}
         />
       )}
-
+      <div className="git-content" ref={contentRef} tabIndex={-1}>
       <div className="git-mode-row">
+        <button
+          type="button"
+          className={`git-refs-button${sideOpen ? ' active' : ''}`}
+          ref={refsButtonRef}
+          aria-expanded={sideOpen}
+          aria-controls="git-side"
+          title="Worktrees, branches and stashes"
+          onClick={toggleSide}
+        >
+          Refs
+        </button>
         <div className="git-mode-toggle">
           <button
             type="button"
@@ -1280,8 +1378,14 @@ function GitRepoPane({
           worktree={selectedWorktree}
           repo={repo}
           branch={status.branch}
+          branchScope={branchScope}
+          onClearBranchScope={() => setBranchScope(null)}
+          openRequest={openRequest}
+          onRequestConsumed={onRequestConsumed}
           backRef={historyBack}
         />
+      ) : !fresh ? (
+        error ? <p className="error">{error}</p> : <p className="muted">Loading…</p>
       ) : files.length === 0 ? (
         <p className="muted">Working tree clean — no changed files.</p>
       ) : (
@@ -1335,6 +1439,8 @@ function GitRepoPane({
         </div>
         </>
       )}
+      </div>
+      </div>
     </div>
   )
 }

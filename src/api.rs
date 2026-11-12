@@ -39,22 +39,24 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use crate::core::{
     AgentSession, ArchiveOutcome, Artifact, ArtifactPatch, ArtifactSummary, AudioTestResult,
-    CcDashboard, CcLiveSession, CcScorecard, CcUsage, ConfigServe, Error, FileTreeEntry, GitCommit,
-    GitCommitDetail, GitCommitFile, GitFileDiff, GitRepo, GitRepoView, GitStatus, GitWorktree,
-    InboxItem, InboxKind, LIVE_AUDIO_MAX, LIVE_BOARD_INK_STATE_MAX, LIVE_BOARD_KEEP, LIVE_INK_MAX,
-    LibraryBuiltinAction, LibraryBundle, LibraryImportResult, LibraryKind, LibraryPatch,
-    LibraryScope, LiveBoardHistoryEntry, LiveBoardHistoryPage, LiveBoardInkEntry, LiveBoardKind,
-    LiveBoardSummary, LiveContext, LiveNotebookEntry, LiveNotice, LiveOffer, LiveState, LiveStatus,
-    LiveTranscript, LiveWindow, ModelRates, NaruVersion, NextResult, Priority, ProjectAgents,
-    ProjectFileNames, ProjectFileTree, ProjectGitLog, ProjectGitRepos, ProjectGitStatus,
-    ProjectGitView, ProjectPatch, ProjectVersion, ReceiptPatch, STALE_CLAIM_MINUTES, Script,
-    ScriptArg, ScriptPatch, ScriptRunEvent, ServeBoolSetting, ServeHostsSetting,
-    ServeNumberSetting, Status, Store, SystemInfo, Task, TaskNote, TaskPatch, TaskSummary,
-    WorkflowEdgeKind, WorkflowGateStatus, WorkflowNodeKind, WorkflowNodeNew, WorkflowNodePatch,
-    WorkflowPatch, WorkflowTrigger, WorkflowType, agents, attachments, audio, board, claude_trust,
-    config, files, git, guard, hooks, inbox_triage, kb, library, listen, live, memory_job,
-    model_router, notify, orbit, project_memory, receipt, runner, script_runs, scripts, speech,
-    supervisor, system, validate_live_client, version, workflow,
+    CcDashboard, CcLiveSession, CcScorecard, CcUsage, ConfigServe, Error, FileTreeEntry, GitBranch,
+    GitCommit, GitCommitDetail, GitCommitFile, GitFileDiff, GitRepo, GitRepoView, GitStash,
+    GitStatus, GitWorktree, GitWorktreeDetail, InboxItem, InboxKind, LIVE_AUDIO_MAX,
+    LIVE_BOARD_INK_STATE_MAX, LIVE_BOARD_KEEP, LIVE_INK_MAX, LibraryBuiltinAction, LibraryBundle,
+    LibraryImportResult, LibraryKind, LibraryPatch, LibraryScope, LiveBoardHistoryEntry,
+    LiveBoardHistoryPage, LiveBoardInkEntry, LiveBoardKind, LiveBoardSummary, LiveContext,
+    LiveNotebookEntry, LiveNotice, LiveOffer, LiveState, LiveStatus, LiveTranscript, LiveWindow,
+    ModelRates, NaruVersion, NextResult, Priority, ProjectAgents, ProjectFileNames,
+    ProjectFileTree, ProjectGitBranches, ProjectGitLog, ProjectGitRepos, ProjectGitStashes,
+    ProjectGitStatus, ProjectGitView, ProjectGitWorktreeDetails, ProjectPatch, ProjectVersion,
+    ReceiptPatch, STALE_CLAIM_MINUTES, Script, ScriptArg, ScriptPatch, ScriptRunEvent,
+    ServeBoolSetting, ServeHostsSetting, ServeNumberSetting, Status, Store, SystemInfo, Task,
+    TaskNote, TaskPatch, TaskSummary, WorkflowEdgeKind, WorkflowGateStatus, WorkflowNodeKind,
+    WorkflowNodeNew, WorkflowNodePatch, WorkflowPatch, WorkflowTrigger, WorkflowType, agents,
+    attachments, audio, board, claude_trust, config, files, git, guard, hooks, inbox_triage, kb,
+    library, listen, live, memory_job, model_router, notify, orbit, project_memory, receipt,
+    runner, script_runs, scripts, speech, supervisor, system, validate_live_client, version,
+    workflow,
 };
 
 /// The Vite build output, embedded into the binary at compile time.
@@ -198,6 +200,16 @@ struct AppState {
     /// (whole-repo log, keyed by folder alone) because the key shape differs;
     /// same GIT_TTL/eviction-cap pattern as every other cache here.
     git_file_log_cache: Arc<Mutex<HashMap<(String, String), (Instant, (Vec<GitCommit>, bool))>>>,
+    /// Naru task 2737, all keyed by the resolved directory and on the same
+    /// GIT_TTL/eviction-cap pattern: the slow per-worktree details (key = the
+    /// repo dir), the branch list (key = the dir read, so `is_head`/`merged`
+    /// follow the selected worktree) and the stash list (key = the repo dir).
+    git_wt_details_cache: Arc<Mutex<HashMap<String, (Instant, GitWtDetailsCached)>>>,
+    git_branches_cache: Arc<Mutex<HashMap<String, (Instant, Option<Vec<GitBranch>>)>>>,
+    git_stashes_cache: Arc<Mutex<HashMap<String, (Instant, Option<Vec<GitStash>>)>>>,
+    /// Single-flight locks for those caches (`git_cached`), keyed by
+    /// `kind\0dir`: concurrent misses wait for one computation.
+    git_flights: Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
     /// Bumped whenever a spawn invalidates the list cache. A concurrent list
     /// whose subprocess started before the spawn checks this before caching,
     /// so it can't reinsert a pre-spawn snapshot after the invalidation and
@@ -3625,6 +3637,10 @@ pub fn serve(flags: ServeFlags) -> crate::core::Result<()> {
         git_commit_detail_cache: Arc::new(Mutex::new(HashMap::new())),
         git_commit_files_cache: Arc::new(Mutex::new(HashMap::new())),
         git_file_log_cache: Arc::new(Mutex::new(HashMap::new())),
+        git_wt_details_cache: Arc::new(Mutex::new(HashMap::new())),
+        git_branches_cache: Arc::new(Mutex::new(HashMap::new())),
+        git_stashes_cache: Arc::new(Mutex::new(HashMap::new())),
+        git_flights: Arc::new(Mutex::new(HashMap::new())),
         git_repos_cache: Arc::new(Mutex::new(HashMap::new())),
         files_tree_cache: Arc::new(Mutex::new(HashMap::new())),
         files_watch: crate::core::files_watch::WatchRegistry::new(),
@@ -4381,6 +4397,18 @@ fn router(state: AppState) -> Router {
         // commit-file's diff. Same read-only/standard-guard-only posture as
         // the two routes above — these execute nothing but `git` shell-outs.
         .route("/api/projects/{id}/git/log", get(get_project_git_log))
+        .route(
+            "/api/projects/{id}/git/worktrees",
+            get(get_project_git_worktrees),
+        )
+        .route(
+            "/api/projects/{id}/git/branches",
+            get(get_project_git_branches),
+        )
+        .route(
+            "/api/projects/{id}/git/stashes",
+            get(get_project_git_stashes),
+        )
         // One file's commit history — the whole-repo log above, narrowed by
         // a pathspec. Backs the Files tab's History pane; same read-only,
         // standard-guard-only posture as its siblings.
@@ -10618,8 +10646,8 @@ async fn get_project_git_diff(
     Ok(Json(GitFileDiff { path: wanted, diff }).into_response())
 }
 
-/// `git_log_cache` key: the folder actually read, `all`, `skip`, filters.
-type GitLogKey = (String, bool, usize, git::LogFilter);
+/// `git_log_cache` key: the folder actually read, `all`, `skip`, filters, branch.
+type GitLogKey = (String, bool, usize, git::LogFilter, Option<String>);
 /// One cached page: commits, `has_more`, `timed_out`.
 type GitLogCached = (Vec<GitCommit>, bool, bool);
 
@@ -10651,6 +10679,16 @@ struct GitLogQuery {
     since: Option<String>,
     #[serde(default)]
     until: Option<String>,
+    /// Show this branch's log (naru task 2737) instead of the worktree's
+    /// HEAD: the `name` of a local or remote row of `GET .../git/branches`,
+    /// byte-equal, else 404. Refused (422) together with `all=true`.
+    #[serde(default)]
+    branch: Option<String>,
+    /// `local` | `remote`: which row `branch` names when a local and a remote
+    /// branch share a short name (a local branch literally called
+    /// `origin/main`). Absent: the first match (local rows sort first).
+    #[serde(default)]
+    branch_kind: Option<String>,
 }
 
 impl GitLogQuery {
@@ -10709,13 +10747,54 @@ async fn get_project_git_log(
     Query(q): Query<GitLogQuery>,
 ) -> ApiResult<Response> {
     let filter = q.filter()?;
+    let branch = q.branch.as_deref().filter(|b| !b.is_empty());
+    if branch.is_some() && q.all.unwrap_or(false) {
+        return Err(ApiError {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            code: "validation",
+            message: "branch and all cannot be combined".to_string(),
+        });
+    }
+    let kind = match q.branch_kind.as_deref().filter(|k| !k.is_empty()) {
+        None => None,
+        Some("local") => Some(crate::core::GitBranchKind::Local),
+        Some("remote") => Some(crate::core::GitBranchKind::Remote),
+        Some(_) => {
+            return Err(ApiError {
+                status: StatusCode::UNPROCESSABLE_ENTITY,
+                code: "validation",
+                message: "branch_kind must be local or remote".to_string(),
+            });
+        }
+    };
     let (path, base, repo) = project_git_view_in(&state, id, q.repo.as_deref()).await?;
     let (commits, has_more, timed_out) = match (&base, &repo) {
         (Some(base), Some(_)) => {
             let (dir, _worktrees) = resolve_git_dir(&state, base, q.worktree.as_deref()).await?;
             let all = q.all.unwrap_or(false);
             let skip = q.skip.unwrap_or(0) as usize;
-            let key = (dir.clone(), all, skip, filter.clone());
+            // The allowlist: a listed branch row, passed to git as its full
+            // refname (`refs/heads/..`), never the raw request value.
+            let rev = match branch {
+                None => None,
+                Some(b) => {
+                    let found = git_branches_at(&state, &dir).await.and_then(|l| {
+                        l.into_iter()
+                            .find(|r| r.name == b && kind.is_none_or(|k| r.kind == k))
+                    });
+                    match found {
+                        Some(row) => Some(git::branch_refname(&row)),
+                        None => {
+                            return Err(ApiError {
+                                status: StatusCode::NOT_FOUND,
+                                code: "not_found",
+                                message: format!("branch not found: {b}"),
+                            });
+                        }
+                    }
+                }
+            };
+            let key = (dir.clone(), all, skip, filter.clone(), rev.clone());
             let cached = {
                 let cache = state.git_log_cache.lock().unwrap();
                 cache
@@ -10728,7 +10807,7 @@ async fn get_project_git_log(
                 None => {
                     let d = dir.clone();
                     let c = tokio::task::spawn_blocking(move || {
-                        let p = git::commit_log_page(&d, all, skip, &filter);
+                        let p = git::commit_log_page_for(&d, all, skip, &filter, rev.as_deref());
                         (p.commits, p.has_more, p.timed_out)
                     })
                     .await
@@ -10758,6 +10837,162 @@ async fn get_project_git_log(
         timed_out,
     })
     .into_response())
+}
+
+/// Runs blocking `f` through one of the naru-task-2737 caches: a hit younger
+/// than GIT_TTL is returned as is, else `f` runs on a blocking thread and its
+/// answer is cached under `key` (stale keys evicted past 64 entries).
+/// Single-flight: concurrent misses for the same `(kind, key)` queue on one
+/// async mutex and re-check the cache once they hold it, so overlapping polls
+/// share one computation instead of each fanning out its own git processes.
+async fn git_cached<T: Clone + Send + 'static>(
+    flights: &Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    cache: &Mutex<HashMap<String, (Instant, T)>>,
+    kind: &str,
+    key: &str,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
+    let lookup = || {
+        let c = cache.lock().unwrap();
+        c.get(key)
+            .filter(|(at, _)| at.elapsed() < GIT_TTL)
+            .map(|(_, v)| v.clone())
+    };
+    if let Some(hit) = lookup() {
+        return Some(hit);
+    }
+    let flight = {
+        let mut m = flights.lock().unwrap();
+        if m.len() >= 64 {
+            // Drop locks nobody holds or waits on.
+            m.retain(|_, l| Arc::strong_count(l) > 1);
+        }
+        m.entry(format!("{kind}\0{key}")).or_default().clone()
+    };
+    let _held = flight.lock().await;
+    if let Some(hit) = lookup() {
+        return Some(hit);
+    }
+    let v = tokio::task::spawn_blocking(f).await.ok()?;
+    let mut c = cache.lock().unwrap();
+    if c.len() >= 64 {
+        c.retain(|_, (at, _)| at.elapsed() < GIT_TTL);
+    }
+    c.insert(key.to_string(), (Instant::now(), v.clone()));
+    Some(v)
+}
+
+/// The branch list of `dir` (`git::branches_of`) through its cache.
+async fn git_branches_at(state: &AppState, dir: &str) -> Option<Vec<GitBranch>> {
+    let d = dir.to_string();
+    git_cached(
+        &state.git_flights,
+        &state.git_branches_cache,
+        "branches",
+        dir,
+        move || git::branches_of(&d),
+    )
+    .await
+    .flatten()
+}
+
+/// Cached value of `git_wt_details_cache`: `base_branch` and one detail per
+/// worktree (None when the repo has no worktree list).
+type GitWtDetailsCached = Option<(Option<String>, Vec<GitWorktreeDetail>)>;
+
+/// The dir a naru-task-2737 route reads, behind the usual empty-state ladder:
+/// `(path, Some(base))` only for a live repo; an unlisted `?repo=` is 404.
+async fn git_ladder_base(
+    state: &AppState,
+    id: i64,
+    repo: Option<&str>,
+) -> ApiResult<(Option<String>, Option<String>)> {
+    let (path, base, view) = project_git_view_in(state, id, repo).await?;
+    Ok((path, base.filter(|_| view.is_some())))
+}
+
+/// `GET .../git/worktrees[?repo=]` — the slow per-worktree details (changed
+/// count, ahead/behind the main checkout, HEAD subject/date) that the cheap
+/// `worktrees` list on `GET .../git` leaves out. Cached 5 s per repo dir.
+async fn get_project_git_worktrees(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Query(q): Query<GitRepoQuery>,
+) -> ApiResult<Response> {
+    let (path, base) = git_ladder_base(&state, id, q.repo.as_deref()).await?;
+    let found = match &base {
+        Some(base) => {
+            let b = base.clone();
+            git_cached(
+                &state.git_flights,
+                &state.git_wt_details_cache,
+                "details",
+                base,
+                move || {
+                    let wts = git::worktrees_of(&b)?;
+                    Some(git::worktree_details_of(&b, &wts))
+                },
+            )
+            .await
+            .flatten()
+        }
+        None => None,
+    };
+    let (base_branch, details) = match found {
+        Some((b, d)) => (b, Some(d)),
+        None => (None, None),
+    };
+    Ok(Json(ProjectGitWorktreeDetails {
+        path,
+        base_branch,
+        details,
+    })
+    .into_response())
+}
+
+/// `GET .../git/branches[?repo=][&worktree=]` — every local and remote branch
+/// from one `git for-each-ref`; `is_head`/`merged` are relative to the
+/// selected worktree. Cached 5 s per directory read.
+async fn get_project_git_branches(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Query(q): Query<GitViewQuery>,
+) -> ApiResult<Response> {
+    let (path, base) = git_ladder_base(&state, id, q.repo.as_deref()).await?;
+    let branches = match &base {
+        Some(base) => {
+            let (dir, _) = resolve_git_dir(&state, base, q.worktree.as_deref()).await?;
+            git_branches_at(&state, &dir).await
+        }
+        None => None,
+    };
+    Ok(Json(ProjectGitBranches { path, branches }).into_response())
+}
+
+/// `GET .../git/stashes[?repo=]` — `git stash list` (shared by every
+/// worktree). Cached 5 s per repo dir.
+async fn get_project_git_stashes(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Query(q): Query<GitRepoQuery>,
+) -> ApiResult<Response> {
+    let (path, base) = git_ladder_base(&state, id, q.repo.as_deref()).await?;
+    let stashes = match &base {
+        Some(base) => {
+            let b = base.clone();
+            git_cached(
+                &state.git_flights,
+                &state.git_stashes_cache,
+                "stashes",
+                base,
+                move || git::stashes_of(&b),
+            )
+            .await
+            .flatten()
+        }
+        None => None,
+    };
+    Ok(Json(ProjectGitStashes { path, stashes }).into_response())
 }
 
 #[derive(Deserialize)]
@@ -15915,6 +16150,10 @@ mod tests {
             git_commit_detail_cache: Arc::new(Mutex::new(HashMap::new())),
             git_commit_files_cache: Arc::new(Mutex::new(HashMap::new())),
             git_file_log_cache: Arc::new(Mutex::new(HashMap::new())),
+            git_wt_details_cache: Arc::new(Mutex::new(HashMap::new())),
+            git_branches_cache: Arc::new(Mutex::new(HashMap::new())),
+            git_stashes_cache: Arc::new(Mutex::new(HashMap::new())),
+            git_flights: Arc::new(Mutex::new(HashMap::new())),
             git_repos_cache: Arc::new(Mutex::new(HashMap::new())),
             files_tree_cache: Arc::new(Mutex::new(HashMap::new())),
             files_watch: crate::core::files_watch::WatchRegistry::new(),
@@ -15970,6 +16209,207 @@ mod tests {
         git_in(dir, &["commit", "-q", "--allow-empty", "-m", msg]);
     }
 
+    /// Naru task 2737: the worktrees/branches/stashes routes and the log's
+    /// `branch` selector: happy path, 404 for an unlisted branch or repo, 422
+    /// for `branch` with `all`, and the empty-state ladder.
+    #[tokio::test]
+    async fn git_branches_worktrees_stashes_routes() {
+        let (_db, state) = test_state();
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("proj");
+        init_repo(&root, "c0");
+        git_in(&root, &["branch", "-M", "main"]);
+        git_in(&root, &["branch", "feat/x"]);
+        git_in(&root, &["update-ref", "refs/heads/-weird", "HEAD"]);
+        git_in(&root, &["checkout", "-q", "feat/x"]);
+        git_in(&root, &["commit", "-q", "--allow-empty", "-m", "on feat"]);
+        git_in(&root, &["checkout", "-q", "main"]);
+        std::fs::write(root.join("f.txt"), "1").unwrap();
+        git_in(&root, &["add", "f.txt"]);
+        git_in(&root, &["commit", "-q", "-m", "add f"]);
+        std::fs::write(root.join("f.txt"), "2").unwrap();
+        git_in(&root, &["stash", "push", "-q", "-m", "keep"]);
+        std::fs::write(root.join("f.txt"), "3").unwrap();
+        // A local branch literally named like a remote one: same short name,
+        // different tips (local on feat/x's commit, remote on main's).
+        git_in(&root, &["branch", "origin/main", "feat/x"]);
+        git_in(&root, &["update-ref", "refs/remotes/origin/main", "main"]);
+        let linked = tmp.path().join("linked");
+        git_in(
+            &root,
+            &["worktree", "add", "-q", linked.to_str().unwrap(), "feat/x"],
+        );
+        let id = new_project(&state, Some(root.to_str().unwrap()));
+
+        let branches = |uri: &str| {
+            let state = state.clone();
+            let q = Query::<GitViewQuery>::try_from_uri(&uri.parse().unwrap()).unwrap();
+            async move { get_project_git_branches(State(state), Path(id), q).await }
+        };
+        let b = json_body(branches("/x").await.unwrap()).await;
+        let rows = b["branches"].as_array().unwrap();
+        let row = |n: &str| rows.iter().find(|r| r["name"] == n).unwrap().clone();
+        assert_eq!(rows.len(), 5);
+        assert_eq!(row("main")["is_head"], true);
+        assert_eq!(row("feat/x")["kind"], "local");
+        // Git reports the real path (macOS tmp dirs are symlinks).
+        let linked_real = row("feat/x")["worktree"].as_str().unwrap().to_string();
+        assert!(linked_real.ends_with("/linked"));
+        assert_eq!(row("feat/x")["merged"], false);
+        assert_eq!(row("-weird")["merged"], true);
+        // The selected worktree decides is_head.
+        let uri = format!("/x?worktree={}", linked_real.replace('/', "%2F"));
+        let bl = json_body(branches(&uri).await.unwrap()).await;
+        let lrows = bl["branches"].as_array().unwrap();
+        assert!(
+            lrows
+                .iter()
+                .any(|r| r["name"] == "feat/x" && r["is_head"] == true)
+        );
+        assert_eq!(
+            branches("/x?worktree=%2Fnope").await.err().unwrap().status,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            branches("/x?repo=nope").await.err().unwrap().status,
+            StatusCode::NOT_FOUND
+        );
+
+        let wt = get_project_git_worktrees(
+            State(state.clone()),
+            Path(id),
+            Query(GitRepoQuery { repo: None }),
+        )
+        .await
+        .unwrap();
+        let wt = json_body(wt).await;
+        assert_eq!(wt["base_branch"], "main");
+        let d = wt["details"].as_array().unwrap();
+        assert_eq!(d.len(), 2);
+        assert_eq!(d[0]["changed"], 1);
+        assert_eq!(d[0]["ahead"], serde_json::Value::Null);
+        assert_eq!(d[1]["changed"], 0);
+        assert_eq!(d[1]["ahead"], 1);
+        assert_eq!(d[1]["behind"], 1);
+        assert_eq!(d[1]["subject"], "on feat");
+
+        let st = get_project_git_stashes(
+            State(state.clone()),
+            Path(id),
+            Query(GitRepoQuery { repo: None }),
+        )
+        .await
+        .unwrap();
+        let st = json_body(st).await;
+        assert_eq!(st["stashes"][0]["name"], "stash@{0}");
+        assert_eq!(st["stashes"][0]["message"], "keep");
+        assert_eq!(st["stashes"][0]["branch"], "main");
+        let hash = st["stashes"][0]["hash"].as_str().unwrap().to_string();
+        let files = get_project_git_commit_files(
+            State(state.clone()),
+            Path((id, hash)),
+            Query(GitRepoQuery { repo: None }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(json_body(files).await[0]["path"], "f.txt");
+
+        // `?branch=` on the log: listed names only, full refname to git.
+        let log = |uri: &str| {
+            let state = state.clone();
+            let q = Query::<GitLogQuery>::try_from_uri(&uri.parse().unwrap()).unwrap();
+            async move { get_project_git_log(State(state), Path(id), q).await }
+        };
+        let l = json_body(log("/x?branch=feat%2Fx").await.unwrap()).await;
+        assert_eq!(l["commits"][0]["subject"], "on feat");
+        let l = json_body(log("/x?branch=-weird").await.unwrap()).await;
+        assert_eq!(l["commits"][0]["subject"], "c0");
+        // Name collision: no kind -> the local row; `branch_kind` picks.
+        let l = json_body(log("/x?branch=origin%2Fmain").await.unwrap()).await;
+        assert_eq!(l["commits"][0]["subject"], "on feat");
+        let l = json_body(
+            log("/x?branch=origin%2Fmain&branch_kind=local")
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(l["commits"][0]["subject"], "on feat");
+        let l = json_body(
+            log("/x?branch=origin%2Fmain&branch_kind=remote")
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(l["commits"][0]["subject"], "add f");
+        assert_eq!(
+            log("/x?branch=-weird&branch_kind=remote")
+                .await
+                .err()
+                .unwrap()
+                .status,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            log("/x?branch=main&branch_kind=bogus")
+                .await
+                .err()
+                .unwrap()
+                .status,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(
+            log("/x?branch=nope").await.err().unwrap().status,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            log("/x?branch=refs%2Fheads%2Fmain")
+                .await
+                .err()
+                .unwrap()
+                .status,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            log("/x?branch=main&all=true").await.err().unwrap().status,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+
+        // Ladder: no local_path -> nulls; dead folder -> nulls; never an error.
+        let none_id = new_project(&state, None);
+        let dead_id = new_project(&state, Some("/nonexistent/naru-2737"));
+        for pid in [none_id, dead_id] {
+            let b = get_project_git_branches(
+                State(state.clone()),
+                Path(pid),
+                Query(GitViewQuery {
+                    worktree: None,
+                    repo: None,
+                }),
+            )
+            .await
+            .unwrap();
+            assert_eq!(json_body(b).await["branches"], serde_json::Value::Null);
+            let w = get_project_git_worktrees(
+                State(state.clone()),
+                Path(pid),
+                Query(GitRepoQuery { repo: None }),
+            )
+            .await
+            .unwrap();
+            let w = json_body(w).await;
+            assert_eq!(w["details"], serde_json::Value::Null);
+            assert_eq!(w["base_branch"], serde_json::Value::Null);
+            let s = get_project_git_stashes(
+                State(state.clone()),
+                Path(pid),
+                Query(GitRepoQuery { repo: None }),
+            )
+            .await
+            .unwrap();
+            assert_eq!(json_body(s).await["stashes"], serde_json::Value::Null);
+        }
+    }
+
     /// Naru task 2735: `skip`/`all` page the log, `has_more` is truthful, a
     /// non-numeric `skip` is rejected by the extractor (400) before any
     /// handler or git runs, and the commit-detail route 404s a bad sha.
@@ -16005,6 +16445,8 @@ mod tests {
                 path: None,
                 since: None,
                 until: None,
+                branch: None,
+                branch_kind: None,
             };
             async move {
                 json_body(
@@ -16154,6 +16596,8 @@ mod tests {
                 path: None,
                 since: None,
                 until: None,
+                branch: None,
+                branch_kind: None,
             };
             async move { get_project_git_log(State(state), Path(id), Query(q)).await }
         };

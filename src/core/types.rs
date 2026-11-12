@@ -1504,6 +1504,136 @@ pub struct GitWorktree {
     /// True for the worktree at the project's own `local_path` — the one
     /// mesa is anchored to, highlighted in the UI as "current".
     pub is_current: bool,
+    /// The first entry git lists: the main checkout (or the bare repo).
+    #[serde(default)]
+    pub is_main: bool,
+    /// HEAD is detached (`branch` is None).
+    #[serde(default)]
+    pub detached: bool,
+    /// A bare repository entry (`head` is empty, there is no working tree).
+    #[serde(default)]
+    pub bare: bool,
+    /// `git worktree lock`ed; `lock_reason` is its text, if any.
+    #[serde(default)]
+    pub locked: bool,
+    #[serde(default)]
+    pub lock_reason: Option<String>,
+    /// Git considers it prunable (its folder is gone); `prunable_reason` is
+    /// git's explanation.
+    #[serde(default)]
+    pub prunable: bool,
+    #[serde(default)]
+    pub prunable_reason: Option<String>,
+}
+
+/// The slow per-worktree facts behind `GET .../git/worktrees`
+/// (`core::git::worktree_details_of`). Every field is None when it does not
+/// apply (bare, prunable, folder missing, main entry, git failed).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct GitWorktreeDetail {
+    /// Matches `GitWorktree.path`.
+    pub path: String,
+    /// Changed-file count (`git status --porcelain=v2`).
+    pub changed: Option<u32>,
+    /// Commits this worktree's HEAD has that the main checkout's HEAD lacks.
+    /// As of the last fetch: Naru never fetches.
+    pub ahead: Option<u32>,
+    /// Commits the main checkout's HEAD has that this one lacks.
+    pub behind: Option<u32>,
+    /// HEAD commit subject.
+    pub subject: Option<String>,
+    /// HEAD commit committer date, ISO 8601 strict.
+    pub date: Option<String>,
+}
+
+/// `GET /api/projects/{id}/git/worktrees` response. Ladder: path null = no
+/// local_path; details null = folder gone / not a repo; never an error.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct ProjectGitWorktreeDetails {
+    pub path: Option<String>,
+    /// Branch the main checkout is on (what ahead/behind is measured
+    /// against); None when detached, bare or unknown.
+    pub base_branch: Option<String>,
+    pub details: Option<Vec<GitWorktreeDetail>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub enum GitBranchKind {
+    Local,
+    Remote,
+}
+
+/// One row of `GET .../git/branches` (`core::git::branches_of`), every field
+/// from one `git for-each-ref` call.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct GitBranch {
+    /// Short name: `feat/x`, or `origin/feat/x` for a remote branch.
+    pub name: String,
+    pub kind: GitBranchKind,
+    /// The remote's name, for a remote branch.
+    pub remote: Option<String>,
+    pub hash: String,
+    pub short_hash: String,
+    /// Tip commit committer date, ISO 8601 strict.
+    pub date: String,
+    pub subject: String,
+    /// Short upstream name (`origin/main`), when one is configured.
+    pub upstream: Option<String>,
+    /// The upstream is configured but no longer exists.
+    pub upstream_gone: bool,
+    /// Versus the upstream (as of the last fetch); None with no upstream or
+    /// a gone one.
+    pub ahead: Option<u32>,
+    pub behind: Option<u32>,
+    /// Checked out in the directory the request read.
+    pub is_head: bool,
+    /// Path of the worktree that has it checked out.
+    pub worktree: Option<String>,
+    /// Fully merged into the request's HEAD; None when git could not tell
+    /// (git < 2.41, unborn HEAD).
+    pub merged: Option<bool>,
+}
+
+/// `GET /api/projects/{id}/git/branches` response; `branches` null = no
+/// local_path / folder gone / not a repo.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct ProjectGitBranches {
+    pub path: Option<String>,
+    pub branches: Option<Vec<GitBranch>>,
+}
+
+/// One entry of `git stash list`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct GitStash {
+    /// Position: 0 is the newest.
+    pub index: u32,
+    /// `stash@{N}`.
+    pub name: String,
+    /// The stash commit; works with the `/git/commits/{sha}` routes.
+    pub hash: String,
+    /// The text after `On <branch>:`, or the subject after the sha of a
+    /// `WIP on <branch>:` stash; the whole subject when unparseable.
+    pub message: String,
+    /// Branch it was made on; None when detached or unparseable.
+    pub branch: Option<String>,
+    /// Committer date, ISO 8601 strict.
+    pub date: String,
+}
+
+/// `GET /api/projects/{id}/git/stashes` response; `stashes` null = no
+/// local_path / folder gone / not a repo, `[]` = none.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct ProjectGitStashes {
+    pub path: Option<String>,
+    pub stashes: Option<Vec<GitStash>>,
 }
 
 /// One git repo discovered under a project's `local_path` (see
