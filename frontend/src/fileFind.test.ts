@@ -2,11 +2,14 @@ import { describe, expect, it } from 'vitest'
 import {
   MAX_FIND_MATCHES,
   anchorAfterStep,
+  applyEdits,
   boxNeedsReveal,
+  expandReplacement,
   findMatches,
   findSegments,
   matchIndexFrom,
   matchLabel,
+  replaceEdits,
   scrollLeftForBox,
   scrollTopForBox,
   stepMatch,
@@ -16,6 +19,7 @@ import {
 const PLAIN = { caseSensitive: false, wholeWord: false }
 const CASE = { caseSensitive: true, wholeWord: false }
 const WORD = { caseSensitive: false, wholeWord: true }
+const REGEX = { caseSensitive: false, wholeWord: false, regex: true }
 
 /** Matches as the substrings they cover, which is what a failure needs to
  * read like — a list of offset pairs says nothing about what was found. */
@@ -490,5 +494,136 @@ describe('scrollLeftForBox', () => {
     // Wrapped, the viewer has no gutter and nothing to scroll sideways: the
     // same call is a no-op rather than a special case at the call site.
     expect(scrollLeftForBox(200, 20, view, 200, 0)).toBe(200)
+  })
+})
+
+describe('findMatches with a regex', () => {
+  it('finds pattern matches as plain offset ranges', () => {
+    expect(found('a1 b22 c333', '\\d+', REGEX)).toEqual(['1', '22', '333'])
+    expect(offsets('a1 b22 c333', '\\d+', REGEX)).toEqual([1, 4, 8])
+  })
+
+  it('folds case unless told not to, and anchors per line', () => {
+    expect(found('Foo\nfoo', '^foo$', REGEX)).toEqual(['Foo', 'foo'])
+    expect(found('Foo\nfoo', '^foo$', { ...REGEX, caseSensitive: true })).toEqual(['foo'])
+  })
+
+  it('applies the whole-word rule to what matched', () => {
+    expect(found('cat concat cats', 'c[a-z]t', { ...REGEX, wholeWord: true })).toEqual(['cat'])
+  })
+
+  it('reports an invalid pattern instead of throwing', () => {
+    const res = findMatches('abc', '(', REGEX)
+    expect(res.matches).toEqual([])
+    expect(res.capped).toBe(false)
+    expect(res.error).toBeTruthy()
+  })
+
+  it('skips empty matches and still terminates', () => {
+    expect(found('baab', 'a*', REGEX)).toEqual(['aa'])
+    expect(found('a\nb', '^', REGEX)).toEqual([])
+  })
+
+  it('is capped like the literal scan', () => {
+    const res = findMatches('a'.repeat(MAX_FIND_MATCHES + 5), 'a', REGEX)
+    expect(res.matches).toHaveLength(MAX_FIND_MATCHES)
+    expect(res.capped).toBe(true)
+  })
+
+  it('leaves the literal scan literal: a pattern is typing until the toggle is on', () => {
+    expect(found('a.c abc', 'a.c')).toEqual(['a.c'])
+  })
+})
+
+describe('expandReplacement', () => {
+  const groups = ['2026-11', '2026', '11']
+
+  it('fills numbered groups, the whole match and a literal dollar', () => {
+    expect(expandReplacement('$2/$1', groups)).toBe('11/2026')
+    expect(expandReplacement('<$&>', groups)).toBe('<2026-11>')
+    expect(expandReplacement('$$1', groups)).toBe('$1')
+  })
+
+  it('leaves a number naming no group as typed', () => {
+    expect(expandReplacement('$3 $0 $x $', groups)).toBe('$3 $0 $x $')
+  })
+
+  it('reads two digits only when that group exists', () => {
+    expect(expandReplacement('$10', groups)).toBe('20260')
+    const many = ['m', ...Array.from({ length: 10 }, (_, i) => `g${i + 1}`)]
+    expect(expandReplacement('$10', many)).toBe('g10')
+  })
+
+  it('treats a group that did not take part as empty', () => {
+    expect(expandReplacement('[$1]', ['x', undefined])).toBe('[]')
+  })
+})
+
+describe('replaceEdits', () => {
+  /** Replace all, as the resulting text. */
+  function all(text: string, query: string, replacement: string, options = PLAIN): string {
+    return applyEdits(text, replaceEdits(text, query, replacement, options).edits)
+  }
+
+  it('replaces every literal match', () => {
+    expect(all('foo bar foo', 'foo', 'baz')).toBe('baz bar baz')
+  })
+
+  it('respects case and whole word', () => {
+    expect(all('Foo foo', 'foo', 'x', CASE)).toBe('Foo x')
+    expect(all('cat concat', 'cat', 'dog', WORD)).toBe('dog concat')
+  })
+
+  it('takes a literal replacement verbatim, dollars included', () => {
+    expect(all('price', 'price', '$1 $&')).toBe('$1 $&')
+  })
+
+  it('fills $1-style groups in regex mode', () => {
+    expect(all('2026-11 and 1999-01', '(\\d{4})-(\\d{2})', '$2/$1', REGEX)).toBe(
+      '11/2026 and 01/1999',
+    )
+  })
+
+  it('fills groups per match even when the pattern looks around it', () => {
+    expect(all('ab ac', '(?<=a)(\\w)', '<$1>', REGEX)).toBe('a<b> a<c>')
+  })
+
+  it('replaces with an empty string', () => {
+    expect(all('a-b-c', '-', '')).toBe('abc')
+  })
+
+  it('does nothing with zero matches or an empty query', () => {
+    expect(replaceEdits('abc', 'x', 'y', PLAIN)).toEqual({ edits: [] })
+    expect(replaceEdits('abc', '', 'y', PLAIN)).toEqual({ edits: [] })
+  })
+
+  it('reports an invalid regex and replaces nothing', () => {
+    const res = replaceEdits('abc', '[', 'y', REGEX)
+    expect(res.edits).toEqual([])
+    expect(res.error).toBeTruthy()
+  })
+
+  it('replaces past the display cap: all means all', () => {
+    const text = 'a'.repeat(MAX_FIND_MATCHES + 50)
+    const { edits } = replaceEdits(text, 'a', 'b', PLAIN)
+    expect(edits).toHaveLength(MAX_FIND_MATCHES + 50)
+    expect(applyEdits(text, edits)).toBe('b'.repeat(MAX_FIND_MATCHES + 50))
+  })
+
+  it('replaces only the match it is given', () => {
+    const text = 'foo foo foo'
+    const { edits } = replaceEdits(text, 'foo', 'x', PLAIN, { start: 4, end: 7 })
+    expect(edits).toEqual([{ start: 4, end: 7, text: 'x' }])
+    expect(applyEdits(text, edits)).toBe('foo x foo')
+  })
+
+  it('replaces one regex match with its own groups', () => {
+    const text = 'k1=v1 k2=v2'
+    const { edits } = replaceEdits(text, '(\\w+)=(\\w+)', '$2=$1', REGEX, { start: 6, end: 11 })
+    expect(applyEdits(text, edits)).toBe('k1=v1 v2=k2')
+  })
+
+  it('replaces nothing for a match that is no longer one', () => {
+    expect(replaceEdits('foo bar', 'foo', 'x', PLAIN, { start: 4, end: 7 }).edits).toEqual([])
   })
 })

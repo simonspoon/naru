@@ -139,7 +139,7 @@ create, on its own stricter gate (`docs/fs-browse.md`).
   payload would hand the user an empty or silently truncated file — and
   binary and truncated files are precisely the two the viewer can show
   nothing useful for, which is where the button earns its place. So the
-  affordance is offered for **every** file, unlike Edit.
+  affordance is offered for **every** file, unlike the editor.
 
   `Content-Type` is a **fixed** `application/octet-stream` — never sniffed,
   never derived from the extension, so a repo's own `.html`/`.svg` can never
@@ -243,15 +243,15 @@ create, on its own stricter gate (`docs/fs-browse.md`).
   is inert at every wider width, and the reasoning is in `docs/mobile.md`. A
   The viewer's header is `position: sticky` inside `.files-pane-body` (task
   697) — the pane is the only scroller, so the path, badges and the action
-  group stay pinned at its top and Edit/History/Download are reachable from
+  group stay pinned at its top and Save/Revert/History/Download are reachable from
   the bottom of a long file instead of being a scroll back up; it is opaque
   and bleeds into the pane's gutters so the file passes fully behind it, and
   the pane gives up its top padding to the header for the same reason. Inert
   at the ≤860px tier, where the pane sizes to content and `main` scrolls.
-  The header (`.files-header-actions`, hidden in edit mode) carries
-  up to three controls. **Download** (task 683) is the only one shown
-  unconditionally — binary and truncated files get it too — and sits last,
-  after Edit and History. It is a real `<button>`, not an `<a download>`,
+  The header (`.files-header-actions`) carries up to five controls: Save and
+  Revert file for an editable file, a rendered type's Preview/Source toggle,
+  History, and **Download** (task 683), which is offered for every file —
+  binary and truncated ones too — and sits last. It is a real `<button>`, not an `<a download>`,
   because the app's button chrome hangs off the `button` element selector in
   `index.css`; consequently the feature needed no new CSS. Clicking it
   `fetch`es `projectFileDownloadUrl()`, then clicks a throwaway
@@ -260,13 +260,12 @@ create, on its own stricter gate (`docs/fs-browse.md`).
   *inside* the pane (the API's own `error.message`, in the existing
   `saveError` slot) instead of navigating the SPA away to a JSON error page;
   the button is disabled while a download is in flight, mirroring Save. A
-  non-binary, non-truncated file's content pane
-  shows an **Edit** button; clicking it swaps the rendered content for a
+  non-binary, non-truncated text file **opens in** a
   full-height code editor (`.files-editor-stack`, one CodeMirror 6 `EditorView`
-  whose contenteditable `.cm-content` carries `.files-content-editor`) pre-filled
-  with the
-  current content, with Save/Cancel actions (Escape cancels, Cmd/Ctrl+Enter
-  saves) — the same draft/saving/error-state shape as `InlineEdit`, but
+  whose contenteditable `.cm-content` carries `.files-content-editor`) holding
+  the current content — no Edit button and no mode to enter or leave (naru task
+  2743, "Edit in place" below) — with Save and Revert file in the header
+  (Cmd/Ctrl+S or Cmd/Ctrl+Enter saves) — the same draft/saving/error-state shape as `InlineEdit`, but
   purpose-built rather than reusing that component: `InlineEdit`'s
   click-anywhere-to-edit trigger would fight selecting/copying source code,
   and its fixed `rows={4}` textarea doesn't fit a whole file.
@@ -275,7 +274,7 @@ create, on its own stricter gate (`docs/fs-browse.md`).
   6; the overlay, its alignment rules and the `execCommand` plumbing went with
   it). It is syntax-coloured while you type by a grammar loaded per language
   from `editorLanguage.ts`: each is its own dynamic `import()`, so the chunk
-  is fetched the first time a file of that language is edited and the editor is
+  is fetched the first time a file of that language is opened and the editor is
   usable, plain, from the first frame. A Lezer `@codemirror/lang-*` package is
   used where CodeMirror ships one (Rust, JavaScript/TypeScript/JSX/TSX, JSON,
   Markdown, HTML, XML, CSS, Python, YAML, SQL, Go, PHP) and the long tail rides
@@ -288,21 +287,21 @@ create, on its own stricter gate (`docs/fs-browse.md`).
   line, brackets, fold marks) is written in the app's CSS variables, so every
   theme in `docs/themes.md` recolours the editor live, and the token colours are
   read from the same Prism palette object the read-only viewer renders with, so
-  edit mode colours exactly what view mode does. The **read-only viewer,
+  the editor colours exactly what the viewer does. The **read-only viewer,
   rendered markdown, code fences and the diff views stay on Prism**; only the
   editor reads CodeMirror. This is also the only place a **markdown** grammar
-  colours a whole file — a saved `.md` renders as prose (see below), but editing
-  one shows markdown source, so `markdown`/`md` map to `lang-markdown`. Save errors
+  colours a whole file — a `.md` previews as prose (see below), but its Source
+  view is markdown source, so `markdown`/`md` map to `lang-markdown`. Save errors
   (e.g. a 422 if the file changed underneath into something non-editable
-  since it was loaded) render inline and keep edit mode open, mirroring
-  `InlineEdit`'s own error handling. **Closing** a tab mid-edit discarded its
+  since it was loaded) render inline and keep the draft in the editor, mirroring
+  `InlineEdit`'s own error handling. **Closing** a tab with unsaved edits discarded its
   draft silently until task 809, which put one inline prompt in front of that
   one click — the app's *first* confirmation (task 877's delete prompt is the
   second), and only where the close actually destroys work (see the task 809
   section below). Merely *switching* tabs
   discards nothing: see the tabs section below for which half of that changed
   in task 670 and why.
-  Beside **Edit** sits a **History** toggle (task 542). Open, it renders
+  Beside them sits a **History** toggle (task 542). Open, it renders
   `FileHistoryPane` — a vertical commit list (`.files-history-pane`) for the
   selected file — to the *left* of the content, which keeps rendering as
   normal; picking a commit swaps only that content half for
@@ -310,9 +309,11 @@ create, on its own stricter gate (`docs/fs-browse.md`).
   this file, with a `← File` affordance back. History state rides with the
   open tab, alongside its edit draft (see the tabs section) — one file's
   history can never be shown against
-  another file's content. Edit and History are mutually exclusive views of
-  the same area: entering edit mode closes history rather than trying to
-  show the editor and a commit diff at once. The pane's empty states are the
+  another file's content. Opening History keeps the file on screen — the
+  editor, or a rendered type's preview, beside the commit list — and a picked
+  commit's diff takes its place until `← File` (the draft is untouched
+  underneath; before naru task 2743 entering edit mode closed History). The
+  pane's empty states are the
   Git tab's ladder plus one rung this route adds — an empty commit list
   means the file exists on disk but was never committed, a state, not a
   failure.
@@ -436,10 +437,11 @@ twice.
   index is the board's midpoint scheme (`dropIndex`); a same-strip drop at the
   tab's own index or the one just past it writes nothing, which is also what
   makes "dropped on itself" a no-op with no special case.
-- **Per-tab state.** An open tab's edit draft, edit mode, open History and
-  selected commit are one `FileUiState` per path in `FilesView`, so flipping
-  to another tab and back is lossless — a navigation that silently ate a
-  half-typed edit would be a bug. Closing the tab (or switching project)
+- **Per-tab state.** An open tab's draft, its Preview/Source choice, open
+  History and selected commit are one `FileUiState` per path in `FilesView`, so
+  flipping to another tab and back is lossless — a navigation that silently ate
+  a half-typed edit would be a bug — and so, since naru task 2743, is leaving
+  the Files tab or switching project (`fileDrafts.ts`, below). Closing the tab
   discards it — since task 809 behind a prompt when that is what the close
   destroys, but the mechanism is unchanged: every `TabsState` write goes through
   `FilesView`'s `commit()`, which drops the `FileUiState` of any path no longer
@@ -468,10 +470,11 @@ twice.
     restored at 360px would otherwise never be folded.
   - An empty state **deletes** that project's entry instead of storing an empty
     object, so the key doesn't accumulate noise.
-  - Still **not** persisted, deliberately: `fileUi` (edit drafts, edit mode,
+  - Still **not** persisted, deliberately: `fileUi` (drafts, Preview/Source,
     open History, selected commit) — an unsaved draft surviving a browser
-    restart is a different, riskier feature, so drafts keep the component's
-    lifetime and die on unmount; tree `expanded`/`childrenCache`/`treeOpen` and
+    restart is a different, riskier feature, so drafts are held in memory only
+    (`fileDrafts.ts`: per project, for the page's lifetime) and die with the
+    page; tree `expanded`/`childrenCache`/`treeOpen` and
     scroll; and anything server-side — no DB column, no migration, no API
     route, no CLI change. This is machine-local browser state, like
     `lastView.ts` / `lastFolder.ts` / `filesTreeWidth.ts`. There is still no
@@ -616,8 +619,8 @@ reuses this one's containment rule; a **move** is still a non-goal.
   because the handler already evicted the server's 5s tree-cache entry for that
   level — and the new file is opened in the focused pane through `fileTabs.ts`'s
   `openFile` via the existing `commit()`, never a hand-rolled `TabsState`
-  transition. The file is empty and non-binary, so the existing **Edit** button
-  works on it unchanged; that is how content gets in.
+  transition. The file is empty and non-binary, so it opens straight in the
+  editor with the caret in it (`focusEditor`); that is how content gets in.
 - **An empty project root now renders the tree pane** with a
   `This folder is empty.` row inside `.files-tree`, instead of replacing the
   whole layout with a placeholder. The layout has to exist for the root's `+`
@@ -808,16 +811,20 @@ As everywhere in this app, the decisions are pure modules with vitest
 coverage and the `.tsx` files hold only the DOM: `editorStatus.ts`
 (caret/line arithmetic), `editorInput.ts` (indent unit, the Escape-then-Tab hatch, the one contiguous edit between two texts),
 `editorLanguage.ts` / `editorTheme.ts` (which grammar and which colours the editor takes),
-`fileFind.ts` (matching and stepping), `wordWrap.ts` (the stored preference)
-and `fileDirty.ts` (what "unsaved" means), plus `cycleTab` in `fileTabs.ts`
-and `shouldIgnoreFilesShortcut` in `keyboardScope.ts`.
+`fileFind.ts` (matching, stepping and — naru task 2743 — the edits a replace
+makes), `goToLine.ts` (what the go-to-line prompt's text means), `wordWrap.ts`
+(the stored preference), `fileDirty.ts` (what "unsaved" means, and what a
+change on disk means for a draft) and `fileDrafts.ts` (where drafts wait while
+the tab is not mounted, and the unload warning), plus `cycleTab` in
+`fileTabs.ts` and `shouldIgnoreFilesShortcut` in `keyboardScope.ts`.
 
-- **Line numbers and a status bar.** In edit mode the gutter is CodeMirror's
+- **Line numbers and a status bar.** In the editor the gutter is CodeMirror's
   (`lineNumbers()`, a fold gutter, and the active line's number picked out): each
   logical line is a real line element, so the numbers are **correct under soft
   wrap** — a wrapped line keeps its one number beside its first visual row — and
   CodeMirror sizes the gutter to the widest number it holds. It sits outside
-  `.cm-content`, so a copied selection is code and nothing else. In view mode it
+  `.cm-content`, so a copied selection is code and nothing else. In a read-only
+  viewer (a truncated file, a table-less CSV preview) it
   is still a sticky-left column beside the code — `aria-hidden`,
   `user-select: none`, one `<pre>` of newline-joined numbers inheriting the row's
   font metrics — aligned *by construction*, never by measurement. (Until task
@@ -844,9 +851,8 @@ and `shouldIgnoreFilesShortcut` in `keyboardScope.ts`.
     vsc-dark-plus's inline `tab-size: 4` while the gutter and the find layer
     beside it used the initial 8 — on a tab-indented file with a grammar (Go,
     shell) every highlight landed four columns right per leading tab. The row
-    states it beside the other metrics; the editor's `tabSize` is the same 4, which
-    is also what stops Edit visibly reflowing every indented line to half its
-    width and back again on Cancel.
+    states it beside the other metrics; the editor's `tabSize` is the same 4, so a
+    tab-indented file is the same width in the editor as in the viewer.
   - The view-mode row is also `width: max-content`: a `position: sticky`
     column is clamped to its containing block, so a row only as wide as the
     scroller lets the gutter detach and scroll away once a minified file or a
@@ -868,8 +874,8 @@ and `shouldIgnoreFilesShortcut` in `keyboardScope.ts`.
     Prism `<pre>` already did for every highlighted file before the gutter
     existed.
   - The status bar (`.files-status-bar`) is pinned to the bottom
-    of the pane the way the header is pinned to its top, and carries Ln/Col while
-    editing (from `CodeEditor`'s `onCaret`, reported on every selection or
+    of the pane the way the header is pinned to its top, and carries Ln/Col over
+    the editor (from `CodeEditor`'s `onCaret`, reported on every selection or
     document change), the line count, the language and the wrap toggle. **Not by
     the same mechanism**, though: the header sticks at the *start* of the flow and
     is on screen from the first paint, while a sticky *bottom* only engages once
@@ -903,9 +909,9 @@ and `shouldIgnoreFilesShortcut` in `keyboardScope.ts`.
   - **Two line counts, deliberately** (`lineCount` vs `viewerLineCount`): an
     editor shows a trailing newline as a real empty last line the caret can sit
     on and a `<pre>` swallows one, so the editor and the viewer count
-    differently. In edit mode the gutter's numbers are CodeMirror's own and the
-    status bar's count is `lineCount(draft)`, which follows the same rule; in view
-    mode `viewerLineCount` drives *both* the gutter and the bar, which is what
+    differently. In the editor the gutter's numbers are CodeMirror's own and the
+    status bar's count is `lineCount(draft)`, which follows the same rule; in a
+    viewer `viewerLineCount` drives *both* the gutter and the bar, which is what
     makes it impossible for the bar and the last number beside it to disagree.
   - **Soft wrap** (`wordWrap.ts` — localStorage, one global setting for the tab,
     same posture as `filesTreeWidth.ts`; held in `FilesView` so both panes of a
@@ -940,7 +946,9 @@ and `shouldIgnoreFilesShortcut` in `keyboardScope.ts`.
   - **Escape is `onCancel`, once the cursors are one.** With several selection
     ranges the first Escape is CodeMirror's `simplifySelection` and collapses
     them, and `onCancel` is not called; the next Escape is the caller's, the way
-    every editor spends the first one.
+    every editor spends the first one. The Files tab passes `onCancel` only
+    while its find bar is up (it closes the bar): there is no edit to leave, so
+    with no bar Escape stays CodeMirror's own.
   - **Cmd/Ctrl+S and Cmd/Ctrl+Enter are `onSave`**, and only when the caller
     passed one. The key is swallowed as well as handled — the browser's own
     Cmd/Ctrl+S opens Save Page, which offers to write an HTML copy of the app
@@ -969,7 +977,7 @@ and `shouldIgnoreFilesShortcut` in `keyboardScope.ts`.
     to CodeMirror's `indentUnit` through a compartment, so Tab, block indent and
     auto-indent all use it. It decides what a *new* indent looks like and never
     rewrites indentation already on disk. `tabSize` (how wide a tab *draws*) is a
-    fixed 4, the viewer's value, so Edit does not reflow a tab-indented file.
+    fixed 4, the viewer's value, so the two draw a tab-indented file alike.
   - **Cursors and selection beyond one caret.** Alt/Option-click adds a cursor, as
     does the platform's own Cmd-click (macOS) or Ctrl-click (elsewhere;
     Ctrl-click is a right-click on macOS, hence the split); Alt-drag is a
@@ -990,8 +998,9 @@ and `shouldIgnoreFilesShortcut` in `keyboardScope.ts`.
     `value` reach the one `EditorView` as transactions on compartments (language,
     wrap, indent unit, token colours), never a rebuild, which would drop the
     history and the caret.
-- **Find in file** (`Cmd/Ctrl+F`) is a literal scan, **never a `RegExp`** — a
-  query is typing, not a pattern language. Case folding is per *character*
+- **Find in file** (`Cmd/Ctrl+F`) is a literal scan **unless the regex toggle
+  is on** (naru task 2743, "Replace" below) — a query is typing, not a pattern
+  language, until the user says it is one. Case folding is per *character*
   rather than `text.toLowerCase()`, because `'İ'.toLowerCase()` is two code
   units and a lowercased copy is no longer offset-for-offset the string about
   to be highlighted. Whole-word demands a boundary only on the sides the query
@@ -1038,9 +1047,9 @@ and `shouldIgnoreFilesShortcut` in `keyboardScope.ts`.
   listing it scrolled the pane back to the match on every character typed while
   the caret was elsewhere, and `current` alone misses the legitimate no-op step
   (`(0 + 1) % 1 === 0` — Enter on a one-match file), which leaves the counter
-  reading "1 of 1" over a view that has not moved. (Editing, `reveal()` calls the
-  editor's handle directly; the flag is also how the crossing from view into edit
-  mode asks for a reveal once the editor has mounted.) The vertical half is
+  reading "1 of 1" over a view that has not moved. (Over the editor, `reveal()`
+  calls the editor's handle directly; a search-result landing, which arrives
+  before the editor has mounted, reaches it through the same effect.) The vertical half is
   correct in both wrap modes and needs nothing else — the element exists, so the
   browser is the thing that knows where it ended up — except for the one thing
   `block: 'center'` will not do, which is *not* scroll: it re-centres
@@ -1065,8 +1074,8 @@ and `shouldIgnoreFilesShortcut` in `keyboardScope.ts`.
   revealed from the left arrives with a column of code beside it rather than
   flush against the numbers.
 
-  **A fresh search anchors on what you are looking at** — the caret while
-  editing, and in view mode the first line still on screen, measured off the
+  **A fresh search anchors on what you are looking at** — the caret in the
+  editor, and in a viewer the first line still on screen, measured off the
   pane's scroll (`lineAtScroll` + `offsetForLine`). Anchoring at 0 made Cmd+F
   halfway down a 2,000-line file land on the first match at the *top* and
   `scrollIntoView` yank the pane there. "On screen" means *readable*, so the
@@ -1084,23 +1093,11 @@ and `shouldIgnoreFilesShortcut` in `keyboardScope.ts`.
   file: Enter four times to a match 800 lines down and then one more character
   of query would otherwise teleport them back to the first hit of the *original*
   search. Re-anchoring on the current match is what makes refining narrow in
-  place, and it leaves the fresh-open behaviour above untouched. **The crossing
-  between view and edit mode carries the current match across** (task 879,
-  `carryFind`): the two modes search different strings (the bytes on disk vs the
-  LF-normalised draft), so in a CRLF file a raw offset is one character per
-  preceding line wrong — but line and column are coordinates the two dialects
-  agree on, so the offset is *translated* through them (`carriedOffset`) rather
-  than discarded. The index is then the ordinary `matchIndexFrom` answer for
-  that anchor over the new string, and the reveal is armed for the render that
-  crosses, since the editor is not mounted (and the mark not in the DOM) until
-  React has painted the mode being entered. It used to reset both to `-1`/`0`,
-  which was correct about the offsets and wrong about the reader: pressing Edit
-  on the match you had just found dropped you at line 1 with the counter still
-  claiming a match — "the counter says N and the view sat still", the failure
-  the whole reveal machinery exists to prevent, arrived at from the one
-  direction nothing was watching. With no match to carry (bar closed, empty
-  query, nothing found) the crossing is still that reset, and the caret is still
-  reset with it.
+  place, and it leaves the fresh-open behaviour above untouched. There is no
+  longer a crossing between two modes to carry a match over (naru task 2743
+  removed `carryFind` and `carriedOffset` with the edit mode): a file is
+  searched in one string for as long as it is shown one way, and a rendered
+  type's Preview has no find bar to carry anything from.
 
   **Cmd/Ctrl+F selects the query every time the bar comes up**, open or closed,
   because Cmd+F-then-type is the reflex the bar is for. On an already-open bar
@@ -1113,7 +1110,9 @@ and `shouldIgnoreFilesShortcut` in `keyboardScope.ts`.
   it, and `autoFocus` focuses without selecting — typing appended (`foofoobar`)
   instead of replacing.
 
-  **The draft is LF-normalised at `startEdit`** (`normalizeNewlines`).
+  **The editor's text is LF-normalised where it is derived**
+  (`normalizeNewlines`, `disk` in `ContentPane` — what the editor shows before
+  there is a draft, and the `baseline` the first keystroke's draft starts from).
   CodeMirror holds line breaks as structure and reports every offset
   (`caretOffset`, `reveal`, the `matches` it paints) against the LF form of the
   text, so a draft seeded from the bytes on disk is not offset-for-offset the
@@ -1123,7 +1122,8 @@ and `shouldIgnoreFilesShortcut` in `keyboardScope.ts`.
   textarea because the reason did.) Normalising once makes that impossible, and
   makes the dirty comparison honest as well; the trade is that saving a CRLF
   file writes LF, which is already what happened the moment the user typed
-  anything. `CodeEditor` also normalises a `value` that still holds a `\r`
+  anything — and only then: a CRLF file nobody types in has no draft, reads
+  clean, and is never written. `CodeEditor` also normalises a `value` that still holds a `\r`
   before applying it, so the contract holds for a caller that did not.
 
   **Every button in the bar hands the caret back to the query box.** Otherwise
@@ -1133,34 +1133,36 @@ and `shouldIgnoreFilesShortcut` in `keyboardScope.ts`.
   caret on rather than dropping it**, for the same reason: the query box is
   unmounted while it holds focus, and a control that disappears focused leaves
   focus on `<body>`, so Tab restarts at the top of the page and Escape reads as
-  having done nothing. Editing, it goes to the code with the last match still
-  selected in it. In view mode there is no control to hand it to, so
+  having done nothing. Over the editor, it goes to the code with the last match
+  still selected in it. Over a viewer there is no control to hand it to, so
   `.files-content` carries a `tabIndex={-1}` purely as that target (and
   `outline: none` with it — a ring traced around the whole pane would read as a
-  control). In view mode Escape is also
+  control). Over a viewer Escape is also
   bound at the document level while the bar is up, since there is no editor
   there to route it (`docs/keyboard.md`).
 
   Find is offered only where offsets mean something: not for a binary or an
-  image, not over a commit's diff, and **not for markdown in view mode** — that
+  image, not over a commit's diff, and **not for a markdown preview** — that
   pane is rendered prose, so the key is left to the browser's own find, which
-  searches exactly what is painted. In edit mode markdown is source again and is
+  searches exactly what is painted. In Source markdown is text again and is
   findable.
-- **A save keeps you in the editor.** It moves the `baseline` onto the draft and
-  nothing else — the tab reads clean (below) with the caret, the scroll and the
-  find bar all still where they were. Exiting on save was defensible while
-  clicking a button was the only way to ask for one; binding Cmd/Ctrl+S changed
-  what the action *means*, since that chord is the every-thirty-seconds reflex
-  pressed mid-thought, and each press dropped the caret and the scroll, closed
-  the bar and — on a markdown file — landed the user in rendered prose instead
-  of the source they were editing. The button shares the keystroke's meaning
-  rather than the other way round; **Cancel** is how edit mode is left.
+- **A save moves the `baseline` and nothing else.** The tab reads clean
+  (below) with the caret, the scroll and the find bar all still where they
+  were — Cmd/Ctrl+S is the every-thirty-seconds reflex pressed mid-thought, and
+  there is no other view for it to drop the user into. `save()` writes the text
+  it captured when it was asked, so characters typed while the request is out
+  stay unsaved rather than being marked clean; it does nothing over a buffer
+  with nothing unsaved, and is refused while a change on disk is unanswered
+  ("Changed on disk" below). The header's Save button is the same call.
 - **Dirty tabs.** `isDirty` is `editing && draft !== baseline` — a
-  `baseline` set at `startEdit` and moved onto the draft on a successful save —
-  **not** a diff against the fetched content, because only `ContentPane` has
-  that response and the strip painting the dot is two components above it.
-  `editing` is part of the test rather than an optimisation: a *cancelled* edit
-  leaves its draft behind and the user already said to drop it.
+  `baseline` set by the first keystroke (the disk content the draft starts
+  from), moved onto the saved text by a successful save and onto the disk's by
+  "Keep mine" — **not** a diff against the fetched content, because only
+  `ContentPane` has that response and the strip painting the dot is two
+  components above it. `editing` kept its name but means only **"this path has
+  a draft"** (naru task 2743): a file nobody has typed in has none, and a
+  dropped draft (`NO_DRAFT` — a revert, a clean reload from disk) reads clean
+  whatever text it left behind.
 
   A dirty tab wears a dot where its × goes, swapped back on hover or
   `:focus-within` in CSS alone — and shown *beside* the dot under
@@ -1172,8 +1174,8 @@ and `shouldIgnoreFilesShortcut` in `keyboardScope.ts`.
   **prompts** — `CloseConfirmBar`, the house inline two-step, never
   `window.confirm`. It answers Enter (its autofocused "keep editing") *and*
   Escape, which it binds on itself and stops from bubbling — the universal
-  cancel was inert on the tab's one prompt, and the editor underneath answers
-  Escape by discarding the very draft the bar exists to protect. It is raised
+  cancel was inert on the tab's one prompt, and nothing underneath (the find
+  bar's document-level Escape) should also answer it. It is raised
   only when the close actually discards something:
   `needsCloseConfirm` says no for a clean tab and no for a dirty file the other
   pane still holds, and the *same call* decides on every render whether the bar
@@ -1185,21 +1187,28 @@ and `shouldIgnoreFilesShortcut` in `keyboardScope.ts`.
   mid-keystroke. `requestClose` is the only thing that arms it; a render-time
   check against the same predicate is the only thing that disarms it without an
   answer. That is the one exception to the "closing a tab silently
-  discards its draft" rule stated in the tabs section above; a `beforeunload`
-  listener, armed by its effect's lifetime rather than by a flag inside a
-  permanently-registered handler (which would also disable the bfcache), covers
-  a reload or a window close.
+  discards its draft" rule stated in the tabs section above.
 
-  **What the dot covers is exactly four exits**, and the limit is deliberate:
-  the tab's ×, a middle-click, Alt+W (all three `requestClose`), and a real page
-  unload. Switching projects in the left nav and leaving the Files tab both
-  still discard a draft with no prompt. There is nothing to put a bar in front
-  of by the time either is observable here — the route has already moved, and
-  the pane that would host the prompt is about to show another project's files —
-  and the app has no navigation guard to hold it in. Keeping the drafts across a
-  project change instead would be worse than losing them: `fileUi` is keyed by a
-  path relative to the project, so the same `src/main.rs` in two projects would
-  inherit the other one's unsaved text.
+  **What discards a draft is closing its tab, and a page unload — nothing
+  else** (naru task 2743). The tab's ×, a middle-click, Alt+W and the bulk
+  closes all ask first (`requestClose`, `BulkCloseConfirmBar`). Leaving the
+  Files tab and switching projects in the left nav used to drop every draft
+  unprompted, a limit that was tolerable while a draft was something a user
+  had entered a mode to make and is not now that it is the ordinary state of
+  an open tab. There was never anywhere to put a prompt — the route has already
+  moved by the time `FilesView` can know — so there is no prompt: `fileUi` is
+  mirrored into `fileDrafts.ts` on every change (`stashDrafts`, one effect) and
+  read back as the tab mounts or changes project (`restoreOpen` →
+  `stashedDrafts`, filtered to the paths still open). In memory only, and keyed
+  **by project**, because the paths inside are relative to one: the same
+  `src/main.rs` in two projects never inherits the other's text. The
+  `beforeunload` warning lives in that module for the same reason the drafts
+  do — a reload while the Files tab is not on screen loses them just the same —
+  and is armed by adding the listener and disarmed by removing it, exactly
+  while some project holds a dirty draft, never by a flag inside a permanent
+  handler (which would also disable the bfcache). A rename or delete of an open
+  file, and an upload that replaces one, still drop its draft (their sections
+  below).
 
 **Keyboard is `docs/keyboard.md`'s**, including why the chords are `Alt`-based,
 why `Cmd/Ctrl+W` is deliberately unbound, and the Escape precedence between the
@@ -1216,6 +1225,171 @@ this task added none. The gate is `npm --prefix frontend run test` over the
 modules above, plus khora for anything needing a rendered tree, real focus
 routing or a trusted keystroke (CLAUDE.md's standing split).
 
+### Edit in place (naru task 2743)
+
+There is no edit mode. A text file the server sent whole (`editable`:
+`!is_binary && !truncated`) renders `CodeEditor` as its body from the first
+paint — no Edit button, no Cancel, no End editing, and `LeaveEditConfirmBar`
+is gone with the mode it guarded.
+
+- **The draft is made by the first keystroke, not by opening.** Until then the
+  path has no `FileUiState` draft at all and the editor shows `disk` (the
+  fetched content, LF). `CodeEditor`'s `onChange` seeds it in an updater:
+  `{ editing: true, draft, baseline: disk }`. That is what lets a file that is
+  merely open follow the disk for free, and what keeps a CRLF file nobody
+  touched from reading dirty.
+- **The header** carries **Save** (disabled unless dirty; Cmd/Ctrl+S and
+  Cmd/Ctrl+Enter in the editor are the same `save()`) and **Revert file**:
+  drop the draft (`NO_DRAFT`) and re-read the disk. Over unsaved work Revert is
+  the house two-step — `RevertConfirmBar`, "discard edits" red, "keep editing"
+  autofocused, Escape the safe answer — and its armed state is cleared at
+  render the moment the buffer is clean, for the reason `pendingClose`'s is.
+- **Rendered types keep their preview.** Markdown, an HTML document, a
+  delimited file and an SVG (`renderable`, decided by what the file *is*, never
+  by what its text currently parses to — or typing in a `.csv` would flip the
+  pane to a table mid-word) open as before, with a header toggle named for
+  where it goes: **Source** is the live editor, **Preview** the rendered view.
+  The choice is `FileUiState.source`, per path, so it survives a tab switch.
+  The preview renders the draft once there is one (`viewText`); an SVG's is the
+  raw route, so it shows the last save.
+- **Read-only stays read-only.** A binary, an image, media and a truncated file
+  never mount an editor; the `truncated` badge and "Binary file — cannot
+  display." say why, and Download is still there. The one bend: `editable`
+  stays true while a draft is dirty, so a file that grows past the cap on disk
+  under unsaved work does not hide that work.
+- **The editor takes the caret only when asked.** `CodeEditor` is mounted with
+  `autoFocus={false}`; `FilesView`'s `focusEditor(path)` raises a `focusReq`
+  on a tree click, a tab click, Alt+`[` / Alt+`]` and a created file, and the
+  pane showing that path focuses once per request (`focusSeq`; taking the caret
+  calls `onFocusTaken`, which clears the request, so a later remount of the
+  file or a click on that pane's own find bar is not answered by the caret
+  jumping into the code). Never on a page load (the bare `a` / `hjkl` shortcuts must not
+  type into a restored file), never for a search-result landing (the caret
+  stays with the panel), and never on the phone tier, where focusing the editor
+  raises the soft keyboard over the file that was just opened.
+- **History** no longer excludes the editor: the commit list sits beside it,
+  and a picked commit's diff takes its place.
+
+### Changed on disk (naru task 2743)
+
+Until this task the watch stream refetched tree levels only, and an open file
+was re-read on window focus alone — into `data`, which a draft then silently
+ignored and the next save overwrote. Now a change line reaches the open files
+(`changed` → `refetch()`, not a new fetch key, which would blank the pane and
+remount the editor), and **every** read of the file is reconciled against the
+draft.
+
+- `reconcile(disk, saves)` runs inside the `useFetch` load callback, so it sees
+  each response whether or not `useFetch` then drops it as identical. It
+  decides **in an `onUi` updater**, against the latest state — a keystroke may
+  have landed since the render that started the request — by asking
+  `fileDirty.ts::diskChange(prev, disk)`, and records the disk it saw in
+  `FileUiState.seenDisk`:
+  - `none` — no draft, or the disk still holds the `baseline`.
+  - `reload` — the draft is clean (or already says what the disk does): it is
+    dropped (`NO_DRAFT`), the pane shows the disk, and `CodeEditor` applies the
+    new `value` as one contiguous replacement outside its undo history, so the
+    caret maps through it rather than jumping.
+  - `conflict` — the disk moved under unsaved work. **Never resolved
+    silently.**
+- The **"<name> changed on disk."** bar is *derived* (`diskChange(ui,
+  ui.seenDisk) === 'conflict'`), so it clears itself by any route that
+  resolves it. **Reload (discard my edits)** drops the draft and re-reads;
+  **Keep mine** moves `baseline` onto `seenDisk` — the draft is now measured
+  against, and its next save overwrites, the disk's version. Neither button is
+  autofocused: the bar arrives unasked, mid-typing. `save()` is refused with
+  an inline message until one is pressed.
+- **The reconcile state is the path's, not the pane's.** `seenDisk` and
+  `saves` (how many saves this path has completed) live in `FileUiState`
+  beside the draft, so both halves of a split showing the same file agree on
+  what the disk holds and show the same bar. `save()` writes `{ baseline:
+  saved, seenDisk: saved, saves: prev.saves + 1 }` in one update, a beat
+  before its own refetch lands.
+- A stale response is ignored in two places. The pane's one `live` ref
+  (`{ alive, key, saves }`) is sampled when a request sets out: a response for
+  an unmounted pane, or for a fetch key the pane has since left (an
+  upload-replace bumping `reload`), is never reconciled. And the updater
+  returns `null` when `prev.saves !== saves` — a read that set out before the
+  latest save, from either pane, describes a disk that no longer exists, and
+  would otherwise drop the just-saved buffer or raise a conflict against
+  itself.
+- **Reads are ordered.** Window focus, the watch stream, the poll and a save's
+  refetch can overlap and land out of order; a response that set out before
+  one already applied (`loads`: `started`/`landed`) is neither reconciled — it
+  could retract a conflict the newer read raised — nor shown: it resolves to
+  the newer response.
+- **The open file is polled as well as watched** (`OPEN_FILE_POLL_MS`, 3s,
+  `useFetch`'s `pollMs`: identical reads change nothing, a hidden tab does not
+  poll). The stream is what makes a change show at once, but on macOS a single
+  in-place write was measured arriving seconds late or folded into the next
+  one, and "reload it, or tell me it changed" has to hold either way.
+- **A save looks before it writes.** `save()` re-reads the file first and, if
+  the disk is neither the `baseline` nor the text being saved, records it as
+  `seenDisk` and stops with the bar up — a change the stream and the poll have
+  not delivered yet is still not overwritten. (A check, not a lock: the server
+  has no precondition on the write, so a change landing between the read and
+  the `PATCH` is still lost.) A save with nothing to write is skipped.
+- **Undoing back to nothing drops the draft.** `onChange` asks `diskChange`
+  about the state it is about to write: a draft that comes back to its
+  baseline while an unanswered change is on disk is dropped like any clean
+  one, so the pane never sits on old text with Save disabled.
+- A **failed** re-read (404: deleted underneath) is shown inline above the
+  body, over whatever is already on screen — it used to replace the pane,
+  which would hide the draft. A save then fails the same way (404, or 422 too
+  large), inline in `saveError`, and the draft stays in the editor. The same
+  holds with nothing on screen yet: a tab switched back to after its file was
+  deleted mounts with no data and a failing read, and shows the draft, still
+  editable, under the error.
+- **An upload that replaces an open file** drops its draft (the person chose
+  the upload); the Replace prompt says "Its unsaved edits will be discarded."
+  when that path is dirty.
+
+### Replace (naru task 2743)
+
+The find bar gains a **regex toggle** (`.*`, off by default — the scan stays
+literal until the user says the query is a pattern) and, over the editor only,
+a **replace row**, opened by the bar's Replace toggle or Cmd/Ctrl+Alt+F
+(`docs/keyboard.md`). All of it is decided in `fileFind.ts`; `FindBar` stays
+presentational.
+
+- **Regex find** (`findRegexMatches`): `gm`, plus `i` unless Match case; the
+  whole-word rule is the literal scan's, asked of the matched text; an empty
+  match (`a*` between letters, a bare `^`) is skipped, which is also what
+  keeps the scan moving; the same 2000 cap. An invalid pattern is reported
+  (`FindResult.error`), never thrown, and the counter reads "Invalid regex".
+- **Replace** (Enter in the replace box) replaces the current match and steps
+  to the next — found in the text as it is *after* the edit, from just past
+  what was put in, so a replacement that itself matches is not replaced again.
+  The match is looked up among the real matches rather than trusted
+  (`replaceEdits`'s `only`), so a stale one replaces nothing.
+- **Replace all** replaces **every** match, past the 2000 the bar will
+  highlight: that cap exists for the highlight DOM and has no bearing on
+  rewriting a string, and stopping at it would leave a file half-changed
+  behind a button that said "all". The row then says the exact count
+  ("Replaced 5312"), or "Nothing to replace".
+- **One undo step.** The edits go to the editor as one transaction
+  (`CodeEditorHandle.applyEdits`), annotated `isolateHistory.of('full')` so a
+  keystroke typed straight after cannot join it. It is the editor's own edit,
+  so it reports through `onChange` and the other pane of a split sees it.
+- **`$1`..`$99`, `$&`, `$$`** are filled from each match's own groups
+  (`expandReplacement`) in regex mode only; a number naming no group is left as
+  typed. In literal mode the replacement is verbatim, dollars included. An
+  empty replacement deletes.
+- **Hidden in a read-only view** (`replace={null}`): a truncated file's find
+  bar has no Replace toggle and the chord does nothing there.
+
+### Go to line (naru task 2743)
+
+Ctrl+G, or a click on the status bar's `Ln, Col` readout (now a button), swaps
+the readout for a small prompt taking `line` or `line:column` (a comma works
+too). Enter jumps — `goToLine.ts::goToOffset`, then the editor's `reveal` and
+`focus` — and input that is not a position leaves the prompt up to be
+corrected; Escape hands the caret back to the code; a click away just closes
+it. Positions are **clamped, not refused**: line 0 is line 1, a line past the
+end is the last line, and a column past the end of its line is the end of that
+line, never the start of the next. Only over the editor: a viewer has no
+caret to move.
+
 ## The watch stream (naru task 1875)
 
 `GET /api/projects/{id}/files/watch` — an `application/x-ndjson` stream
@@ -1227,6 +1401,10 @@ the 5s cache or a window focus.
   per debounced burst (400ms; `dirs` are root-relative, `""` = the root level,
   `null` = refetch every loaded level, also sent for a broadcast lag or past
   100 directories); and `{"type":"ping"}` every 15s.
+- Open files hear it too (naru task 2743): `FilesView` hands each change line
+  to the mounted `ContentPane`s as `changed`, and one whose file's directory is
+  in `dirs` (or `dirs` is `null`) re-reads its content — "Changed on disk"
+  above. The route itself is unchanged.
 - Ignore list: `files::EXCLUDED_DIRS` — a write under `target/`,
   `node_modules/`, `.git/` etc. produces no line.
 - Teardown: the heartbeat is load-bearing. hyper only notices a vanished client
@@ -1356,7 +1534,7 @@ through the existing `commit()`), and hands the pane that gets it a
 The pane turns that into an **ordinary find**: the line becomes an anchor
 (`offsetForLine`, the same function the status bar counts with) and the query
 becomes the query, so `matchIndexFrom` picks the match and task 809's whole
-reveal machinery shows it — correct in view *and* edit mode, wrap on *and* off,
+reveal machinery shows it — correct in the viewer *and* the editor, wrap on *and* off,
 with no second scroll rule. The reader also arrives with the in-file bar open on
 that query, able to keep stepping through the file, which is the next thing they
 want and would otherwise be a second `Cmd/Ctrl+F`.
@@ -1390,12 +1568,12 @@ Three details are load-bearing:
   retrying on the next render otherwise, bounded by `MAX_LANDING_REVEALS` so a
   match the band can never contain cannot re-scroll indefinitely.
 
-**A markdown file in view mode is the one result that opens without landing** —
+**A markdown file's preview is the one result that opens without landing** —
 it has no offsets once rendered as prose, which is exactly why `findable` is
 false there, and there the click is simply "open this file" (the browser's own
 find still works on what is painted). Being a *condition* on the derivation
 rather than a discard, it resolves itself the moment there is something to point
-at: pressing Edit on that file makes it source again, and the landing lands.
+at: switching that file to Source makes it findable, and the landing lands.
 
 ### Gates
 
@@ -1643,13 +1821,16 @@ to follow in one step:
   the surviving pane to `'left'` mid-loop.
 
 Both go through `FilesView`'s existing `commit()`, never a hand-rolled
-`TabsState` write — which has one consequence worth stating: `commit()` drops the
-`FileUiState` of every path no longer open, and it is keyed **by path**, so a
-renamed file's tab survives while its per-tab UI state (edit draft, edit mode,
-open History, selected commit) does not. `ContentPane`'s `key={path}` remounts it
-and re-fetches under the new name, in view mode. A rename therefore discards an
-unsaved draft in that file unprompted, unlike the tab's own × (task 809) — the
-rename box is not one of the four exits the dirty dot covers.
+`TabsState` write. `commit()` drops the `FileUiState` of every path no longer
+open, and it is keyed **by path**, so `submitRename` re-keys the state of the
+renamed path (and, for a directory, of everything under it) onto the new path
+in the update just before the tabs move (naru task 2743). A renamed file's
+draft, Preview/Source choice and open History therefore follow it:
+`ContentPane`'s `key={path}` remounts and re-fetches under the new name, and the
+unsaved text is still there. (Until that task the state was dropped, which
+discarded an unsaved draft unprompted — tolerable when a draft was a mode
+someone had entered, not when every open file can hold one.) A destination that
+already has state of its own keeps it.
 
 ### The gate
 
@@ -1730,11 +1911,13 @@ column.
 
 Two limits are deliberate:
 
-- **The table is the read view; editing still shows raw text.** The `editing`
-  branch wins first in the content pane's ternary, so pressing Edit on a `.csv`
-  gives the same code editor, syntax colouring and Save/Cancel as any other text
-  file, and saving or cancelling comes back to the table. There is no cell
-  editing, and `editable` (`!is_binary && !truncated`) is unchanged. A table
+- **The table is the preview; Source still shows raw text.** A delimited file
+  is one of the rendered types (naru task 2743): it opens as the table, and the
+  header's Source toggle gives the same code editor and Save as any other text
+  file (the `showEditor` branch wins first in the content pane's ternary);
+  Preview comes back to the table, parsed from the draft once there is one.
+  There is no cell editing, and `editable` is `!is_binary && !truncated` as it
+  was (held true, too, while a draft is unsaved). A table
   that could be typed into is a different feature with its own questions —
   quoting on write, what a ragged row means, what happens to a file the parse
   disagreed with.
@@ -1772,15 +1955,16 @@ column's own `gap` is what separates the table from the header block above it.
 
 The find bar is **not** offered over the table, the same exclusion markdown
 already carries and for the same reason: it matches offsets into `data.content`
-and reveals them by line, and a table shows no lines. In edit mode the file is
-source again and is findable like anything else.
+and reveals them by line, and a table shows no lines. In Source the file is
+text again and is findable like anything else.
 
 ## Rendered HTML (mesa task 1249)
 
-A `.html`/`.htm` file gets the treatment `.md` already had: the **view** mode
-renders the page, **Edit** shows the raw source in the `CodeEditor` (the
-`editing` branch runs before every content branch, so this needed no change),
-and Save or Cancel comes back to the rendered view.
+A `.html`/`.htm` file gets the treatment `.md` already had: it opens as the
+rendered page (its **Preview**), the header's **Source** toggle shows the raw
+source in the `CodeEditor` (the `showEditor` branch runs before every content
+branch), and Preview comes back to the rendered page — rendering the draft once
+there is one, saved or not.
 
 The branch is keyed on the **path's final extension**
 (`frontend/src/fileHtml.ts`'s `isHtmlDocumentPath`), never on
@@ -1801,10 +1985,10 @@ rewrites a markdown image src.
 
 Truncation is markdown's handling exactly: the header's `truncated` badge is
 the whole statement and `editable` is already false there, so a capped document
-renders as far as its bytes got. The find bar is **not** offered over it in view
-mode — the same exclusion markdown and the CSV table carry, for the same reason
+renders as far as its bytes got. The find bar is **not** offered over the
+preview — the same exclusion markdown and the CSV table carry, for the same reason
 (a rendered page has no offsets into `data.content`, and here it is inside a
-frame this page cannot even read); in edit mode it is source again and findable
+frame this page cannot even read); in Source it is text again and findable
 like anything else.
 
 ## Uploading files into the tree (naru task 2732)
@@ -1926,11 +2110,11 @@ only wires them. The name rules are `newFile.ts`'s `newFilePath`, reused.
   (where the API is missing every entry is treated as a file, and a folder then
   fails at read time with its own message) and the summary says "Folders cannot
   be dropped yet." Files dropped alongside still upload.
-- **Replacing an open file.** The watch stream refetches tree levels only, not
-  open content, so a confirmed replace bumps a per-path counter that is part of
+- **Replacing an open file.** A confirmed replace does not wait for the watch
+  stream: it bumps a per-path counter that is part of
   that tab's content fetch key (`ContentPane`'s `reload`) and the bytes are
-  re-read. An unsaved draft in that file is **discarded** and the tab leaves
-  edit mode: the person answered "Replace", and a draft kept would write over
+  re-read. An unsaved draft in that file is **discarded** (`NO_DRAFT`), not
+  offered as a conflict: the person answered "Replace", and a draft kept would write over
   the upload on the next save.
 - **A batch belongs to one project.** `FilesView` stays mounted across a project
   switch, so a run counter (`uploadRun`) is bumped when `projectId` changes or

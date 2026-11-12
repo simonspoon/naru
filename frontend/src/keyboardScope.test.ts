@@ -283,3 +283,54 @@ describe('shouldIgnoreFilesShortcut', () => {
     expect(ignoresSearch(document.getElementById('t')!)).toBe(true)
   })
 })
+
+/** A real keydown asked about one of the editor chords (naru task 2743). */
+function ignoresChord(chord: 'replace' | 'goto', target: Element) {
+  let seen: boolean | undefined
+  const handler = (e: Event) => {
+    seen = shouldIgnoreFilesShortcut(e as KeyboardEvent, chord)
+  }
+  document.addEventListener('keydown', handler)
+  target.dispatchEvent(new KeyboardEvent('keydown', { key: 'g', ctrlKey: true, bubbles: true }))
+  document.removeEventListener('keydown', handler)
+  if (seen === undefined) throw new Error('keydown never reached document')
+  return seen
+}
+
+describe('shouldIgnoreFilesShortcut — replace and go to line', () => {
+  const fields = `
+    <div class="files-content-editor" contenteditable="true" id="editor"></div>
+    <input class="files-find-input" id="find" />
+    <input class="files-find-input files-replace-input" id="replace" />
+    <input class="files-goto-input" id="goto" />
+    <input class="files-new-file-input" id="other" />`
+  const at = (id: string) => document.getElementById(id)!
+
+  it('claims both from the code editor', () => {
+    document.body.innerHTML = fields
+    expect(ignoresChord('replace', at('editor'))).toBe(false)
+    expect(ignoresChord('goto', at('editor'))).toBe(false)
+  })
+
+  it('claims replace from the find bar\'s two boxes, and find from the replace box', () => {
+    document.body.innerHTML = fields
+    expect(ignoresChord('replace', at('find'))).toBe(false)
+    expect(ignoresChord('replace', at('replace'))).toBe(false)
+    expect(ignoresFind(at('replace'))).toBe(false)
+  })
+
+  it('claims go to line from its own prompt only', () => {
+    document.body.innerHTML = fields
+    expect(ignoresChord('goto', at('goto'))).toBe(false)
+    expect(ignoresChord('goto', at('find'))).toBe(true)
+    expect(ignoresChord('replace', at('goto'))).toBe(true)
+  })
+
+  it('stands down in any other field, and under a modal', () => {
+    document.body.innerHTML = fields
+    expect(ignoresChord('replace', at('other'))).toBe(true)
+    expect(ignoresChord('goto', at('other'))).toBe(true)
+    document.body.innerHTML = fields + '<div class="create-task-backdrop"></div>'
+    expect(ignoresChord('goto', at('editor'))).toBe(true)
+  })
+})

@@ -36,6 +36,7 @@ import {
 import {
   closeLabel,
   dirtyPaths,
+  diskChange,
   isDirty,
   needsCloseConfirm,
   splitBulkClose,
@@ -51,7 +52,6 @@ import {
   saveFilesTreeWidth,
 } from '../filesTreeWidth'
 import {
-  carriedOffset,
   gutterText,
   lineAtScroll,
   lineCount,
@@ -62,10 +62,12 @@ import {
 } from '../editorStatus'
 import {
   anchorAfterStep,
+  applyEdits,
   boxNeedsReveal,
   findMatches,
   matchIndexFrom,
   matchLabel,
+  replaceEdits,
   scrollLeftForBox,
   stepMatch,
   type FindMatch,
@@ -77,6 +79,8 @@ import {
   snippetSegments,
 } from '../fileSearch'
 import { shouldIgnoreFilesShortcut } from '../keyboardScope'
+import { goToOffset } from '../goToLine'
+import { stashDrafts, stashedDrafts } from '../fileDrafts'
 import { loadWordWrap, saveWordWrap } from '../wordWrap'
 import { onNarrowTierChange, useNarrowTier } from '../phoneTier'
 import { CodeEditor, type CodeEditorHandle } from '../components/CodeEditor'
@@ -388,24 +392,44 @@ function DeadFolderPlaceholder({ path }: { path: string }) {
  *
  * Before tabs there was one open file and `ContentPane` was
  * `key={selectedPath}`-remounted, which meant this state simply died with the
- * old file. That is still the right answer for *closing* a tab or switching
- * project — but flipping to another tab and back is a navigation, and a
- * navigation that silently ate a half-typed edit would be a bug. So it is
- * lifted into `FilesView`, keyed by path, and this component is controlled.
+ * old file. That is still the right answer for *closing* a tab — but flipping
+ * to another tab and back is a navigation, and a navigation that silently ate
+ * a half-typed edit would be a bug. So it is lifted into `FilesView`, keyed by
+ * path, and this component is controlled. (Leaving the Files tab or switching
+ * project keeps it too, in `fileDrafts.ts`.)
  *
  * Deliberately not lifted: `saving`/`downloading`/`saveError`, which describe
  * one in-flight request rather than the file, and which the pane has to be
  * mounted to show.
  */
 interface FileUiState {
+  /** Whether this path has a draft at all (naru task 2743). There is no edit
+   * mode: the first keystroke in the editor sets this, with `draft` and
+   * `baseline`; until then the pane shows the fetched content. See
+   * `fileDirty.ts::DraftState`. */
   editing: boolean
   draft: string
-  /** The file's bytes as they were when this draft started — and again after a
-   * successful save (task 809, slice 4). Kept beside the draft rather than
-   * compared against the fetched content, because the tab strip that has to
-   * paint the unsaved-changes dot lives two components above the only one
-   * holding that response: `fileDirty.ts` can answer from this pair alone. */
+  /** The file on disk as this draft last knew it — when it started, after a
+   * successful save, and after "Keep mine" (task 809, slice 4; naru task
+   * 2743). Kept beside the draft rather than compared against the fetched
+   * content, because the tab strip that has to paint the unsaved-changes dot
+   * lives two components above the only one holding that response:
+   * `fileDirty.ts` can answer from this pair alone. */
   baseline: string
+  /** A rendered type (markdown, HTML, a table, an SVG) showing its source in
+   * the editor instead of its preview (naru task 2743). Per path, so it
+   * survives a tab switch like the draft does. */
+  source: boolean
+  /** The file's content (LF) at the last read of the disk this draft was
+   * reconciled against, or null before the first — and the text of the last
+   * save, a beat before the refetch that follows one lands. Here rather than
+   * in the pane because the same path can be mounted in both halves of a
+   * split: two copies would disagree for as long as one pane's fetch lags,
+   * and one of them would report a conflict that is the other's save. */
+  seenDisk: string | null
+  /** How many saves this path has completed. A read that set out before the
+   * latest one describes a disk that no longer exists and is not reconciled. */
+  saves: number
   historyOpen: boolean
   /** The commit shown as a diff in place of the content, if any. */
   selectedCommit: GitCommit | null
@@ -415,9 +439,41 @@ const BLANK_FILE_UI: FileUiState = {
   editing: false,
   draft: '',
   baseline: '',
+  source: false,
+  seenDisk: null,
+  saves: 0,
   historyOpen: false,
   selectedCommit: null,
 }
+
+/** How often a mounted file is re-read from disk, as the backstop under the
+ * watch stream (see `ContentPane`). */
+const OPEN_FILE_POLL_MS = 3000
+
+/** What a save says when it will not write over a change it has not been
+ * told to: the "changed on disk" bar holds the two answers. */
+const CHANGED_ON_DISK = 'This file changed on disk. Choose "Reload" or "Keep mine" first.'
+
+/** The patch that drops a path's draft: the pane shows the disk again. */
+const NO_DRAFT = { editing: false, draft: '', baseline: '' }
+
+/** A write to one path's state: a patch, or a decision made against the
+ * *latest* state (null = write nothing). The second form is for anything
+ * decided outside a render — a fetch landing — where the state closed over
+ * may be a keystroke old. */
+type UiPatch =
+  | Partial<FileUiState>
+  | ((prev: FileUiState) => Partial<FileUiState> | null)
+
+/** A burst of changes on disk, from the watch stream: which directories
+ * (project-relative, `''` the root; null = unknown, treat as all), and a
+ * number that makes each burst a new value. */
+interface DiskChange {
+  seq: number
+  dirs: string[] | null
+}
+
+const IS_MAC = typeof navigator !== 'undefined' && /Mac|iP(hone|ad|od)/.test(navigator.platform)
 
 /**
  * The find bar's whole state (task 809, slice 3).
@@ -441,6 +497,13 @@ interface FindState {
   query: string
   caseSensitive: boolean
   wholeWord: boolean
+  /** The query is a regular expression (naru task 2743). Off by default: a
+   * query is typing until the user says it is a pattern. */
+  regex: boolean
+  /** The replace row, and what it holds (naru task 2743). Only ever shown
+   * over the editor. */
+  replaceOpen: boolean
+  replacement: string
   /** Index into the current match list, or -1 for none. */
   index: number
   anchor: number
@@ -471,6 +534,9 @@ const BLANK_FIND: FindState = {
   query: '',
   caseSensitive: false,
   wholeWord: false,
+  regex: false,
+  replaceOpen: false,
+  replacement: '',
   index: -1,
   anchor: 0,
   autoFocus: true,
@@ -501,11 +567,15 @@ interface SearchLanding {
   wholeWord: boolean
 }
 
-/** The selected file's content: monospace, with a language-tinted header,
- * binary/truncation indicators in place of raw/garbled bytes (M5/M6), and an
- * Edit affordance (task 327) for anything neither binary nor truncated — a
- * truncated file's displayed bytes aren't its full content, so saving them
- * back would corrupt it; the same reason the API itself refuses that write. */
+/** The selected file's content: monospace, with a language-tinted header and
+ * binary/truncation indicators in place of raw/garbled bytes (M5/M6).
+ *
+ * A text file that is neither binary nor truncated opens **in the editor**
+ * (naru task 2743) — there is no edit mode to enter or leave. A truncated
+ * file's displayed bytes aren't its full content, so saving them back would
+ * corrupt it (the same reason the API itself refuses that write); it and a
+ * binary stay read-only. The rendered types (markdown, HTML, a delimited
+ * table, an SVG) open as their preview, with the editor one toggle away. */
 function ContentPane({
   projectId,
   path,
@@ -517,11 +587,14 @@ function ContentPane({
   landing,
   imageZoom,
   reload,
+  changed,
+  focusSeq,
+  onFocusTaken,
 }: {
   projectId: number
   path: string
   ui: FileUiState
-  onUi: (patch: Partial<FileUiState>) => void
+  onUi: (patch: UiPatch) => void
   /** Soft wrap — one preference for the whole tab, owned by `FilesView` and
    * persisted there, so both panes and every tab agree on it. */
   wrap: boolean
@@ -539,22 +612,93 @@ function ContentPane({
   /** Bumped when an upload replaces this file on disk (naru task 2732); part
    * of the fetch key, so the bytes on screen are re-read. */
   reload: number
+  /** The watch stream's latest burst (naru task 2743): this file is re-read
+   * when its directory is in it. */
+  changed: DiskChange | null
+  /** Non-zero when the person just opened or switched to this file here, and
+   * the editor should take the caret — once per number. Zero on a page load, a
+   * search-result landing and the phone tier, where it must not. */
+  focusSeq: number
+  /** The editor took the caret for `focusSeq`: the request is spent. */
+  onFocusTaken: () => void
 }) {
-  const { data, error, refetch } = useFetch(
-    () => getProjectFilesContent(projectId, path),
-    `files-content-${projectId}-${path}-${reload}`,
-  )
+  // What a landing fetch checks before it is reconciled against the draft:
+  // that this pane is still mounted, still showing the file the request was
+  // for (the pane is keyed by path, so a project switch reuses it), and that
+  // no save has completed since the request set out (`FileUiState.saves`).
+  const fetchKey = `files-content-${projectId}-${path}-${reload}`
+  // `ui` rides along for the one caller that outlives its render: a save,
+  // which has to look at the draft again after its own pre-read.
+  const live = useRef({ alive: true, key: fetchKey, saves: ui.saves, ui })
+  useLayoutEffect(() => {
+    live.current = { alive: true, key: fetchKey, saves: ui.saves, ui }
+    return () => {
+      live.current.alive = false
+    }
+  })
+  // Reads of one file can overlap (window focus, the watch stream, a save's
+  // refetch) and land out of order. A response that set out before one already
+  // applied describes an older disk: it must neither be reconciled — it could
+  // retract a conflict the newer read raised — nor shown, so it resolves to
+  // the newer response instead.
+  const loads = useRef<{
+    key: string
+    started: number
+    landed: number
+    data: Awaited<ReturnType<typeof getProjectFilesContent>> | null
+  }>({ key: fetchKey, started: 0, landed: 0, data: null })
+  const { data, error, refetch } = useFetch(() => {
+    const { key, saves } = live.current
+    if (loads.current.key !== key) loads.current = { key, started: 0, landed: 0, data: null }
+    const order = loads.current
+    const seq = ++order.started
+    return getProjectFilesContent(projectId, path).then((d) => {
+      if (seq < order.landed) return order.data ?? d
+      order.landed = seq
+      order.data = d
+      if (live.current.alive && live.current.key === key) {
+        reconcile(normalizeNewlines(d.content), saves)
+      }
+      return d
+    })
+    // Polled as well as watched. The watch stream is what makes a change
+    // show at once, but on macOS a single in-place write is delivered late
+    // or folded into the next one, and "reload it, or tell me it changed"
+    // has to hold for the file on screen either way. An identical read
+    // changes nothing (`useFetch`), and a hidden tab does not poll.
+  }, fetchKey, { pollMs: OPEN_FILE_POLL_MS })
+
+  /** A fresh read of the file, against this path's draft (`diskChange`): a
+   * clean draft is dropped so the pane shows the disk, and unsaved work is
+   * left exactly as typed — the "Changed on disk" bar below is derived from
+   * `seenDisk` and asks. Decided in the updater, against the latest state: a
+   * keystroke, or a save, may have landed since this render. */
+  function reconcile(disk: string, saves: number) {
+    onUi((prev) => {
+      if (prev.saves !== saves) return null
+      const reload = diskChange(prev, disk) === 'reload'
+      if (!reload && prev.seenDisk === disk) return null
+      return reload ? { ...NO_DRAFT, seenDisk: disk } : { seenDisk: disk }
+    })
+  }
+
+  // A change on disk in this file's directory: read it again. Not a new fetch
+  // key — that would blank the pane and remount the editor.
+  useEffect(() => {
+    if (changed === null) return
+    if (changed.dirs === null || changed.dirs.includes(dirname(path))) void refetch()
+  }, [changed, path, refetch])
   // In-flight state for one save, and the error it may leave behind — the only
   // two the tab does not carry (see `FileUiState`).
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
   const [downloading, setDownloading] = useState(false)
-  /** Which way out of edit mode is waiting on the unsaved-changes prompt, if
-   *  either: `discard` throws the edits away, `keep` only leaves the editor.
-   *  Named rather than a boolean because the bar has to say which it is. */
-  const [pendingLeave, setPendingLeave] = useState<'discard' | 'keep' | null>(
-    null,
-  )
+  /** "Revert file" pressed over unsaved work, waiting on its confirm. */
+  const [pendingRevert, setPendingRevert] = useState(false)
+  /** The go-to-line prompt in the status bar (naru task 2743). */
+  const [gotoOpen, setGotoOpen] = useState(false)
+  /** What the last Replace all did, said beside its button. */
+  const [replaceNote, setReplaceNote] = useState<string | null>(null)
   // The caret the status bar reports (task 809). Local, and not in
   // `FileUiState`: it describes where one live editor's cursor is, so it dies
   // with the mounted editor exactly as `saving` does. A freshly opened editor
@@ -568,6 +712,7 @@ function ContentPane({
   const [consumedLanding, setConsumedLanding] = useState<number | null>(null)
   const editorRef = useRef<CodeEditorHandle>(null)
   const findInputRef = useRef<HTMLInputElement>(null)
+  const replaceInputRef = useRef<HTMLInputElement>(null)
   const contentRef = useRef<HTMLDivElement>(null)
   // Armed by `reveal` in view mode and consumed by the effect that measures the
   // mark — a flag rather than a dependency list, for the reason stated at both.
@@ -582,41 +727,66 @@ function ContentPane({
   // Everything below is computed before the early returns, because hooks are:
   // `data` is still loading on the first renders, and a search over "" is a
   // search with no matches, which is exactly the right answer then.
-  const searchText = ui.editing ? ui.draft : (data?.content ?? '')
-  // Where a search is even meaningful: over text this pane is showing *as
-  // text*. A binary or an image has no offsets; a commit's diff is another
-  // revision's bytes, not these; and a markdown file in view mode is rendered
-  // prose whose paragraphs no longer correspond to source offsets — there the
-  // key is deliberately left to the browser's own find, which works on exactly
-  // what is painted. An HTML document in view mode is the same case one step
-  // further (mesa task 1249): it is a rendered page, and inside a sandboxed
-  // frame at that, so there are no offsets here to point at. In edit mode
-  // either one is source again, so it is findable like anything else.
+  // The file as the editor holds it: the draft once there is one, else the
+  // disk's content, LF either way (`normalizeNewlines` — CodeMirror reports
+  // every offset against the LF form). `viewText` is the same thing for the
+  // read-only renders, which show the bytes as fetched until a draft exists.
+  const disk = useMemo(() => normalizeNewlines(data?.content ?? ''), [data])
+  const draft = ui.editing ? ui.draft : disk
+  const viewText = ui.editing ? ui.draft : (data?.content ?? '')
+  const dirtyNow = isDirty(ui)
+  // What may be typed in: text the server sent whole. Unsaved work keeps the
+  // editor even if the file on disk has since become something that would not
+  // have opened in one — the draft is the person's, and hiding it is losing it.
+  const editable = data != null && ((!data.is_binary && !data.truncated) || dirtyNow)
   // The delimiter this file's language tag calls for, or null when it is not
   // one of the tabular kinds — server-derived, never sniffed (`fileCsv.ts`).
   const csvDelimiter = delimiterFor(data?.language ?? null)
+  // The types with a rendered view. Decided by what the file *is*, never by
+  // what its text currently parses to, so typing cannot flip the pane between
+  // the editor and a preview.
+  const renderable =
+    data != null &&
+    (isImagePath(data.path) ||
+      data.language === 'markdown' ||
+      isHtmlDocumentPath(data.path) ||
+      csvDelimiter !== null)
+  /** Whether the body is the editor: an editable file, and for a rendered
+   * type only once its Source toggle is on. */
+  const showEditor = editable && (!renderable || ui.source)
+  /** ...and actually on screen — a picked commit's diff takes its place. */
+  const editorUp = showEditor && ui.selectedCommit === null
+  const searchText = showEditor ? draft : viewText
   /**
    * The parsed table, or null when this file is not rendered as one — either it
    * is not tabular, or the text has no table in it (`parseDelimited`'s
-   * degenerate cases), in which case the pane falls back to the plain text
+   * degenerate cases), in which case the preview falls back to the plain text
    * render below. Computed here rather than inside `CsvBody` because two
    * things need the answer: which branch of `body` runs, and whether the find
-   * bar has offsets to point at.
+   * bar has offsets to point at. Not parsed while the editor is up.
    */
   const csvTable = useMemo(
     () =>
-      csvDelimiter === null || data == null || data.is_binary
+      csvDelimiter === null || data == null || data.is_binary || showEditor
         ? null
-        : parseDelimited(data.content, csvDelimiter, MAX_CSV_ROWS),
-    [csvDelimiter, data],
+        : parseDelimited(viewText, csvDelimiter, MAX_CSV_ROWS),
+    [csvDelimiter, data, showEditor, viewText],
   )
+  // Where a search is even meaningful: over text this pane is showing *as
+  // text*. A binary or an image has no offsets; a commit's diff is another
+  // revision's bytes, not these; and a markdown file's preview is rendered
+  // prose whose paragraphs no longer correspond to source offsets — there the
+  // key is deliberately left to the browser's own find, which works on exactly
+  // what is painted. An HTML document's preview is the same case one step
+  // further (mesa task 1249): it is a rendered page, and inside a sandboxed
+  // frame at that. In the editor any of them is source, and findable.
   const findable =
     data != null &&
-    !data.is_binary &&
-    !isImagePath(data.path) &&
     ui.selectedCommit === null &&
-    (ui.editing ||
-      (data.language !== 'markdown' &&
+    (showEditor ||
+      (!data.is_binary &&
+        !isImagePath(data.path) &&
+        data.language !== 'markdown' &&
         !isHtmlDocumentPath(data.path) &&
         csvTable === null))
   /**
@@ -633,8 +803,8 @@ function ContentPane({
    * And it needs the file to be **findable**: a binary, an image or markdown
    * rendered as prose has no offsets to point at, so there the click is just
    * "open this file". That is a condition rather than a discard, which has one
-   * consequence worth naming: pressing Edit on a markdown file opened from a
-   * result makes it source again, and the landing takes effect then — the
+   * consequence worth naming: switching a markdown file opened from a result
+   * to Source makes it findable, and the landing takes effect then — the
    * first moment there is something to point at.
    */
   const landingActive =
@@ -659,11 +829,15 @@ function ContentPane({
         query: landing.query,
         caseSensitive: landing.caseSensitive,
         wholeWord: landing.wholeWord,
+        // The panel's search is literal; the replace row is the person's own.
+        regex: false,
+        replaceOpen: findState.replaceOpen,
+        replacement: findState.replacement,
         index: -1,
         // The line becomes an anchor through the same function the status bar
         // counts lines with — so "which match" is `matchIndexFrom`'s ordinary
         // answer rather than a second rule about landings.
-        anchor: offsetForLine(ui.editing ? ui.draft : (data?.content ?? ''), landing.line),
+        anchor: offsetForLine(searchText, landing.line),
       }
     : findState
   /** Every write to the bar — typing, a toggle, a step, a close — and the one
@@ -671,28 +845,31 @@ function ContentPane({
    * has said where they are now, so the panel's answer stops overriding it. */
   function setFind(next: FindState | ((prev: FindState) => FindState)) {
     // An updater resolves against the *derived* state, not the stored one:
-    // crossing into or out of edit mode while a landing is showing means
-    // taking that landing over, and `{...f}` there has to be what is on
-    // screen.
+    // `{...f}` there has to be what is on screen.
     setFindState(typeof next === 'function' ? next(find) : next)
     setConsumedLanding(landing?.seq ?? null)
   }
   // Whether the bar is actually *up*, which is what every reader below wants —
-  // `find.open` alone is not it. The two part company on their own: cancelling
-  // an edit turns a markdown file back into rendered prose, which is not
-  // findable, and the flag would otherwise stay set behind a bar that is no
-  // longer rendered. Deriving it once is what keeps the render, the Escape
+  // `find.open` alone is not it. The two part company on their own: switching
+  // a markdown file from Source back to Preview makes it rendered prose, which
+  // is not findable, and the flag would otherwise stay set behind a bar that is
+  // no longer rendered. Deriving it once is what keeps the render, the Escape
   // routing and the highlights from each answering that question differently.
   const findOpen = findable && find.open
   // A closed bar searches for nothing, which is how the highlights go away
   // without a second flag deciding whether to paint them.
-  const { matches, capped } = useMemo(
+  const {
+    matches,
+    capped,
+    error: findError,
+  } = useMemo(
     () =>
       findMatches(searchText, findOpen ? find.query : '', {
         caseSensitive: find.caseSensitive,
         wholeWord: find.wholeWord,
+        regex: find.regex,
       }),
-    [searchText, findOpen, find.query, find.caseSensitive, find.wholeWord],
+    [searchText, findOpen, find.query, find.caseSensitive, find.wholeWord, find.regex],
   )
   // Clamped rather than trusted: the list shrinks under the index every time
   // the query grows a character. A landing has no index to clamp — it has a
@@ -715,10 +892,11 @@ function ContentPane({
     const { matches: found } = findMatches(searchText, next.query, next)
     const index = matchIndexFrom(found, next.anchor, forward)
     setFind({ ...next, index })
+    setReplaceNote(null)
     reveal(found[index])
   }
 
-  /** Show a match. Editing, the editor does it; in view mode the work is the
+  /** Show a match. In the editor, the editor does it; in a viewer the work is the
    * effect below, because the highlight to measure does not exist in the DOM
    * until React has painted the new `current`.
    *
@@ -738,7 +916,7 @@ function ContentPane({
    * over. */
   function reveal(match: FindMatch | undefined) {
     if (match === undefined) return
-    if (ui.editing) editorRef.current?.reveal(match.start, match.end)
+    if (showEditor) editorRef.current?.reveal(match.start, match.end)
     else pendingReveal.current = true
   }
 
@@ -792,7 +970,7 @@ function ContentPane({
    * calculated when wrap is on. Landing at the top is a worse anchor; landing
    * past what you were reading is a wrong one. */
   function findAnchor(): number {
-    if (ui.editing) return editorRef.current?.caretOffset() ?? 0
+    if (showEditor) return editorRef.current?.caretOffset() ?? 0
     const content = contentRef.current
     const code = content?.querySelector<HTMLElement>('.files-code-main')
     // `.files-content` is the scrolling pane body's only child (`FilePane`), so
@@ -819,7 +997,7 @@ function ContentPane({
     // (`tabIndex={-1}`, focusable only programmatically) and Tab carries on
     // from the file the user was reading. `preventScroll` because this is a
     // hand-back, not a reveal — the pane is already where the reader left it.
-    if (ui.editing) editorRef.current?.focus()
+    if (showEditor) editorRef.current?.focus()
     else contentRef.current?.focus({ preventScroll: true })
   }
 
@@ -833,42 +1011,88 @@ function ContentPane({
     reveal(matches[index])
   }
 
-  /** Carry the match the bar is showing across the Edit/Cancel crossing into
-   * `next`, the string the other mode searches (task 879).
-   *
-   * The crossing used to reset the bar to `index: -1, anchor: 0`, because the
-   * two strings are not offset-for-offset each other — the draft is the file's
-   * bytes LF-normalised, so in a CRLF file every offset the bar holds is one
-   * character per preceding line out. That was correct about the offsets and
-   * wrong about the reader: pressing Edit on the match you just found dropped
-   * you at line 1 of the file with the counter still claiming a match, which is
-   * "the counter says N and the view sat still" — the failure the whole reveal
-   * machinery exists to prevent, arrived at from the one direction nothing was
-   * watching.
-   *
-   * So the offsets are *translated* rather than discarded (`carriedOffset`,
-   * through the line/column the two dialects agree on), and the index is the
-   * ordinary `matchIndexFrom` answer for that anchor over the new string —
-   * never the old index, which the other text has no reason to agree with. The
-   * reveal is armed rather than performed for the same reason a step's is: the
-   * editor is not mounted, and the mark to measure is not in the DOM, until
-   * React has rendered the mode being crossed into.
-   *
-   * With no match to carry (bar closed, empty query, nothing found) this is the
-   * old reset, which is what a bar with nothing selected should be. */
-  function carryFind(next: string) {
-    const held = matches[current]
-    if (held === undefined) {
-      setFind((f) => ({ ...f, index: -1, anchor: 0 }))
+  /** Cmd/Ctrl+Alt+F (and Ctrl+H off macOS), or the bar's own toggle: the
+   * replace row, over the editor only. Opening the bar with it puts the caret
+   * in the query, as Cmd/Ctrl+F does; on a bar already up it goes to the
+   * replacement — `FindBar` moves it there as the row appears, and the direct
+   * call covers a row that was already showing. */
+  function openReplace() {
+    if (!findOpen) {
+      runFind(
+        { ...find, open: true, replaceOpen: true, autoFocus: true, anchor: findAnchor() },
+        true,
+      )
       return
     }
-    const anchor = carriedOffset(searchText, held.start, next)
-    const { matches: found } = findMatches(next, find.query, find)
-    setFind((f) => ({ ...f, index: matchIndexFrom(found, anchor, true), anchor }))
-    pendingReveal.current = true
+    // `index: current` on every write that is not a search: over a landing the
+    // derived state has no index of its own, and writing its -1 back would
+    // drop the match the reader was shown.
+    setFind({ ...find, replaceOpen: true, index: current })
+    replaceInputRef.current?.focus()
   }
 
-  // The one keystroke the Files tab takes off the browser. Scoped three ways
+  /** Replace the match the bar is on, then step to the next one — found in
+   * the text as it is *after* the edit, from just past what was put in, so a
+   * replacement that itself matches the query is not replaced again. */
+  function replaceCurrent() {
+    const match = matches[current]
+    if (!showEditor || match === undefined) return
+    const { edits } = replaceEdits(searchText, find.query, find.replacement, find, match)
+    if (edits.length === 0) return
+    editorRef.current?.applyEdits(edits)
+    const anchor = edits[0].start + edits[0].text.length
+    const { matches: found } = findMatches(applyEdits(searchText, edits), find.query, find)
+    const index = matchIndexFrom(found, anchor, true)
+    setFind({ ...find, index, anchor })
+    setReplaceNote(null)
+    const next = found[index]
+    if (next !== undefined) editorRef.current?.reveal(next.start, next.end)
+  }
+
+  /** Replace every match — all of them, past the 2000 the bar will highlight
+   * (`replaceEdits`) — as one editor transaction, so one undo restores the
+   * file. The count said afterwards is the real one. */
+  function replaceEverything() {
+    if (!showEditor) return
+    const { edits, error } = replaceEdits(searchText, find.query, find.replacement, find)
+    if (error !== undefined) {
+      setReplaceNote('Invalid regex')
+      return
+    }
+    if (edits.length === 0) {
+      setReplaceNote('Nothing to replace')
+      return
+    }
+    editorRef.current?.applyEdits(edits)
+    setFind({ ...find, index: -1 })
+    setReplaceNote(`Replaced ${edits.length}`)
+  }
+
+  /** The go-to-line prompt's Enter: jump, and hand the caret to the code.
+   * Input that is not a position leaves the prompt up to be corrected. */
+  function goTo(input: string) {
+    const offset = goToOffset(draft, input)
+    if (offset === null) return
+    setGotoOpen(false)
+    editorRef.current?.reveal(offset, offset)
+    editorRef.current?.focus()
+  }
+
+  // The editor takes the caret when the person opens or switches to this file
+  // (`focusSeq`), once per request: taking it clears the request, so a later
+  // remount of this file, or a click on this pane's own find bar, is not
+  // answered by the caret jumping into the code. No dependency list: the
+  // editor mounts when the fetch lands, which is no value this could name.
+  useEffect(() => {
+    if (focusSeq === 0 || !editorUp || editorRef.current === null) return
+    editorRef.current.focus()
+    onFocusTaken()
+  })
+
+  // The keystrokes the Files tab takes off the browser: Cmd/Ctrl+F, and over
+  // the editor Cmd/Ctrl+Alt+F (replace; also Ctrl+H off macOS, where that
+  // chord is not the editor's own delete-backward) and Ctrl+G (go to line —
+  // Ctrl on every platform, since Cmd+G is the browser's find-next). Scoped three ways
   // before it is claimed: this pane must be the focused one, the file must be
   // findable at all, and `shouldIgnoreFilesShortcut` must agree the caret is not
   // somewhere with a better claim (a task modal's field, the tree's naming
@@ -881,18 +1105,37 @@ function ContentPane({
   useEffect(() => {
     if (!focused || !findable) return
     const onKey = (e: KeyboardEvent) => {
-      // Escape closes the bar from anywhere in view mode, not only from the
+      // Escape closes the bar from anywhere over a viewer, not only from the
       // query box: the option and step buttons are focusable, and clicking one
-      // used to leave the key answered by nothing at all. In edit mode the
-      // editor's own `onCancel` already routes it by precedence (find first,
-      // then discard) and this must not race that.
-      if (e.key === 'Escape' && findOpen && !ui.editing) {
+      // used to leave the key answered by nothing at all. Over the editor its
+      // own `onCancel` already closes the bar and this must not race that.
+      if (e.key === 'Escape' && findOpen && !showEditor) {
         if (shouldIgnoreFilesShortcut(e, 'find')) return
         e.preventDefault()
         closeFind()
         return
       }
-      if (!(e.metaKey || e.ctrlKey) || e.altKey) return
+      const mod = e.metaKey || e.ctrlKey
+      if (showEditor && !e.shiftKey && !e.getModifierState('AltGraph')) {
+        const plain = e.ctrlKey && !e.metaKey && !e.altKey
+        if (plain && (e.key === 'g' || e.key === 'G')) {
+          if (shouldIgnoreFilesShortcut(e, 'goto')) return
+          e.preventDefault()
+          setGotoOpen(true)
+          return
+        }
+        // `code`, not `key`: Alt+F on macOS *is* the character `ƒ`.
+        if (
+          (mod && e.altKey && e.code === 'KeyF') ||
+          (!IS_MAC && plain && (e.key === 'h' || e.key === 'H'))
+        ) {
+          if (shouldIgnoreFilesShortcut(e, 'replace')) return
+          e.preventDefault()
+          openReplace()
+          return
+        }
+      }
+      if (!mod || e.altKey) return
       // Cmd/Ctrl+**Shift**+F is "find in files" everywhere it is bound, and on
       // some setups a browser or extension chord — swallowing it to open the
       // in-file bar is claiming a key this tab was never offered.
@@ -947,18 +1190,17 @@ function ContentPane({
   // to handle. `revealedLanding` is the once-per-`seq` guard; a second click on
   // the same result is a new `seq` and reveals again, while an unrelated
   // re-render (a keystroke elsewhere, a resize) is the same one and does not.
-  // Editing, there is no mark to measure and the editor does it, which is the
-  // one branch that leaves this effect early.
+  // Over the editor there is no mark to measure and the editor does it, which
+  // is the one branch that leaves this effect early.
   useEffect(() => {
     const landed =
       landingActive && current >= 0 && revealedLanding.current !== landing.seq
     if (!pendingReveal.current && !landed) return
     pendingReveal.current = false
-    // Editing, there is no mark of this pane's to measure and the editor does
-    // its own reveal — the branch a landing takes, and the one `carryFind`
-    // takes on the crossing into edit mode, where `reveal` could not call the
-    // editor directly because it was not mounted yet.
-    if (ui.editing) {
+    // Over the editor there is no mark of this pane's to measure and the
+    // editor does its own reveal — the branch a landing takes, since `reveal`
+    // could not call an editor that was not mounted yet.
+    if (showEditor) {
       if (landed) revealedLanding.current = landing.seq
       const match = matches[current]
       if (match !== undefined) editorRef.current?.reveal(match.start, match.end)
@@ -966,7 +1208,7 @@ function ContentPane({
     }
     const content = contentRef.current
     const mark = content?.querySelector<HTMLElement>('.files-find-hit.current')
-    if (content == null || mark == null || !findOpen || ui.editing || current < 0) {
+    if (content == null || mark == null || !findOpen || current < 0) {
       return
     }
     // `.files-content` is the scrolling pane body's only child (`FilePane`), so
@@ -1031,90 +1273,110 @@ function ContentPane({
     )
   })
 
-  if (error) return <p className="error">{error}</p>
-  if (!data) return <p className="muted">Loading…</p>
+  // A failed *re*-read (the file deleted underneath, the server gone) is said
+  // inline below, over whatever is already on screen: replacing the pane with
+  // the error would hide a draft the person may still want to copy out.
+  //
+  // The same holds when there is nothing on screen yet — a tab switched back
+  // to after its file was deleted mounts with no data and a read that fails.
+  // The draft is all there is to show, so it is shown, still editable, with
+  // the error over it.
+  if (!data) {
+    if (!error) return <p className="muted">Loading…</p>
+    if (!dirtyNow) return <p className="error">{error}</p>
+    return (
+      <div className="files-content">
+        <p className="error">{error}</p>
+        <p className="muted">Your unsaved edits to {basename(path)} are below.</p>
+        <CodeEditor
+          value={ui.draft}
+          language={languageOfName(basename(path))}
+          onChange={(next) => onUi({ draft: next })}
+          autoFocus={false}
+          wrap={wrap}
+        />
+      </div>
+    )
+  }
 
-  const editable = !data.is_binary && !data.truncated
-  const { editing, draft, historyOpen, selectedCommit } = ui
+  const { historyOpen, selectedCommit } = ui
+  // Re-asked every render: once the buffer is clean there is nothing to
+  // confirm, and a prompt left armed behind that would re-mount — autofocused
+  // button and all — the moment the next character is typed.
+  if (pendingRevert && !dirtyNow) setPendingRevert(false)
+  // The prompt lives in the status bar, which a commit's diff hides; it must
+  // not be waiting there, open, when the diff closes.
+  if (gotoOpen && !editorUp) setGotoOpen(false)
+  /** Unsaved work the disk has moved under. Derived, so it clears itself by
+   * any route that resolves it: a save, a revert, either answer below, or the
+   * draft coming to say what the disk does. */
+  const conflict = ui.seenDisk !== null && diskChange(ui, ui.seenDisk) === 'conflict'
 
   function closeHistory() {
     onUi({ historyOpen: false, selectedCommit: null })
   }
 
-  function startEdit() {
-    // Editing and browsing history are mutually exclusive views of the same
-    // area — entering edit mode closes history rather than trying to show a
-    // editor and a commit diff in the same pane.
+  /** "Revert file": drop the draft and read the disk again. Over unsaved work
+   * it asks first (`RevertConfirmBar`); over a clean buffer it is a reload. */
+  function revert() {
+    setPendingRevert(false)
     setSaveError(null)
-    // The editor autofocuses at offset 0, so the status bar must start there
-    // too rather than keeping a caret from a previous edit of this file.
-    setCaret({ line: 1, col: 1 })
-    // LF, whatever the file on disk uses: the editor holds its text
-    // LF-normalised, so a CRLF draft would not be offset-for-offset the string
-    // the editor holds — find would count its matches correctly and paint and
-    // select each one a character per line early in the editor underneath.
-    // See `normalizeNewlines`.
-    const content = normalizeNewlines(data!.content)
-    carryFind(content)
-    onUi({
-      historyOpen: false,
-      selectedCommit: null,
-      draft: content,
-      // The baseline the dirty dot is measured from: what is on disk right
-      // now, which is what this draft starts as.
-      baseline: content,
-      editing: true,
-    })
-  }
-
-  /**
-   * Leaves edit mode for the read view (mesa task 1271).
-   *
-   * Either way `editing` drops, and that is what makes the tab read clean
-   * (`fileDirty.ts`). `discard` is the difference between the two controls
-   * that reach it: Cancel additionally puts `draft` back to `baseline`, so the
-   * work is thrown away at the point the user decides to throw it away rather
-   * than incidentally later. It is not observable *after* the fact — `startEdit`
-   * is the only writer of `editing: true` and it re-reads the file every time,
-   * so the next edit starts from disk whichever button was pressed — which is
-   * exactly why the discard is written here and not left to that re-read.
-   */
-  function leaveEdit(discard: boolean) {
-    setPendingLeave(null)
-    setSaveError(null)
-    // The crossing back is the same one, in the other direction: the viewer
-    // searches the bytes on disk, the draft was LF-normalised.
-    carryFind(data!.content)
-    onUi(discard ? { editing: false, draft: ui.baseline } : { editing: false })
-  }
-
-  /** Both controls' click: a dirty buffer is worth interrupting for, a clean
-   *  one is not — with nothing to lose the prompt would only be a keystroke
-   *  between the user and the view they asked for. */
-  function requestLeave(action: 'discard' | 'keep') {
-    if (isDirty(ui)) setPendingLeave(action)
-    else leaveEdit(action === 'discard')
+    onUi(NO_DRAFT)
+    void refetch()
+    // The confirm's button is unmounted with the caret in it; hand it to the
+    // pane rather than dropping it on `<body>` (the same hand-back, and the
+    // same target, as `closeFind`'s). Not the editor: on a phone that would
+    // raise the keyboard for a tap on a button.
+    contentRef.current?.focus({ preventScroll: true })
   }
 
   async function save() {
+    // Nothing to write: no draft, or a draft that is what the disk holds.
+    if (saving || !dirtyNow) return
+    if (conflict) {
+      // Never an accidental overwrite: the bar's "Keep mine" is how the
+      // person says the disk's version is the one to lose.
+      setSaveError(CHANGED_ON_DISK)
+      return
+    }
+    const saved = ui.draft
     setSaving(true)
     setSaveError(null)
     try {
-      await updateProjectFilesContent(projectId, path, draft)
-      // The draft *is* the file now, so the baseline moves onto it, which is
-      // what makes the tab read clean (`fileDirty.ts`: dirty is `editing &&
-      // draft !== baseline`).
-      //
-      // Edit mode deliberately STAYS open. Cmd/Ctrl+S is bound to this, and in
-      // every editor that chord is the every-thirty-seconds reflex pressed
-      // mid-thought — swapping the editor for the viewer on each press drops
-      // the caret, the scroll and the find bar, and on a markdown file lands
-      // the user in rendered prose instead of the source they were editing. The
-      // Save button shares the binding's meaning rather than the other way
-      // round; End editing is how edit mode is left.
-      onUi({ baseline: draft })
-      refetch()
+      // Look before writing: a change on disk the watch stream has not
+      // delivered yet (or never will, if it is down) must not be overwritten
+      // by a save that could not have known. A read that fails is not an
+      // answer either way — the write below reports the same failure.
+      const fresh = await getProjectFilesContent(projectId, path).then(
+        (d) => normalizeNewlines(d.content),
+        () => null,
+      )
+      if (fresh !== null && fresh !== ui.baseline && fresh !== saved) {
+        onUi({ seenDisk: fresh })
+        setSaveError(CHANGED_ON_DISK)
+        return
+      }
+      // The read took a round trip, and the draft may not be what it was:
+      // reverted or reloaded away (nothing left to save — writing it now
+      // would undo the answer just given), or put in conflict by a read that
+      // landed meanwhile. More typing is fine: what was asked for is saved,
+      // and the rest stays dirty.
+      const now = live.current.ui
+      if (!now.editing) return
+      if (now.seenDisk !== null && diskChange(now, now.seenDisk) === 'conflict') {
+        setSaveError(CHANGED_ON_DISK)
+        return
+      }
+      await updateProjectFilesContent(projectId, path, saved)
+      // What was sent *is* the file now, so the baseline moves onto it, which
+      // is what makes the tab read clean (`fileDirty.ts`) — unless more was
+      // typed while the request was out, which stays unsaved. Nothing else
+      // moves: the caret, the scroll and the find bar are where they were.
+      onUi((prev) => ({ baseline: saved, seenDisk: saved, saves: prev.saves + 1 }))
+      void refetch()
     } catch (e) {
+      // The draft is untouched: a 422 or a 404 is said inline and the work
+      // stays in the editor.
       setSaveError(e instanceof ApiError ? e.message : 'Failed to save file.')
     } finally {
       setSaving(false)
@@ -1137,24 +1399,38 @@ function ContentPane({
   // The file itself, in whichever form applies. Pulled out of the JSX below
   // because history mode renders it in a narrower column beside the commit
   // list — and swaps it for a commit's diff once one is picked.
-  const body = editing ? (
+  const body = showEditor ? (
     <CodeEditor
       value={draft}
       language={data.language}
-      onChange={(next) => onUi({ draft: next })}
-      // Escape means two things here, and which one it gets is not decided by
-      // focus: the bar's own box handles the key when the caret is in it, but
-      // stepping matches deliberately leaves the caret in the code, so the
-      // editor is where Escape usually lands while a find is running. With the
-      // bar up it therefore closes the bar; only once it is gone does the key
-      // leave the editor. The other order would let one keystroke end a whole
-      // edit as the answer to "I'm done searching".
+      // The first keystroke is what makes a draft: it starts from the disk
+      // content the editor was showing, which is also its baseline.
       //
-      // It is End editing and not Cancel (mesa task 1271) for the same reason:
-      // a key that a reader may well press by reflex must not be the one that
-      // throws the draft away — and keeping the draft is exactly what this
-      // binding already did. A dirty buffer still raises the prompt first.
-      onCancel={findOpen ? closeFind : () => requestLeave('keep')}
+      // And a draft that comes back to nothing worth keeping while the disk
+      // has moved (undo, under an unanswered "changed on disk") is dropped
+      // like any clean one, so the pane never sits on old text with nothing
+      // to save.
+      onChange={(next) =>
+        onUi((prev) => {
+          const typed = prev.editing
+            ? { draft: next }
+            : { editing: true, draft: next, baseline: disk }
+          return prev.seenDisk !== null &&
+            diskChange({ ...prev, ...typed }, prev.seenDisk) === 'reload'
+            ? NO_DRAFT
+            : typed
+        })
+      }
+      // Never on mount: opening a file on a phone must not raise the
+      // keyboard, and a page load must not put the caret in a file. The
+      // `focusSeq` effect above is what focuses it, when asked.
+      autoFocus={false}
+      // Escape closes the find bar when one is up — stepping matches leaves the
+      // caret in the code, so this is where the key usually lands mid-search.
+      // With no bar it is not this pane's key at all: there is no mode to
+      // leave, and the editor keeps its own Escape (collapse a multi-cursor
+      // selection, arm the Tab hatch).
+      onCancel={findOpen ? closeFind : undefined}
       onSave={save}
       wrap={wrap}
       onCaret={setCaret}
@@ -1186,27 +1462,27 @@ function ContentPane({
   ) : data.is_binary ? (
     <p className="muted">Binary file — cannot display.</p>
   ) : data.language === 'markdown' ? (
+    // The previews render the draft once there is one, so Preview shows what
+    // Source holds rather than what was last saved.
     <MarkdownBody
       projectId={projectId}
       path={data.path}
-      content={data.content}
+      content={viewText}
       wrap={wrap}
     />
   ) : isHtmlDocumentPath(data.path) ? (
     // Keyed on the path rather than on `data.language` — see
     // `isHtmlDocumentPath`, which is the whole reason that predicate exists:
     // `.vue`/`.svelte`/`.astro` are tagged `html` too and keep the code view.
-    <HtmlBody content={data.content} />
+    <HtmlBody content={viewText} />
   ) : csvTable !== null ? (
-    // A table is the *read* view of a delimited file. Edit mode is the branch
-    // above, so pressing Edit on a .csv still gives the raw text editor and
-    // saving or cancelling comes back here — there is no cell editing, and
-    // `editable` is untouched. A file `parseDelimited` finds no table in falls
-    // through to `FileCode` below, exactly as it did before this branch.
+    // A table is the *preview* of a delimited file; its Source toggle is the
+    // editor branch above — there is no cell editing. A file `parseDelimited`
+    // finds no table in falls through to `FileCode` below.
     <CsvBody table={csvTable} fileTruncated={data.truncated} />
   ) : (
     <FileCode
-      content={data.content}
+      content={viewText}
       language={data.language}
       wrap={wrap}
       numbered
@@ -1225,7 +1501,7 @@ function ContentPane({
       className={`files-content${
         csvTable !== null
           ? ' is-table'
-          : !editing && !historyOpen && isImagePath(data.path)
+          : !showEditor && !historyOpen && isImagePath(data.path)
             ? ' is-image'
             : ''
       }`}
@@ -1244,81 +1520,140 @@ function ContentPane({
           {data.truncated && (
             <span className="badge files-truncated-badge">truncated</span>
           )}
-          {!editing && (
-            <span className="files-header-actions">
-              {editable && (
-                <button className="files-edit-btn" onClick={startEdit}>
-                  Edit
-                </button>
-              )}
+          <span className="files-header-actions">
+            {editable && (
               <button
                 className="files-edit-btn"
-                onClick={() =>
-                  historyOpen ? closeHistory() : onUi({ historyOpen: true })
-                }
+                onClick={save}
+                disabled={saving || !dirtyNow}
+                title="Save (Cmd/Ctrl+S)"
               >
-                {historyOpen ? 'Hide history' : 'History'}
-              </button>
-              {/* Unlike Edit, offered for EVERY file — a binary or truncated
-               * file is exactly the case the viewer can show nothing useful
-               * for. A real <button> because the app's button chrome hangs off
-               * the `button` element selector in index.css; an <a download>
-               * would need all of it duplicated. */}
-              <button
-                className="files-edit-btn"
-                onClick={download}
-                disabled={downloading}
-              >
-                {downloading ? 'Downloading…' : 'Download'}
-              </button>
-            </span>
-          )}
-          {editing && (
-            <span className="files-edit-actions">
-              <button onClick={save} disabled={saving}>
                 {saving ? 'Saving…' : 'Save'}
               </button>
-              {/* Only while there is something to throw away (mesa task 1271).
-               * Over a clean buffer Cancel and End editing would do the same
-               * thing, and two buttons for one outcome is how a person picks
-               * the destructive one by accident. A successful save cleans the
-               * buffer, so the button withdraws itself. */}
-              {isDirty(ui) && (
-                <button onClick={() => requestLeave('discard')} disabled={saving}>
-                  Cancel
-                </button>
-              )}
-              <button onClick={() => requestLeave('keep')} disabled={saving}>
-                End editing
+            )}
+            {/* Discard the draft and read the disk again. Two steps when there
+             * is a draft to lose (`RevertConfirmBar`). */}
+            {editable && (
+              <button
+                className="files-edit-btn"
+                onClick={() => (dirtyNow ? setPendingRevert(true) : revert())}
+                disabled={saving}
+              >
+                Revert file
               </button>
-            </span>
-          )}
+            )}
+            {/* A rendered type's two views. Named for where it goes, and
+             * remembered per tab (`FileUiState.source`). */}
+            {editable && renderable && (
+              <button
+                className="files-edit-btn"
+                onClick={() => onUi({ source: !ui.source })}
+              >
+                {ui.source ? 'Preview' : 'Source'}
+              </button>
+            )}
+            <button
+              className="files-edit-btn"
+              onClick={() =>
+                historyOpen ? closeHistory() : onUi({ historyOpen: true })
+              }
+            >
+              {historyOpen ? 'Hide history' : 'History'}
+            </button>
+            {/* Offered for EVERY file — a binary or truncated file is exactly
+             * the case the viewer can show nothing useful for. A real <button>
+             * because the app's button chrome hangs off the `button` element
+             * selector in index.css; an <a download> would need all of it
+             * duplicated. */}
+            <button
+              className="files-edit-btn"
+              onClick={download}
+              disabled={downloading}
+            >
+              {downloading ? 'Downloading…' : 'Download'}
+            </button>
+          </span>
         </p>
         {/* Under the header rather than over the file, for the reason the
             close prompt is under the tab strip: pushing the content down is
             what makes it impossible to miss. */}
-        {pendingLeave !== null && (
-          <LeaveEditConfirmBar
+        {pendingRevert && dirtyNow && (
+          <RevertConfirmBar
             path={data.path}
-            discard={pendingLeave === 'discard'}
-            onConfirm={() => leaveEdit(pendingLeave === 'discard')}
-            onCancel={() => setPendingLeave(null)}
+            onConfirm={revert}
+            onCancel={() => {
+              setPendingRevert(false)
+              contentRef.current?.focus({ preventScroll: true })
+            }}
           />
+        )}
+        {/* The disk moved under unsaved work (naru task 2743). Neither button
+            is autofocused: this bar arrives unasked, mid-typing, and must not
+            take the caret out of the code. */}
+        {conflict && (
+          <div className="files-close-confirm confirm-delete" role="alert">
+            <span className="confirm-message">
+              {basename(data.path)} changed on disk.
+            </span>
+            <button
+              className="danger"
+              onClick={() => {
+                setSaveError(null)
+                onUi(NO_DRAFT)
+                void refetch()
+              }}
+            >
+              Reload (discard my edits)
+            </button>
+            <button
+              onClick={() => {
+                setSaveError(null)
+                // The disk's version is now the one this draft is measured
+                // against — and the one the next save overwrites.
+                onUi({ baseline: ui.seenDisk ?? ui.baseline })
+              }}
+            >
+              Keep mine
+            </button>
+          </div>
         )}
         {findOpen && (
           <FindBar
             query={find.query}
             caseSensitive={find.caseSensitive}
             wholeWord={find.wholeWord}
-            label={matchLabel(current, matches.length, capped)}
+            regex={find.regex}
+            label={
+              findError !== undefined
+                ? 'Invalid regex'
+                : matchLabel(current, matches.length, capped)
+            }
             takeFocus={find.autoFocus}
             inputRef={findInputRef}
             onSearch={(patch) => runFind({ ...find, ...patch }, true)}
             onStep={stepFind}
             onClose={closeFind}
+            replaceInputRef={replaceInputRef}
+            replace={
+              // Replace is an edit, so it exists only over the editor.
+              showEditor
+                ? {
+                    open: find.replaceOpen,
+                    text: find.replacement,
+                    note: replaceNote,
+                    hasMatch: current >= 0,
+                    onToggle: () =>
+                      setFind({ ...find, replaceOpen: !find.replaceOpen, index: current }),
+                    onText: (text) => setFind({ ...find, replacement: text, index: current }),
+                    onOne: replaceCurrent,
+                    onAll: replaceEverything,
+                  }
+                : null
+            }
           />
         )}
       </div>
+      {error && error !== saveError && <p className="error">{error}</p>}
       {saveError && <p className="error">{saveError}</p>}
       {historyOpen ? (
         <div className="files-history-layout">
@@ -1349,12 +1684,19 @@ function ContentPane({
           binary or an image either — neither has lines. */}
       {selectedCommit === null && !data.is_binary && !isImagePath(data.path) && (
         <FileStatusBar
-          editing={editing}
+          editing={editorUp}
           caret={caret}
-          lines={editing ? lineCount(draft) : viewerLineCount(data.content)}
+          lines={showEditor ? lineCount(draft) : viewerLineCount(viewText)}
           language={data.language}
           wrap={wrap}
           onWrapChange={onWrapChange}
+          gotoOpen={gotoOpen}
+          onGotoOpen={() => setGotoOpen(true)}
+          onGoto={goTo}
+          onGotoClose={(refocus) => {
+            setGotoOpen(false)
+            if (refocus) editorRef.current?.focus()
+          }}
         />
       )}
     </div>
@@ -1364,11 +1706,16 @@ function ContentPane({
 /** The pane's status bar (task 809): where the caret is, how long the file is,
  * what language it is being read as, and the wrap toggle.
  *
- * The caret is shown only while editing, because that is the only state where
- * there is one — a read-only `<pre>` has a selection at most, and a "Ln 1, Col
- * 1" that never moved would read as a broken indicator rather than an absent
- * one. The line count is the one the gutter beside it was built from, so the
- * bar and the last number in the gutter can never disagree. */
+ * The caret is shown only over the editor, because that is the only state
+ * where there is one — a read-only `<pre>` has a selection at most, and a "Ln
+ * 1, Col 1" that never moved would read as a broken indicator rather than an
+ * absent one. The line count is the one the gutter beside it was built from,
+ * so the bar and the last number in the gutter can never disagree.
+ *
+ * The caret readout is also the way into **go to line** (naru task 2743): a
+ * click, or Ctrl+G, swaps it for a small prompt taking `line` or
+ * `line:column`. Enter jumps (`goToLine.ts` decides where) and Escape hands
+ * the caret back to the code; clicking away just closes it. */
 function FileStatusBar({
   editing,
   caret,
@@ -1376,6 +1723,10 @@ function FileStatusBar({
   language,
   wrap,
   onWrapChange,
+  gotoOpen,
+  onGotoOpen,
+  onGoto,
+  onGotoClose,
 }: {
   editing: boolean
   caret: CaretPosition
@@ -1383,21 +1734,53 @@ function FileStatusBar({
   language: string | null
   wrap: boolean
   onWrapChange: (wrap: boolean) => void
+  gotoOpen: boolean
+  onGotoOpen: () => void
+  onGoto: (input: string) => void
+  /** `refocus`: whether the caret goes back to the code (Escape) or is left
+   * wherever the person just put it (a click away). */
+  onGotoClose: (refocus: boolean) => void
 }) {
   return (
     <div className="files-status-bar">
-      {editing && (
-        <span>
-          Ln {caret.line}, Col {caret.col}
-        </span>
-      )}
+      {editing &&
+        (gotoOpen ? (
+          <input
+            autoFocus
+            className="files-goto-input"
+            placeholder="line or line:column"
+            aria-label="Go to line"
+            spellCheck={false}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault()
+                onGoto(e.currentTarget.value)
+              }
+              if (e.key === 'Escape') {
+                e.preventDefault()
+                e.stopPropagation()
+                onGotoClose(true)
+              }
+            }}
+            onBlur={() => onGotoClose(false)}
+          />
+        ) : (
+          <button
+            type="button"
+            className="files-goto-btn"
+            title="Go to line (Ctrl+G)"
+            onClick={onGotoOpen}
+          >
+            Ln {caret.line}, Col {caret.col}
+          </button>
+        ))}
       <span>
         {lines} {lines === 1 ? 'line' : 'lines'}
       </span>
       <span>{language ?? 'plain text'}</span>
       <button
         type="button"
-        className="files-edit-btn"
+        className="files-edit-btn files-wrap-btn"
         aria-pressed={wrap}
         onClick={() => onWrapChange(!wrap)}
       >
@@ -1407,8 +1790,23 @@ function FileStatusBar({
   )
 }
 
-/** Find-in-file's controls (task 809): the query box, the counter, the two
- * option toggles and the step/close buttons.
+/** The replace row's props (naru task 2743): its state, and the two actions. */
+interface ReplaceControls {
+  open: boolean
+  text: string
+  /** What the last Replace all did ("Replaced 12"), or null. */
+  note: string | null
+  /** Whether there is a current match for Replace to act on. */
+  hasMatch: boolean
+  onToggle: () => void
+  onText: (text: string) => void
+  onOne: () => void
+  onAll: () => void
+}
+
+/** Find-in-file's controls (task 809): the query box, the counter, the
+ * option toggles and the step/close buttons — and, over the editor, the
+ * replace row under them (naru task 2743).
  *
  * Presentational on purpose — it decides nothing. Which match is current, what
  * the counter says and where the view scrolls to are all `fileFind.ts` and
@@ -1432,16 +1830,20 @@ function FindBar({
   query,
   caseSensitive,
   wholeWord,
+  regex,
   label,
   takeFocus,
   inputRef,
   onSearch,
   onStep,
   onClose,
+  replace,
+  replaceInputRef,
 }: {
   query: string
   caseSensitive: boolean
   wholeWord: boolean
+  regex: boolean
   /** Already-formatted "n of N" / "No results" — the arithmetic is
    * `matchLabel`'s, not this component's. */
   label: string
@@ -1452,9 +1854,18 @@ function FindBar({
   /** Held by the parent so a second Cmd/Ctrl+F can re-select the query. */
   inputRef: RefObject<HTMLInputElement | null>
   /** Any change that re-runs the search from the anchor. */
-  onSearch: (patch: { query?: string; caseSensitive?: boolean; wholeWord?: boolean }) => void
+  onSearch: (patch: {
+    query?: string
+    caseSensitive?: boolean
+    wholeWord?: boolean
+    regex?: boolean
+  }) => void
   onStep: (forward: boolean) => void
   onClose: () => void
+  /** Null where there is nothing to replace in: a read-only view. */
+  replace: ReplaceControls | null
+  /** Held by the parent so the replace chord can put the caret there. */
+  replaceInputRef: RefObject<HTMLInputElement | null>
 }) {
   /** Do the thing, then put the caret back where the typing goes. */
   function refocus<T>(act: (arg: T) => void): (arg: T) => void {
@@ -1463,7 +1874,17 @@ function FindBar({
       inputRef.current?.focus()
     }
   }
+  // The replace row appearing on a bar that is already up takes the caret:
+  // the person just asked for it. Not on the bar's own mount — there the
+  // query box has it (`takeFocus`), which is where a fresh search starts.
+  const replaceOpen = replace?.open ?? false
+  const wasReplaceOpen = useRef(replaceOpen)
+  useEffect(() => {
+    if (replaceOpen && !wasReplaceOpen.current) replaceInputRef.current?.focus()
+    wasReplaceOpen.current = replaceOpen
+  }, [replaceOpen, replaceInputRef])
   return (
+    <>
     <div className="files-find-bar">
       <input
         autoFocus={takeFocus}
@@ -1510,6 +1931,15 @@ function FindBar({
       <button
         type="button"
         className="files-find-toggle"
+        aria-pressed={regex}
+        title="Regular expression"
+        onClick={refocus(() => onSearch({ regex: !regex }))}
+      >
+        .*
+      </button>
+      <button
+        type="button"
+        className="files-find-toggle"
         aria-label="Previous match"
         title="Previous match (Shift+Enter)"
         onClick={refocus(() => onStep(false))}
@@ -1525,6 +1955,17 @@ function FindBar({
       >
         ↓
       </button>
+      {replace !== null && (
+        <button
+          type="button"
+          className="files-find-toggle"
+          aria-pressed={replace.open}
+          title="Replace (Cmd/Ctrl+Alt+F)"
+          onClick={replace.onToggle}
+        >
+          Replace
+        </button>
+      )}
       <button
         type="button"
         className="files-find-toggle"
@@ -1535,6 +1976,59 @@ function FindBar({
         ×
       </button>
     </div>
+    {replace !== null && replace.open && (
+      <div className="files-find-bar files-replace-row">
+        <input
+          ref={replaceInputRef}
+          className="files-find-input files-replace-input"
+          value={replace.text}
+          placeholder="Replace"
+          spellCheck={false}
+          aria-label="Replace with"
+          onChange={(e) => replace.onText(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault()
+              replace.onOne()
+            }
+            if (e.key === 'Escape') {
+              e.preventDefault()
+              onClose()
+            }
+          }}
+        />
+        {/* `role="status"`: the count is the only report a Replace all gives,
+            and it has to reach a screen reader as well as the eye. */}
+        <span className="files-find-count" role="status">
+          {replace.note ?? ''}
+        </span>
+        <button
+          type="button"
+          className="files-find-toggle"
+          title="Replace this match (Enter)"
+          disabled={!replace.hasMatch}
+          onClick={() => {
+            replace.onOne()
+            replaceInputRef.current?.focus()
+          }}
+        >
+          Replace
+        </button>
+        <button
+          type="button"
+          className="files-find-toggle"
+          title="Replace every match"
+          disabled={!replace.hasMatch}
+          onClick={() => {
+            replace.onAll()
+            replaceInputRef.current?.focus()
+          }}
+        >
+          Replace all
+        </button>
+      </div>
+    )}
+    </>
   )
 }
 
@@ -3223,11 +3717,9 @@ function CloseConfirmBar({
       role="alert"
       // Escape is the universal cancel, and this is the one modal-ish prompt in
       // the tab — without it the bar answered Enter (the autofocused "keep
-      // editing") and nothing else, since the find bar's document-level Escape
-      // is scoped to view mode. It resolves the safe way, so there is no
-      // precedence question with the editor underneath; the event is stopped
-      // all the same, because that editor's own Escape discards the draft this
-      // bar exists to protect.
+      // editing") and nothing else. It resolves the safe way, so there is no
+      // precedence question with the find bar or the editor underneath; the
+      // event is stopped all the same, so neither of them also acts on it.
       onKeyDown={(e) => {
         if (e.key !== 'Escape') return
         e.preventDefault()
@@ -3392,25 +3884,20 @@ function BulkCloseConfirmBar({
 }
 
 /**
- * The prompt a dirty buffer puts between the user and either way out of edit
- * mode (mesa task 1271).
+ * The prompt unsaved work puts in front of "Revert file" (naru task 2743;
+ * until then this bar guarded the two ways out of edit mode, mesa task 1271).
  *
- * `CloseConfirmBar`'s shape and classes for the reason given there — mesa's
- * confirmations are inline and non-modal, never `window.confirm` — but its own
- * component, because the two ways out do not cost the same thing and a bar
- * that said "discard" for both would be lying about one of them. Cancel throws
- * the edits away then and there and gets the red button; End editing only
- * leaves the editor and gets an ordinary one. What the two share is the fact
- * worth interrupting for: the file on disk does not have these edits.
+ * `CloseConfirmBar`'s shape and classes for the reason given there — the
+ * app's confirmations are inline and non-modal, never `window.confirm`. The
+ * discarding button is the red one: the file on disk does not have these
+ * edits, and this click is what throws them away.
  */
-function LeaveEditConfirmBar({
+function RevertConfirmBar({
   path,
-  discard,
   onConfirm,
   onCancel,
 }: {
   path: string
-  discard: boolean
   onConfirm: () => void
   onCancel: () => void
 }) {
@@ -3418,9 +3905,7 @@ function LeaveEditConfirmBar({
     <div
       className="files-close-confirm confirm-delete"
       role="alert"
-      // Escape resolves the safe way, and is stopped all the same — the editor
-      // underneath answers the key by leaving edit mode, which is the thing
-      // this bar exists to ask about. (`CloseConfirmBar` says the same.)
+      // Escape resolves the safe way, and is stopped, as `CloseConfirmBar`'s is.
       onKeyDown={(e) => {
         if (e.key !== 'Escape') return
         e.preventDefault()
@@ -3431,8 +3916,8 @@ function LeaveEditConfirmBar({
       <span className="confirm-message">
         {basename(path)} has unsaved changes.
       </span>
-      <button className={discard ? 'danger' : undefined} onClick={onConfirm}>
-        {discard ? 'discard edits' : 'leave without saving'}
+      <button className="danger" onClick={onConfirm}>
+        discard edits
       </button>
       {/* Autofocused so Enter answers the safe way, as it does one pane over. */}
       <button autoFocus onClick={onCancel}>
@@ -3457,6 +3942,9 @@ function FilePane({
   pendingBulk,
   fileUi,
   reloads,
+  changed,
+  focusSeq,
+  onFocusTaken,
   onUi,
   wrap,
   onWrapChange,
@@ -3493,7 +3981,13 @@ function FilePane({
   fileUi: Map<string, FileUiState>
   /** Per-path counts of uploads that replaced the file (naru task 2732). */
   reloads: Record<string, number>
-  onUi: (path: string, patch: Partial<FileUiState>) => void
+  /** The watch stream's latest burst, for the mounted file to re-read on. */
+  changed: DiskChange | null
+  /** Non-zero when this pane's active file should take the caret (see
+   * `ContentPane`). */
+  focusSeq: number
+  onFocusTaken: () => void
+  onUi: (path: string, patch: UiPatch) => void
   wrap: boolean
   onWrapChange: (wrap: boolean) => void
   /** The project-search result to land on, if it names a file this pane has
@@ -3588,6 +4082,9 @@ function FilePane({
             landing={landing?.path === active ? landing : null}
             imageZoom={imageZoom}
             reload={reloads[active] ?? 0}
+            changed={changed}
+            focusSeq={focusSeq}
+            onFocusTaken={onFocusTaken}
           />
         ) : (
           <p className="muted">Select a file to see its content.</p>
@@ -3595,6 +4092,16 @@ function FilePane({
       </div>
     </section>
   )
+}
+
+/** A project's open set as the tab mounts or switches to it: the remembered
+ *  tabs, and whatever per-file state the stash still holds for them. */
+function restoreOpen(
+  projectId: number,
+  narrow: boolean,
+): { tabs: TabsState; fileUi: Map<string, FileUiState> } {
+  const tabs = loadOpenFiles(projectId, narrow)
+  return { tabs, fileUi: stashedDrafts<FileUiState>(projectId, openPaths(tabs)) }
 }
 
 /**
@@ -3630,8 +4137,9 @@ export function FilesView({ projectId }: { projectId: number }) {
   // at what ratio — together with the per-open-path view state that must
   // outlive a tab switch. The tabs half is remembered per project in
   // localStorage (`openFiles.ts`, mesa task 696); `fileUi` is not — a draft
-  // keeps the component's lifetime and is dropped on unmount. Still no URL
-  // deep-linking into the tree.
+  // lives in memory only, for the page's lifetime: it is stashed per project
+  // (`fileDrafts.ts`, naru task 2743) so leaving the Files tab and coming back
+  // finds it again. Still no URL deep-linking into the tree.
   //
   // **One** state object, not two, and that is load-bearing: dropping a
   // closed path's draft has to happen in the same update that closes it, and
@@ -3642,8 +4150,24 @@ export function FilesView({ projectId }: { projectId: number }) {
   const [open, setOpen] = useState<{
     tabs: TabsState
     fileUi: Map<string, FileUiState>
-  }>(() => ({ tabs: loadOpenFiles(projectId, narrow), fileUi: new Map() }))
+  }>(() => restoreOpen(projectId, narrow))
   const { tabs, fileUi } = open
+  // Mirror the per-file state into the stash on every change, which is also
+  // what arms and disarms the page-unload warning (`fileDrafts.ts`).
+  useEffect(() => {
+    stashDrafts(projectId, fileUi)
+  }, [projectId, fileUi])
+  // The watch stream's latest burst, for the open files to re-read on.
+  const [changed, setChanged] = useState<DiskChange | null>(null)
+  const changedSeq = useRef(0)
+  // The file the person just opened or switched to, whose editor should take
+  // the caret (`ContentPane`'s `focusSeq`). Null for anything they did not ask
+  // for by opening a file: a page load, a search-result landing.
+  const [focusReq, setFocusReq] = useState<{ path: string; seq: number } | null>(null)
+  const focusSeq = useRef(0)
+  function focusEditor(path: string | null | undefined) {
+    if (path != null) setFocusReq({ path, seq: ++focusSeq.current })
+  }
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   // Fetched-directory cache (mesa task 410's lazy per-directory walk):
   // populated on first expand, kept for the component's lifetime so
@@ -3690,6 +4214,9 @@ export function FilesView({ projectId }: { projectId: number }) {
       )
     }
     const refetchLevels = (dirs: string[] | null) => {
+      // The open files hear about it too, whether or not the tree has that
+      // level loaded.
+      setChanged({ seq: ++changedSeq.current, dirs })
       const { root, dirs: levels } = levelsToRefetch(dirs, childrenRef.current.keys())
       if (root) void refetch()
       levels.forEach(refetchDir)
@@ -3749,6 +4276,9 @@ export function FilesView({ projectId }: { projectId: number }) {
   const [upload, setUpload] = useState<{
     progress: { name: string; index: number; total: number } | null
     replace: string | null
+    /** The project path the Replace question is about — so the prompt can say
+     * when the answer also discards unsaved edits (naru task 2743). */
+    replacePath?: string
     /** Said beside the progress line when a second drop arrives mid-batch. */
     note: string | null
     done: { ok: string | null; problems: string[] } | null
@@ -3928,28 +4458,9 @@ export function FilesView({ projectId }: { projectId: number }) {
     detail: focusedPath !== null && dirty.has(focusedPath) ? 'unsaved changes' : null,
   })
 
-  // Warn on a real page unload while any tab is dirty — a reload or a close is
-  // the one exit this app cannot intercept and put a confirm bar in front of.
-  // Armed and disarmed by the effect's own lifetime rather than by a flag
-  // inside the handler, so a clean tab set genuinely has no listener attached
-  // (a permanently registered `beforeunload` is also what disables the
-  // browser's back/forward cache).
-  //
-  // Keyed on *whether* anything is dirty, not on the set: `fileUi` is a fresh
-  // `Map` per keystroke, so `dirty` is a fresh `Set` per character typed and
-  // listing it tore the listener down and put it back on every one of them —
-  // which is also the one window in which the claim above is false.
-  const anyDirty = dirty.size > 0
-  useEffect(() => {
-    if (!anyDirty) return
-    const onBeforeUnload = (e: BeforeUnloadEvent) => {
-      // The browser writes the prompt; a page-supplied string has been ignored
-      // for years. `preventDefault` is the whole API that is left.
-      e.preventDefault()
-    }
-    window.addEventListener('beforeunload', onBeforeUnload)
-    return () => window.removeEventListener('beforeunload', onBeforeUnload)
-  }, [anyDirty])
+  // A real page unload while any draft is dirty is warned about by
+  // `fileDrafts.ts`, which the stash effect above feeds — there rather than
+  // here, so the warning also holds while this tab is not the one on screen.
 
   // The Files tab's tab-management chords (task 809, slice 4).
   //
@@ -3996,10 +4507,12 @@ export function FilesView({ projectId }: { projectId: number }) {
       const forward = e.code === 'BracketRight'
       // Asked before claiming the key: a pane with nothing to step to leaves
       // the chord alone rather than swallowing it to do nothing.
-      if (cycleTab(tabs, side, forward) === null) return
+      const stepped = cycleTab(tabs, side, forward)
+      if (stepped === null) return
       if (shouldIgnoreFilesShortcut(e, 'tabs')) return
       e.preventDefault()
       commit((prev) => cycleTab(prev, side, forward))
+      focusEditor(paneOf(stepped, side)?.active)
     }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
@@ -4051,22 +4564,18 @@ export function FilesView({ projectId }: { projectId: number }) {
   // not leak into project B. Tabs are the one thing that *restores* rather
   // than empties — the new project's own remembered set, never A's.
   //
-  // This drops any unsaved draft with it, unprompted, and so does leaving the
-  // Files tab (which unmounts this component). That is a real limit on what the
-  // dirty dot promises and it is deliberate rather than pending: by the time
-  // this runs the route has already moved, and the app has no navigation guard
-  // to hold it — the nav click is in another component and the tab strip's
-  // confirm bar belongs to a pane that is about to show project B's files.
-  // Carrying the drafts across instead would be worse: `fileUi` is keyed by a
-  // path relative to the project, so the same `src/main.rs` in two projects
-  // would inherit the other one's unsaved text. What the dot does cover is
-  // stated in docs/files-tab.md, and it is the three exits this component
-  // actually owns: the tab's ×, a middle-click, Alt+W — plus `beforeunload`
-  // for a reload or a window close.
+  // Unsaved drafts are not lost by this, nor by leaving the Files tab (which
+  // unmounts this component): they wait in `fileDrafts.ts`, keyed by project —
+  // `fileUi` is keyed by a path relative to one, so the same `src/main.rs` in
+  // two projects must never inherit the other's text — and `restoreOpen` hands
+  // this project's back. What still *discards* a draft is closing its tab
+  // (the ×, a middle-click, Alt+W, the bulk closes — each asks first) and a
+  // real page unload, which `beforeunload` warns about.
   const [prevProject, setPrevProject] = useState(projectId)
   if (projectId !== prevProject) {
     setPrevProject(projectId)
-    setOpen({ tabs: loadOpenFiles(projectId, narrow), fileUi: new Map() })
+    setOpen(restoreOpen(projectId, narrow))
+    setFocusReq(null)
     setExpanded(new Set())
     setChildrenCache(new Map())
     setTreeOpen(true)
@@ -4276,6 +4785,8 @@ export function FilesView({ projectId }: { projectId: number }) {
    *  pane that gets it the line to land on (`SearchLanding`). */
   function openResult(path: string, line: number) {
     commit((prev) => openFile(prev, path))
+    // The caret stays with the panel being clicked through.
+    setFocusReq(null)
     setLanding({
       seq: ++landingSeq.current,
       path,
@@ -4290,14 +4801,13 @@ export function FilesView({ projectId }: { projectId: number }) {
     setTreeOpen(false)
   }
 
-  function patchUi(path: string, patch: Partial<FileUiState>) {
-    setOpen((prev) => ({
-      ...prev,
-      fileUi: new Map(prev.fileUi).set(path, {
-        ...(prev.fileUi.get(path) ?? BLANK_FILE_UI),
-        ...patch,
-      }),
-    }))
+  function patchUi(path: string, patch: UiPatch) {
+    setOpen((prev) => {
+      const held = prev.fileUi.get(path) ?? BLANK_FILE_UI
+      const next = typeof patch === 'function' ? patch(held) : patch
+      if (next === null) return prev
+      return { ...prev, fileUi: new Map(prev.fileUi).set(path, { ...held, ...next }) }
+    })
   }
 
   /** Fetches one directory level and installs it in the cache, replacing
@@ -4386,6 +4896,7 @@ export function FilesView({ projectId }: { projectId: number }) {
       setTreeAction(null)
       reloadLevel(parent)
       commit((prev) => openFile(prev, decided.path))
+      focusEditor(decided.path)
       // Same reason the tree closes when a file is picked: on the phone tier
       // a full column of rows would push the file below the fold. Inert above
       // 600px.
@@ -4413,7 +4924,7 @@ export function FilesView({ projectId }: { projectId: number }) {
    * On success the file stays open and viewing: the tabs transition goes through
    * `commit()` like every other, so `fileUi` for a path that is no longer open
    * is dropped by the machinery that already does that, and a renamed file's
-   * draft/history follow it under the new path.
+   * draft/history are re-keyed onto the new path just before it.
    */
   async function submitRename(name: string) {
     if (treeAction?.kind !== 'rename' || treeBusy) return
@@ -4460,6 +4971,21 @@ export function FilesView({ projectId }: { projectId: number }) {
         })
         for (const dir of reopened) loadDir(dir)
       }
+      // The per-file state is keyed by path, so it moves with the rename — an
+      // unsaved draft above all — before the tabs do: `commit` drops whatever
+      // is filed under a path that is no longer open. A destination that
+      // already has state of its own (a stale tab for the new name) keeps it.
+      setOpen((prev) => {
+        const fileUi = new Map<string, FileUiState>()
+        for (const [key, ui] of prev.fileUi) {
+          const moved =
+            key === path || key.startsWith(`${path}/`)
+              ? entry.path + key.slice(path.length)
+              : key
+          if (moved === key || !prev.fileUi.has(moved)) fileUi.set(moved, ui)
+        }
+        return { ...prev, fileUi }
+      })
       commit((prev) => renameSubtree(prev, path, entry.path))
     } catch (e) {
       setTreeActionError(
@@ -4553,7 +5079,11 @@ export function FilesView({ projectId }: { projectId: number }) {
         } catch (e) {
           if (!(e instanceof ApiError && e.status === 409)) throw e
           if (uploadRun.current !== run) return
-          setUpload((prev) => ({ ...prev, replace: name }))
+          setUpload((prev) => ({
+            ...prev,
+            replace: name,
+            replacePath: dir === '' ? name : `${dir}/${name}`,
+          }))
           const replace = await new Promise<boolean>((resolve) => {
             replaceAnswer.current = resolve
           })
@@ -4566,9 +5096,9 @@ export function FilesView({ projectId }: { projectId: number }) {
           }
           entry = await uploadProjectFile(projectId, dir, name, content, true)
           // The file is open somewhere with the old bytes: re-read it, and
-          // leave edit mode — the person just chose to replace it, and a draft
+          // drop its draft — the person just chose to replace it, and a draft
           // kept would overwrite the upload on the next save.
-          patchUi(entry.path, { editing: false, draft: '', baseline: '' })
+          patchUi(entry.path, NO_DRAFT)
           setReloads((prev) => ({ ...prev, [entry.path]: (prev[entry.path] ?? 0) + 1 }))
         }
         results.push({ name, outcome: 'uploaded' })
@@ -4738,12 +5268,26 @@ export function FilesView({ projectId }: { projectId: number }) {
           : null,
       fileUi,
       reloads,
+      changed,
+      // Only the pane the keyboard belongs to, and never on the phone tier,
+      // where focusing the editor raises the soft keyboard over the file.
+      focusSeq:
+        !narrow &&
+        focusReq !== null &&
+        focusReq.path === pane.active &&
+        (!split || tabs.focused === side)
+          ? focusReq.seq
+          : 0,
+      onFocusTaken: () => setFocusReq(null),
       onUi: patchUi,
       wrap,
       onWrapChange: toggleWrap,
       landing,
       onFocus: () => commit((prev) => focusPane(prev, side)),
-      onActivate: (path: string) => commit((prev) => activateTab(prev, side, path)),
+      onActivate: (path: string) => {
+        commit((prev) => activateTab(prev, side, path))
+        focusEditor(path)
+      },
       onClose: (path: string) => requestClose(side, path),
       onConfirmClose: confirmClose,
       onCancelClose: () => setPendingClose(null),
@@ -4801,7 +5345,14 @@ export function FilesView({ projectId }: { projectId: number }) {
             replaceAnswer.current?.(false)
           }}
         >
-          <span className="confirm-message">Replace {upload.replace}?</span>
+          <span className="confirm-message">
+            Replace {upload.replace}?
+            {/* The upload drops the open file's draft with the bytes it was
+                typed over; say so when there is one. */}
+            {upload.replacePath !== undefined &&
+              dirty.has(upload.replacePath) &&
+              ' Its unsaved edits will be discarded.'}
+          </span>
           <button className="danger files-upload-replace-yes" onClick={() => replaceAnswer.current?.(true)}>
             replace
           </button>
@@ -4955,6 +5506,7 @@ export function FilesView({ projectId }: { projectId: number }) {
                   // Opens into the focused pane and activates it — or just
                   // activates the tab already holding it, wherever that is.
                   commit((prev) => openFile(prev, path))
+                  focusEditor(path)
                   // Opening a file closes the tree, which is what makes the
                   // phone tier's stacked layout usable: the tree is a full
                   // column of rows, so leaving it up pushes the file itself

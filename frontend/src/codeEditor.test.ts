@@ -268,6 +268,31 @@ describe('CodeEditor', () => {
     })
   }
 
+  it('applies a replace-all as one change that one undo takes back', () => {
+    const ref = createRef<CodeEditorHandle>()
+    const onChange = vi.fn()
+    const { view } = mount({ value: 'foo bar foo', ref, onChange })
+    act(() =>
+      ref.current!.applyEdits([
+        { start: 0, end: 3, text: 'x' },
+        { start: 8, end: 11, text: 'yy' },
+      ]),
+    )
+    expect(view.state.doc.toString()).toBe('x bar yy')
+    expect(onChange).toHaveBeenCalledTimes(1)
+    expect(onChange).toHaveBeenLastCalledWith('x bar yy')
+    // A keystroke straight after must not join the replace's undo step.
+    type(view, '!')
+    act(() => {
+      undo(view)
+    })
+    expect(view.state.doc.toString()).toBe('x bar yy')
+    act(() => {
+      undo(view)
+    })
+    expect(view.state.doc.toString()).toBe('foo bar foo')
+  })
+
   it('clamps a reveal past the end instead of throwing', () => {
     const ref = createRef<CodeEditorHandle>()
     const { view } = mount({ value: 'abc', ref })

@@ -7,6 +7,7 @@ import {
   historyKeymap,
   indentLess,
   indentMore,
+  isolateHistory,
 } from '@codemirror/commands'
 import {
   bracketMatching,
@@ -45,7 +46,7 @@ import type { CaretPosition } from '../editorStatus'
 import { detectIndentUnit, replacementRange, tabEscapeAfter } from '../editorInput'
 import { loadEditorLanguage } from '../editorLanguage'
 import { editorChrome, editorHighlighting } from '../editorTheme'
-import type { FindMatch } from '../fileFind'
+import type { FindMatch, TextEdit } from '../fileFind'
 
 /** The few things an owner has to be able to *do* to the box rather than
  * describe about it (task 809's find bar): read where the caret is, put it
@@ -60,6 +61,11 @@ export interface CodeEditorHandle {
   focus(): void
   /** Select `[start, end)` and scroll it onto the screen. */
   reveal(start: number, end: number): void
+  /** Apply a find-and-replace (naru task 2743): every edit in **one**
+   * transaction, so one undo takes all of it back. Offsets are into the text
+   * as it is before any of them, ordered and non-overlapping
+   * (`fileFind.ts::replaceEdits`). Reported through `onChange` like typing. */
+  applyEdits(edits: readonly TextEdit[]): void
 }
 
 type Props = {
@@ -446,6 +452,17 @@ export function CodeEditor({
             yMargin: 36,
             xMargin: 24,
           }),
+        })
+      },
+      applyEdits(edits) {
+        const view = viewRef.current
+        if (view === null || edits.length === 0) return
+        view.dispatch({
+          changes: edits.map((edit) => ({ from: edit.start, to: edit.end, insert: edit.text })),
+          // Its own undo step on both sides: the history would otherwise join
+          // a keystroke typed right after it into the same event.
+          annotations: isolateHistory.of('full'),
+          userEvent: 'input.replace',
         })
       },
     }),

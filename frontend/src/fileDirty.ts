@@ -21,11 +21,19 @@ import { paneOf, type PaneSide, type TabsState } from './fileTabs'
  * module stays a function of three plain fields — that is what lets a test
  * describe a dirty tab without building the rest of the Files tab's state.
  *
- * `baseline` is the file's bytes as they were when editing started (and as
- * they are again after a successful save). Comparing against it rather than
- * against the live fetched content is what makes this answerable *outside* the
- * mounted pane: only `ContentPane` has the response in hand, and the tab strip
- * that has to paint the dot is two components above it.
+ * There is no edit mode (naru task 2743): an editable file is always in the
+ * editor. `editing` therefore means only **"this path has a draft"** — it is
+ * set by the first keystroke, which is also when `draft` and `baseline` start
+ * meaning anything, and dropped when the draft is (a revert, or a clean file
+ * reloading from disk). The field kept its name; a path with no draft simply
+ * shows the fetched content.
+ *
+ * `baseline` is the file on disk as this draft last knew it: its content when
+ * the draft started, the saved text after a save, and the new disk content
+ * once the user answers "Keep mine" to a change on disk. Comparing against it
+ * rather than against the live fetched content is what makes this answerable
+ * *outside* the mounted pane: only `ContentPane` has the response in hand, and
+ * the tab strip that has to paint the dot is two components above it.
  */
 export interface DraftState {
   editing: boolean
@@ -34,21 +42,32 @@ export interface DraftState {
 }
 
 /**
- * True when this tab is holding work that is not on disk.
- *
- * `editing` is part of the test, not an optimization: both ways out of edit
- * mode drop it, and that alone is what makes the tab read clean — a draft left
- * behind by one of them is not unsaved work the user is about to lose, they
- * already said to leave. Which way out it was is not observable afterwards:
- * `FilesView`'s `startEdit` is the only writer of `editing: true` and it
- * re-reads the file on every entry, so the next edit starts from disk whatever
- * the last one left in `draft`.
- *
- * A missing entry is a file nobody has opened the editor on, which is clean.
+ * True when this tab is holding work that is not on disk: it has a draft, and
+ * the draft is not the baseline. A missing entry, or one with no draft, is a
+ * file nobody has typed in, which is clean.
  */
 export function isDirty(ui: DraftState | undefined): boolean {
   if (ui === undefined || !ui.editing) return false
   return ui.draft !== ui.baseline
+}
+
+/**
+ * What a fresh read of the file from disk means for this tab (naru task 2743).
+ * `disk` is that content in the draft's own dialect (LF).
+ *
+ * - `none` — nothing to do: there is no draft (the pane shows the fetched
+ *   content anyway), or the disk still holds what the draft started from.
+ * - `reload` — the disk moved and nothing here is worth keeping: the draft is
+ *   clean, or it already says exactly what the disk now does. Drop it.
+ * - `conflict` — the disk moved under unsaved work. Never resolved silently:
+ *   the pane asks, and until it is answered the draft stays as typed.
+ */
+export function diskChange(
+  ui: DraftState | undefined,
+  disk: string,
+): 'none' | 'reload' | 'conflict' {
+  if (ui === undefined || !ui.editing || disk === ui.baseline) return 'none'
+  return ui.draft === ui.baseline || ui.draft === disk ? 'reload' : 'conflict'
 }
 
 /** Every path with unsaved edits — the key set the tab strips paint a dot for,

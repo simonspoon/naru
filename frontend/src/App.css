@@ -5676,7 +5676,7 @@ body.live-panel-ratio-resizing {
   overflow-wrap: anywhere;
 }
 
-/* Edit (task 327) + History (task 542) affordances — pinned as one group to
+/* Save / Revert / Preview-Source / History / Download — pinned as one group to
    the header's right edge, same 0.8rem button sizing as .inline-edit-actions
    for visual consistency with the rest of the app's inline edit controls. */
 .files-content-header .files-header-actions,
@@ -5686,7 +5686,22 @@ body.live-panel-ratio-resizing {
 
 .files-header-actions {
   display: inline-flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 0.5rem;
+}
+
+/* The header carries up to five actions now that Save and Revert live in it
+   (naru task 2743), so it wraps: at phone width the buttons take a row of
+   their own under the path instead of squeezing it to a column one character
+   wide. `nowrap` on the labels for the same reason — "Revert file" on two
+   lines makes the row twice as tall. */
+.files-content-header {
+  flex-wrap: wrap;
+}
+
+.files-header-actions .files-edit-btn {
+  white-space: nowrap;
 }
 
 .files-edit-btn {
@@ -5736,6 +5751,22 @@ body.live-panel-ratio-resizing {
   color: var(--cyan);
   border-color: var(--cyan);
   box-shadow: inset 0 0 8px var(--cyan-dim);
+}
+
+/* The replace row (naru task 2743): the find bar's shape again, one row down,
+   so the two boxes line up. Both rows wrap rather than squeeze: at phone width
+   the query box keeps a usable width and the buttons take a second line,
+   instead of the box shrinking to nothing beside nine controls. */
+.files-find-bar {
+  flex-wrap: wrap;
+}
+
+.files-find-bar .files-find-input {
+  flex-basis: 8rem;
+}
+
+.files-replace-row .files-find-count:empty {
+  display: none;
 }
 
 /* Project search (mesa task 813): the panel takes the tree's place inside
@@ -6294,9 +6325,36 @@ body.live-panel-ratio-resizing {
   color: var(--muted);
 }
 
-.files-status-bar button {
+.files-status-bar .files-wrap-btn {
   margin-left: auto;
   font-size: 0.75rem;
+}
+
+/* The caret readout, which is also the way into go to line (naru task 2743):
+   a button that reads as the text it replaced until it is pointed at. */
+.files-status-bar .files-goto-btn {
+  padding: 0;
+  border: none;
+  background: none;
+  box-shadow: none;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+.files-status-bar .files-goto-btn:hover,
+.files-status-bar .files-goto-btn:focus-visible {
+  color: var(--cyan);
+}
+
+/* The prompt that takes its place. Narrow enough to sit in the bar at phone
+   width beside the line count and the wrap toggle. */
+.files-goto-input {
+  width: 11rem;
+  max-width: 45%;
+  min-width: 0;
+  padding: 0 0.3rem;
+  font: inherit;
 }
 
 /* An image file shown as itself (task 801). The wrapper scrolls rather than

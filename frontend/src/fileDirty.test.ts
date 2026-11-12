@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   closeLabel,
   dirtyPaths,
+  diskChange,
   isDirty,
   needsCloseConfirm,
   splitBulkClose,
@@ -37,12 +38,12 @@ function split(left: string[], right: string[]): TabsState {
 }
 
 describe('isDirty', () => {
-  it('is false for a file nobody opened the editor on', () => {
+  it('is false for a file nobody has typed in', () => {
     expect(isDirty(undefined)).toBe(false)
     expect(isDirty(ui())).toBe(false)
   })
 
-  it('is false while editing an untouched draft', () => {
+  it('is false for a draft equal to its baseline', () => {
     expect(isDirty(ui({ editing: true, draft: 'a\n', baseline: 'a\n' }))).toBe(
       false,
     )
@@ -60,7 +61,7 @@ describe('isDirty', () => {
     )
   })
 
-  it('is false for a cancelled edit, whatever the draft says', () => {
+  it('is false for a path with no draft, whatever the leftover text says', () => {
     expect(isDirty(ui({ editing: false, draft: 'typed', baseline: '' }))).toBe(
       false,
     )
@@ -163,5 +164,39 @@ describe('splitBulkClose', () => {
   it('an edit-mode tab with no changes is clean', () => {
     const dirty = dirtyPaths(new Map([['a.rs', ui({ editing: true, draft: 'x', baseline: 'x' })]]))
     expect(splitBulkClose(single(['a.rs']), 'left', ['a.rs'], dirty)).toEqual({ now: ['a.rs'], ask: [] })
+  })
+})
+
+describe('diskChange', () => {
+  it('has nothing to do for a file with no draft', () => {
+    expect(diskChange(undefined, 'new')).toBe('none')
+    expect(diskChange(ui({ draft: 'old', baseline: 'old' }), 'new')).toBe('none')
+  })
+
+  it('has nothing to do while the disk still holds the baseline', () => {
+    expect(diskChange(ui({ editing: true, draft: 'a', baseline: 'a' }), 'a')).toBe('none')
+    expect(diskChange(ui({ editing: true, draft: 'typed', baseline: 'a' }), 'a')).toBe('none')
+  })
+
+  it('reloads a clean draft when the disk moves', () => {
+    expect(diskChange(ui({ editing: true, draft: 'a', baseline: 'a' }), 'b')).toBe('reload')
+  })
+
+  it('never reloads over unsaved work: that is a conflict', () => {
+    expect(diskChange(ui({ editing: true, draft: 'mine', baseline: 'a' }), 'theirs')).toBe(
+      'conflict',
+    )
+  })
+
+  it('is not a conflict when the disk now says what the draft does', () => {
+    expect(diskChange(ui({ editing: true, draft: 'same', baseline: 'a' }), 'same')).toBe(
+      'reload',
+    )
+  })
+
+  it('stops being a conflict once "keep mine" moves the baseline onto the disk', () => {
+    expect(diskChange(ui({ editing: true, draft: 'mine', baseline: 'theirs' }), 'theirs')).toBe(
+      'none',
+    )
   })
 })

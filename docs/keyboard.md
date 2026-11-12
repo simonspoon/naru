@@ -21,7 +21,9 @@ page's.
 | `Escape` | `live-cancel` | live conversation, joined | Drops what the microphone heard and has not sent, and mutes it; again to resume its own mute (task 1354, `docs/live.md`) — any other Escape owner wins |
 | `Cmd/Ctrl+F` | — | Files tab, focused pane, findable file | Opens find-in-file, selecting the remembered query (task 809) |
 | `Cmd/Ctrl+Shift+F` | — | Files tab | Opens the project-wide search panel in place of the tree, selecting the remembered query (task 813) |
-| `Cmd/Ctrl+S` | — | Files tab editor | Saves the file, staying in the editor (and swallows Save Page) |
+| `Cmd/Ctrl+Alt+F` | — | Files tab, focused pane, editor | Opens the find bar with its replace row, or moves the caret to the replace box of a bar already up (task 2743). Also `Ctrl+H` off macOS only — on macOS Ctrl+H is the editor's own delete-backward |
+| `Ctrl+G` | — | Files tab, focused pane, editor | Opens the go-to-line prompt in the status bar: `line` or `line:column` (task 2743). Ctrl on every platform — Cmd+G is the browser's find-next |
+| `Cmd/Ctrl+S` | — | Files tab editor | Saves the file (and swallows Save Page); nothing to write over a clean buffer |
 | `Alt+W` | — | Files tab | Closes the focused pane's active tab |
 | `Alt+[` `Alt+]` | — | Files tab | Previous / next tab in the focused pane |
 | `Shift+F10` / menu key | — | Files tab, focused tab | Opens the tab menu (close others / to the right / saved / all); arrows move, Escape closes (task 2730) |
@@ -186,21 +188,27 @@ Files tab's chords therefore call a *sibling* export in the same file,
 **`shouldIgnoreFilesShortcut(e, chord)`**, so there is still exactly one module
 deciding which surface may claim a keystroke.
 
-One predicate for all five chords, not one each: they ask nearly the same
-question. It returns `true` (stand down) when a modal that owns its own keys is
+One predicate for all of the Files chords, not one each: they ask nearly the
+same question. It returns `true` (stand down) when a modal that owns its own keys is
 open (`.create-task-backdrop`, `.command-palette-backdrop` — rule 5 above, same
 classes) or when the caret is in a text control that is not the tab's own. The
 editor (`.files-content-editor`) claims every one of them — finding text in, or
 closing, the file you are editing is what they exist for. Which *other* boxes a
 chord survives is one table in the module (`CHORD_FIELDS`), and it is the only
-place the chords part company: `'find'` keeps `.files-find-input`, `'search'`
-keeps that one *and* `.files-search-input`, `'tabs'` keeps neither. The `chord`
-argument (`'find'` | `'search'` | `'tabs'`, required, never defaulted) is how a
-caller says which it is, rather than inheriting whichever answer happened to be
-the default.
+place the chords part company: `'find'` and `'replace'` (task 2743) keep
+`.files-find-input` *and* `.files-replace-input`, `'goto'` (task 2743) keeps
+only its own `.files-goto-input`, `'search'` keeps `.files-find-input` and
+`.files-search-input`, `'tabs'` keeps none. The `chord` argument (`'find'` |
+`'replace'` | `'goto'` | `'search'` | `'tabs'`, required, never defaulted) is
+how a caller says which it is, rather than inheriting whichever answer happened
+to be the default.
 
 The reason they differ is what each does to the box in question. Cmd/Ctrl+F acts
-*in* the find bar's query box, and Cmd/Ctrl+Shift+F acts in its own (and
+*in* the find bar's query box — and from the replace box under it, where the
+same key goes back up to the query; Cmd/Ctrl+Alt+F moves the caret between
+those two, so it is claimed from both; Ctrl+G acts in its own prompt and
+nowhere else (pressed in the find bar it stands down rather than pull the caret
+out of a query being typed); and Cmd/Ctrl+Shift+F acts in its own (and
 escalating from the in-file bar to the project is the natural move, so it is
 claimed from both). Alt+W and Alt+[ / ] act by tearing the bar down — the pane's
 active path changes, `ContentPane` remounts, and the input is unmounted while it
@@ -212,14 +220,28 @@ the caller's: the
 listeners live in `FilesView`/`ContentPane`, so they exist only while the tab
 is mounted, and Cmd/Ctrl+F additionally requires that pane to be the focused
 one — in a split, both are mounted and two find bars racing for one keystroke
-is the bug scoping avoids. Cmd/Ctrl+Shift+F is `FilesView`'s for the opposite
+is the bug scoping avoids. Cmd/Ctrl+Alt+F and Ctrl+G share that listener and its
+focused-pane rule, and additionally require the pane to be showing the
+**editor** (`showEditor`): replace is an edit and a viewer has no caret to send
+to a line, so over a read-only file both keys are left alone. Cmd/Ctrl+Shift+F is `FilesView`'s for the opposite
 reason: the panel is the tab's, not a file's, so there is no pane to be focused
 and nothing to race.
 
 **`preventDefault` fires only after a binding has decided to act**, which is
 what keeps the browser's own Cmd+F everywhere else and leaves an Alt chord this
 tab does nothing with (a one-tab pane's `Alt+]`) alone. The tab chords match on
-**`e.code`**, not `e.key`: Alt+W on macOS *is* the character `∑`.
+**`e.code`**, not `e.key`: Alt+W on macOS *is* the character `∑`. Cmd/Ctrl+Alt+F
+matches on `code` for the same reason (Alt+F is `ƒ`), and stands down under
+AltGr (`getModifierState('AltGraph')`), which Windows reports as Ctrl+Alt and
+which types a character on some layouts.
+
+**Which replace chord the browser lets the page have** is **not yet checked
+with real keystrokes** in Chrome or Safari. What is verified: with trusted
+key events delivered to the page (CDP, Chrome 157 on macOS) `Cmd+Alt+F` opens
+the replace row and `Ctrl+G` the go-to-line prompt. Whether each browser hands
+the page `Cmd+Alt+F` before acting on it itself needs a person at the keyboard;
+the bar's own **Replace** toggle is the route that does not depend on it.
+`Ctrl+H` is bound off macOS only and is untested there.
 
 **Which is also the price, and it is paid in the editor.** On macOS Option+W,
 Option+`[` and Option+`]` are `∑`, `“` and `‘`, and the predicate deliberately
@@ -247,17 +269,21 @@ the chord predicate recognises it by the `.files-content-editor` class
 text control it is still claimed from. `CodeEditor`'s own keydown handler runs
 ahead of every CodeMirror keymap and returns before anything at all while an IME
 composition is in flight (`isComposing`, the keydown that commits a candidate);
-the keys it then decides itself are listed below. Escape is claimed by both
-the find bar and the editor and is resolved by
-precedence, not by focus: with the bar up Escape closes the bar, and only once
-it is gone does it discard the edit. In **view** mode there is no editor to
+the keys it then decides itself are listed below. Escape over the editor is
+the find bar's while one is up — the pane passes `onCancel` (`closeFind`) only
+then, wherever the caret is, since stepping matches leaves it in the code — and
+otherwise the editor's own: collapse several cursors, arm the Tab hatch. There
+is no edit to end or discard (task 2743), so nothing else claims it. Over a
+read-only **viewer** there is no editor to
 route it, so the pane binds Escape at the document level while the bar is up —
 otherwise clicking one of the bar's own buttons left the key answered by
-nothing. The close-confirm bar (task 809, the tab's one modal-ish prompt) binds
+nothing. The go-to-line prompt answers its own Escape (close, caret back to the
+code) and stops it. The close-confirm bar (task 809, the tab's one modal-ish prompt) binds
 Escape on itself for the same reason it autofocuses "keep editing": both keys a
 user reaches for to dismiss a prompt have to resolve it, and both resolve it the
-safe way. It stops the event rather than letting it bubble, since the editor
-underneath answers Escape by discarding the very draft the bar is protecting.
+safe way. It stops the event rather than letting it bubble, so nothing
+underneath answers the same keystroke as well; `RevertConfirmBar` (task 2743)
+does the same.
 
 **The editor's own keys (task 2742).** What the editor answers when it has the
 caret, beyond the Files chords above. `Mod` is Cmd on macOS and Ctrl elsewhere.
@@ -270,7 +296,7 @@ rather than from memory.
 | Key | Does |
 |---|---|
 | `Tab` / `Shift+Tab` | Indent by the file's own unit (`detectIndentUnit`) / dedent; a selection spanning lines is block-indented. One Tab after `Escape` is a plain focus move |
-| `Escape` | Collapses several cursors to one; with one, `onCancel` (the find bar closes first, then the editor ends editing) |
+| `Escape` | Collapses several cursors to one; with one, `onCancel` when the caller passed one — in the Files tab only while the find bar is up, which it closes; otherwise nothing but arming the Tab hatch below |
 | `Cmd/Ctrl+S`, `Cmd/Ctrl+Enter` | `onSave` when the caller has one; with none (the Scripts body box) `Mod-Enter` does nothing (CodeMirror's insert-blank-line binding is left out) and `Mod-S` is the browser's |
 | `Mod+Z` | Undo (CodeMirror's own history, not the browser's) |
 | `Mod+Y` (`Cmd+Shift+Z` on macOS; `Ctrl+Shift+Z` also on Linux) | Redo |
@@ -301,7 +327,7 @@ deliberately **not** installed, so `Cmd/Ctrl+F` is only ever the Files find bar.
 Arrow, Home/End, Page and word/line-deletion keys follow `defaultKeymap`
 unchanged.
 
-**Escape also arms the next Tab as a plain focus move**, in either mode and in
+**Escape also arms the next Tab as a plain focus move**, in
 every mount of this editor (`tabEscapeAfter`). Taking Tab away from the browser
 takes the last keyboard route out of an indented line with it — Shift+Tab falls
 through only once there is nothing left to dedent — which is a WCAG 2.1.2 trap,
@@ -327,8 +353,8 @@ here.
 
 **Escape in the panel is bound on the panel**, not on `document` — the one place
 this feature deviates from the find bar's shape, and deliberately. The panel
-sits *beside* the file rather than over it, so the editor's Escape (discard the
-edit) and the find bar's (close the bar) have to keep working while it is open;
+sits *beside* the file rather than over it, so the editor's own Escape and the
+find bar's (close the bar) have to keep working while it is open;
 a React `onKeyDown` on the panel's own wrapper answers the key exactly when
 focus is inside it. Closing hands the caret to the tree pane's search toggle —
 a real control that outlives the panel, the same rule `closeFind` follows.

@@ -10,10 +10,15 @@
 // its textarea. Both work in **offsets into the same string**, which is why
 // nothing here knows about lines, DOM nodes or Prism markup.
 //
-// The search is a literal substring scan, never a regular expression. A query
-// is a user's typing, not a pattern language: `RegExp` would turn `(` into a
-// syntax error and `.*` into a surprise, and building one from arbitrary text
-// is the same class of mistake as splicing a value into a shell string.
+// The search is a literal substring scan unless the user turns the regex toggle
+// on (naru task 2743). A query is a user's typing, not a pattern language:
+// treating it as a `RegExp` by default would turn `(` into a syntax error and
+// `.*` into a surprise. With the toggle on the query *is* a pattern, an invalid
+// one is reported (`FindResult.error`) rather than thrown, and the matches are
+// still plain offset ranges, so everything downstream is unchanged.
+//
+// Replace (naru task 2743) is decided here too, as a list of edits against the
+// searched text (`replaceEdits`); the editor applies them as one transaction.
 
 /** One hit, as a half-open offset range into the searched text. */
 export interface FindMatch {
@@ -21,10 +26,12 @@ export interface FindMatch {
   end: number
 }
 
-/** The two toggles the bar offers. Both off is the plain case. */
+/** The toggles the bar offers. All off is the plain case. `regex` is optional
+ * so a caller with no such toggle (the project search panel) need not say. */
 export interface FindOptions {
   caseSensitive: boolean
   wholeWord: boolean
+  regex?: boolean
 }
 
 /** What `findMatches` answers: the hits, and whether it stopped early. */
@@ -32,6 +39,8 @@ export interface FindResult {
   matches: FindMatch[]
   /** True when the file holds more matches than were returned. */
   capped: boolean
+  /** Set when the query is not a valid regular expression (regex mode only). */
+  error?: string
 }
 
 /** The most matches one search reports.
@@ -101,8 +110,10 @@ export function findMatches(
   text: string,
   query: string,
   options: FindOptions,
+  limit: number = MAX_FIND_MATCHES,
 ): FindResult {
   if (query === '') return { matches: [], capped: false }
+  if (options.regex) return findRegexMatches(text, query, options, limit)
   const matches: FindMatch[] = []
   const headIsWord = isWordChar(query[0])
   const tailIsWord = isWordChar(query[query.length - 1])
@@ -116,13 +127,152 @@ export function findMatches(
     matches.push({ start: i, end })
     // One past the cap is what proves there *are* more — reporting `capped`
     // off a full array alone would flag a file holding exactly the cap.
-    if (matches.length > MAX_FIND_MATCHES) {
+    if (matches.length > limit) {
       matches.pop()
       return { matches, capped: true }
     }
     i = end - 1
   }
   return { matches, capped: false }
+}
+
+/** The query as a pattern, or the reason it is not one. `m` so `^`/`$` are
+ * per line, which is what a find over a file means by them. */
+function compileQuery(query: string, caseSensitive: boolean, sticky: boolean): RegExp | string {
+  try {
+    return new RegExp(query, `${sticky ? 'y' : 'g'}m${caseSensitive ? '' : 'i'}`)
+  } catch (e) {
+    return e instanceof Error ? e.message : 'Invalid regular expression'
+  }
+}
+
+/** Whether `[start, end)` passes the whole-word rule — the literal scan's rule,
+ * asked of the matched text: a boundary only on the sides that end in a word
+ * character. */
+function wordBounded(text: string, start: number, end: number): boolean {
+  if (isWordChar(text[start]) && isWordChar(text[start - 1])) return false
+  if (isWordChar(text[end - 1]) && isWordChar(text[end])) return false
+  return true
+}
+
+/**
+ * `findMatches` for a regex query. Same contract: in order, never overlapping,
+ * capped one past `limit`.
+ *
+ * An empty match (`a*` between letters, a bare `^`) is skipped, not reported:
+ * there is nothing to highlight or replace in it, and stepping past it by one
+ * is also what keeps the scan moving forward on every iteration.
+ */
+function findRegexMatches(
+  text: string,
+  query: string,
+  options: FindOptions,
+  limit: number,
+): FindResult {
+  const re = compileQuery(query, options.caseSensitive, false)
+  if (typeof re === 'string') return { matches: [], capped: false, error: re }
+  const matches: FindMatch[] = []
+  let hit: RegExpExecArray | null
+  while ((hit = re.exec(text)) !== null) {
+    const start = hit.index
+    const end = start + hit[0].length
+    if (end === start || (options.wholeWord && !wordBounded(text, start, end))) {
+      re.lastIndex = start + 1
+      continue
+    }
+    matches.push({ start, end })
+    if (matches.length > limit) {
+      matches.pop()
+      return { matches, capped: true }
+    }
+  }
+  return { matches, capped: false }
+}
+
+/** One replacement: `[start, end)` of the searched text becomes `text`. */
+export interface TextEdit {
+  start: number
+  end: number
+  text: string
+}
+
+/**
+ * A regex replacement template with its `$` forms filled in: `$1`..`$99` are
+ * capture groups, `$&` the whole match, `$$` a literal dollar. `groups` is the
+ * match array (`groups[0]` the whole match). A number naming no group is left
+ * as typed, the way `String.prototype.replace` leaves it; a group that did not
+ * take part in the match is empty.
+ */
+export function expandReplacement(
+  template: string,
+  groups: readonly (string | undefined)[],
+): string {
+  return template.replace(/\$(\$|&|\d{1,2})/g, (whole, token: string) => {
+    if (token === '$') return '$'
+    if (token === '&') return groups[0] ?? ''
+    // Two digits when that group exists, else the first digit alone.
+    if (token.length === 2 && Number(token) >= 1 && Number(token) < groups.length) {
+      return groups[Number(token)] ?? ''
+    }
+    const one = Number(token[0])
+    if (one >= 1 && one < groups.length) return (groups[one] ?? '') + token.slice(1)
+    return whole
+  })
+}
+
+/**
+ * The edits that replace matches of `query` in `text` with `replacement` —
+ * every match, or just `only` (the one the bar is on).
+ *
+ * Every match means **every** match: the scan is not held to
+ * `MAX_FIND_MATCHES`, which exists for the highlight layer's DOM and has no
+ * bearing on rewriting a string. Replacing the first 2000 of 5000 and stopping
+ * would leave a file half-changed behind a label that said "all".
+ *
+ * `only` is looked up among the real matches rather than trusted, so a match
+ * that is stale (the text moved under it) replaces nothing instead of the
+ * wrong characters. In regex mode the template's `$1` forms are filled from
+ * that match's own groups; in literal mode the replacement is verbatim.
+ */
+export function replaceEdits(
+  text: string,
+  query: string,
+  replacement: string,
+  options: FindOptions,
+  only?: FindMatch,
+): { edits: TextEdit[]; error?: string } {
+  const { matches, error } = findMatches(text, query, options, Infinity)
+  if (error !== undefined) return { edits: [], error }
+  const targets =
+    only === undefined
+      ? matches
+      : matches.filter((m) => m.start === only.start && m.end === only.end)
+  if (!options.regex) {
+    return { edits: targets.map((m) => ({ ...m, text: replacement })) }
+  }
+  const re = compileQuery(query, options.caseSensitive, true)
+  if (typeof re === 'string') return { edits: [], error: re }
+  const edits: TextEdit[] = []
+  for (const m of targets) {
+    re.lastIndex = m.start
+    const groups = re.exec(text)
+    // The sticky pattern matches here by construction (the scan found it);
+    // the whole match is the fallback only so a miss cannot throw.
+    edits.push({ ...m, text: expandReplacement(replacement, groups ?? [text.slice(m.start, m.end)]) })
+  }
+  return { edits }
+}
+
+/** `text` with `edits` applied — ordered, non-overlapping, offsets into `text`
+ * itself (what `replaceEdits` returns, and what the editor's transaction takes). */
+export function applyEdits(text: string, edits: readonly TextEdit[]): string {
+  let out = ''
+  let at = 0
+  for (const edit of edits) {
+    out += text.slice(at, edit.start) + edit.text
+    at = edit.end
+  }
+  return out + text.slice(at)
 }
 
 /**

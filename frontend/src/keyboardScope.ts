@@ -65,18 +65,22 @@ export function shouldIgnoreShortcut(e: KeyboardEvent, claimedFrom?: string): bo
 }
 
 /** Which of the Files tab's chords is asking: `'find'` is Cmd/Ctrl+F,
- * `'search'` is Cmd/Ctrl+Shift+F (the project-wide search panel, mesa task
- * 813), `'tabs'` is Alt+W and Alt+[ / Alt+]. They differ on exactly one thing
- * — which text controls they may still be claimed from — see
- * `shouldIgnoreFilesShortcut`. */
-export type FilesChord = 'find' | 'search' | 'tabs'
+ * `'replace'` is Cmd/Ctrl+Alt+F (and Ctrl+H off macOS) and `'goto'` is Ctrl+G
+ * (naru task 2743), `'search'` is Cmd/Ctrl+Shift+F (the project-wide search
+ * panel, mesa task 813), `'tabs'` is Alt+W and Alt+[ / Alt+]. They differ on
+ * exactly one thing — which text controls they may still be claimed from —
+ * see `shouldIgnoreFilesShortcut`. */
+export type FilesChord = 'find' | 'replace' | 'goto' | 'search' | 'tabs'
 
 /**
  * The text controls each chord is still claimed *from*, beyond the code editor
  * every one of them claims.
  *
  * `find` keeps its own query box, where a second Cmd/Ctrl+F is the reflex for
- * "select what I typed and let me retype it"; `search` keeps both search-ish
+ * "select what I typed and let me retype it", and the replace box under it,
+ * from which the same key goes back up to the query; `replace` keeps the same
+ * two, since it moves the caret between them; `goto` keeps only its own
+ * prompt; `search` keeps both search-ish
  * boxes, since Cmd/Ctrl+Shift+F is that same reflex for the panel and is also
  * the natural escalation from the in-file bar to the whole project — and
  * unlike the tab chords it has somewhere deliberate to put the caret
@@ -84,14 +88,16 @@ export type FilesChord = 'find' | 'search' | 'tabs'
  * below.
  */
 const CHORD_FIELDS: Record<FilesChord, readonly string[]> = {
-  find: ['files-find-input'],
+  find: ['files-find-input', 'files-replace-input'],
+  replace: ['files-find-input', 'files-replace-input'],
+  goto: ['files-goto-input'],
   search: ['files-find-input', 'files-search-input'],
   tabs: [],
 }
 
 /**
- * True when a Files-tab chord (Cmd/Ctrl+F, Cmd/Ctrl+Shift+F, Alt+W,
- * Alt+[ / Alt+]) must let the keystroke go — to the browser's own binding, or
+ * True when a Files-tab chord (Cmd/Ctrl+F, Cmd/Ctrl+Alt+F, Ctrl+G,
+ * Cmd/Ctrl+Shift+F, Alt+W, Alt+[ / Alt+]) must let the keystroke go — to the browser's own binding, or
  * to whatever else is on screen.
  *
  * One predicate for all of them rather than one per chord: they ask nearly the
