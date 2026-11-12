@@ -725,6 +725,7 @@ export function Sidebar({
                           <a
                             className={p.id === activeProjectId ? 'active' : ''}
                             href={projectHref(p.id)}
+                            title={`${p.name} · Project ${p.id}`}
                           >
                             <span className="nav-project-name">{p.name}</span>
                             {activeAgentProjectIds.has(p.id) && (
@@ -777,6 +778,7 @@ export function Sidebar({
                         <a
                           className={p.id === activeProjectId ? 'active' : ''}
                           href={projectHref(p.id)}
+                          title={`${p.name} · Project ${p.id}`}
                         >
                           <span className="nav-project-name">{p.name}</span>
                         </a>
