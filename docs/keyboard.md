@@ -239,10 +239,15 @@ nowhere and loses the window; Ctrl+Tab and Cmd/Ctrl+Shift+`[`/`]` are skipped
 for the same reason, which is why the bindings are Alt-based.
 
 Inside the editor itself, Tab/Shift+Tab/Enter/brackets are *editing* keys
-rather than shortcuts and never reach either predicate — `CodeEditor` returns
-before consulting `editorInput.ts` the moment any of `meta`/`ctrl`/`alt` is
-held, and before anything at all while an IME composition is in flight
-(`isComposing`, the keydown that commits a candidate). Escape is claimed by both
+rather than shortcuts. The editor is a CodeMirror 6 view (task 2742) whose
+`.cm-content` is a `contenteditable` div, not a `<textarea>`, so the bare-key
+predicate stands down in it through its contenteditable rule (rule 2 below) and
+the chord predicate recognises it by the `.files-content-editor` class
+`CodeEditor` puts on that element (`EditorView.contentAttributes`) — the one
+text control it is still claimed from. `CodeEditor`'s own keydown handler runs
+ahead of every CodeMirror keymap and returns before anything at all while an IME
+composition is in flight (`isComposing`, the keydown that commits a candidate);
+the keys it then decides itself are listed below. Escape is claimed by both
 the find bar and the editor and is resolved by
 precedence, not by focus: with the bar up Escape closes the bar, and only once
 it is gone does it discard the edit. In **view** mode there is no editor to
@@ -253,6 +258,48 @@ Escape on itself for the same reason it autofocuses "keep editing": both keys a
 user reaches for to dismiss a prompt have to resolve it, and both resolve it the
 safe way. It stops the event rather than letting it bubble, since the editor
 underneath answers Escape by discarding the very draft the bar is protecting.
+
+**The editor's own keys (task 2742).** What the editor answers when it has the
+caret, beyond the Files chords above. `Mod` is Cmd on macOS and Ctrl elsewhere.
+`CodeEditor` decides the first group itself; the rest is CodeMirror's
+`keymap` (`defaultKeymap`, `historyKeymap`, `foldKeymap`, `closeBracketsKeymap`,
+and `Mod-d` from `@codemirror/search`), read from the installed
+`@codemirror/commands`, `@codemirror/language` and `@codemirror/search` sources
+rather than from memory.
+
+| Key | Does |
+|---|---|
+| `Tab` / `Shift+Tab` | Indent by the file's own unit (`detectIndentUnit`) / dedent; a selection spanning lines is block-indented. One Tab after `Escape` is a plain focus move |
+| `Escape` | Collapses several cursors to one; with one, `onCancel` (the find bar closes first, then the editor ends editing) |
+| `Cmd/Ctrl+S`, `Cmd/Ctrl+Enter` | `onSave` when the caller has one; with none (the Scripts body box) `Mod-Enter` does nothing (CodeMirror's insert-blank-line binding is left out) and `Mod-S` is the browser's |
+| `Mod+Z` | Undo (CodeMirror's own history, not the browser's) |
+| `Mod+Y` (`Cmd+Shift+Z` on macOS; `Ctrl+Shift+Z` also on Linux) | Redo |
+| `Mod+U` | Undo the last selection change |
+| `Mod+D` | Add the next occurrence of the selection as another selection |
+| `Cmd+Alt+[` / `Cmd+Alt+]` (`Ctrl+Shift+[` / `Ctrl+Shift+]` elsewhere) | Fold / unfold the code at the caret |
+| `Ctrl+Alt+[` / `Ctrl+Alt+]` | Fold all / unfold all |
+| `Mod+/` | Toggle line comment |
+| `Mod+[` / `Mod+]` | Indent less / more |
+| `Mod+Alt+\` | Re-indent the selection |
+| `Alt+ArrowUp` / `Alt+ArrowDown` | Move the line (or selected lines) up / down |
+| `Shift+Alt+ArrowUp` / `Shift+Alt+ArrowDown` | Copy the line up / down |
+| `Mod+Alt+ArrowUp` / `Mod+Alt+ArrowDown` | Add a cursor on the line above / below |
+| `Shift+Mod+K` | Delete the line |
+| `Shift+Mod+\` | Move the caret to the matching bracket |
+| `Mod+I` | Select the parent syntax node |
+| `Alt+L` (`Ctrl+L` on macOS) | Select the line |
+| `Backspace` between an empty pair | Deletes both brackets/quotes (`closeBracketsKeymap`) |
+| Alt/Option-click, or Cmd-click (macOS) / Ctrl-click (elsewhere) | Add a cursor |
+| Alt-drag | Rectangular (column) selection |
+
+The cursor, selection and fold keys above are CodeMirror's defaults and are
+not rebindable; none of them is in the Settings keymap table.
+The Files tab's Alt chords (`Alt+W`, `Alt+[`, `Alt+]`) do not collide with
+them: those handlers return on `ctrlKey`/`metaKey`, and the editor's `Alt+Arrow`
+bindings are on other keys. CodeMirror's search panel (`Mod+F` there) is
+deliberately **not** installed, so `Cmd/Ctrl+F` is only ever the Files find bar.
+Arrow, Home/End, Page and word/line-deletion keys follow `defaultKeymap`
+unchanged.
 
 **Escape also arms the next Tab as a plain focus move**, in either mode and in
 every mount of this editor (`tabEscapeAfter`). Taking Tab away from the browser

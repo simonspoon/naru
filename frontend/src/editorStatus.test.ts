@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest'
 import {
   caretPosition,
   carriedOffset,
-  gutterDigits,
   gutterText,
   lineAtScroll,
   lineCount,
@@ -129,35 +128,6 @@ describe('gutterText', () => {
     expect(rows).toEqual(['1', '2', '3'])
     const draftRows = gutterText(lineCount(content)).split('\n')
     expect(draftRows).toEqual(['1', '2', '3', '4'])
-  })
-})
-
-describe('gutterDigits', () => {
-  it('is the width of the widest number the gutter will hold', () => {
-    expect(gutterDigits(9)).toBe(2)
-    expect(gutterDigits(99)).toBe(2)
-    expect(gutterDigits(100)).toBe(3)
-    expect(gutterDigits(99999)).toBe(5)
-    expect(gutterDigits(131072)).toBe(6)
-  })
-
-  it('never asks for a rail too narrow to read', () => {
-    expect(gutterDigits(1)).toBe(2)
-    expect(gutterDigits(0)).toBe(2)
-    expect(gutterDigits(-4)).toBe(2)
-    expect(gutterDigits(NaN)).toBe(2)
-  })
-
-  it('fits every row of the text built from the same count', () => {
-    // The pairing the width depends on: the two are always called with one
-    // count, so no number the <pre> paints can be wider than the column.
-    for (const lines of [1, 7, 42, 1000, 131072]) {
-      const widest = Math.max(
-        ...gutterText(Math.min(lines, 200)).split('\n').map((n) => n.length),
-        String(lines).length,
-      )
-      expect(gutterDigits(lines)).toBeGreaterThanOrEqual(widest)
-    }
   })
 })
 

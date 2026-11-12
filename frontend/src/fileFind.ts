@@ -259,48 +259,15 @@ export function findSegments(text: string, matches: FindMatch[]): FindSegment[] 
 }
 
 /**
- * The `scrollTop` that brings a 1-based line into a textarea's viewport, moving
- * as little as possible — the "reveal" every editor does when a search lands
- * off screen, and nothing when the line is already visible (stepping between
- * two matches on screen must not jump the view).
+ * The scroll offset that brings a **measured** box into a viewport, moving as
+ * little as possible — the "reveal" every editor does when a search lands off
+ * screen, and nothing when the box is already visible (stepping between two
+ * matches on screen must not jump the view). A missing or nonsensical
+ * measurement leaves the scroll alone rather than jumping to the start.
  *
- * Arithmetic rather than `scrollIntoView` because the thing to reveal is an
- * offset inside a `<textarea>`, which has no element to scroll to. It holds
- * only while every line is one row tall, which is why the caller applies it
- * only with soft wrap off; wrapped, a logical line and a visual row are not the
- * same thing and this would undershoot. A missing or nonsensical line height
- * (an unmounted node measures as `NaN`) leaves the scroll alone rather than
- * jumping to the top.
- */
-export function scrollTopForLine(
-  line: number,
-  lineHeight: number,
-  viewportHeight: number,
-  scrollTop: number,
-): number {
-  if (!Number.isFinite(lineHeight) || lineHeight <= 0) return scrollTop
-  const top = (Math.max(Math.trunc(line), 1) - 1) * lineHeight
-  return scrollTopForBox(top, lineHeight, viewportHeight, scrollTop)
-}
-
-/**
- * The same reveal, for a box whose position was **measured** rather than
- * calculated — `offsetTop`/`offsetHeight` of the current `<mark>` in the find
- * layer.
- *
- * This is what makes find work in the editor with soft wrap **on**. Wrapped, a
- * logical line is several visual rows, so `scrollTopForLine`'s line×height
- * undershoots and the caller used to skip the scroll altogether: the counter
- * stepped, the current-match class moved, and the view sat still with the match
- * off screen — worse than no find at all, and silently, for the rest of a
- * session in which the user turned wrap on. The layer that paints the
- * highlights is aligned to the text in *both* wrap modes by construction, so
- * the mark's own offset is the one number the arithmetic cannot produce and the
- * DOM already has. (The viewer does the *vertical* equivalent with
- * `scrollIntoView`; a textarea has no element inside it to scroll to, which is
- * why this is a number and not a call. Its sideways half is the function
- * below — `scrollIntoView` has no notion of an overlay, so the gutter would
- * swallow the match there exactly as it would here.)
+ * Its caller is the sideways reveal below. (The editor reveals a match through
+ * CodeMirror's own scroll-into-view, and the viewer's *vertical* reveal is a
+ * real `scrollIntoView` on the current `<mark>`.)
  */
 export function scrollTopForBox(
   top: number,

@@ -5,9 +5,9 @@
 // invisible in a screenshot and obvious in a unit test — and these are exactly
 // the predicates that historically shipped wrong.
 //
-// Two line counts, deliberately not one. A `<textarea>` shows a trailing
-// newline as a real, empty last line the caret can sit on; a `<pre>` swallows
-// exactly one (the same asymmetry `highlightOverlaySource` pads around). So
+// Two line counts, deliberately not one. An editor shows a trailing newline as
+// a real, empty last line the caret can sit on; a `<pre>` swallows exactly
+// one. So
 // `lineCount` answers for the editor and `viewerLineCount` for the read-only
 // pane, and each gutter is built from the count of the thing it sits beside.
 
@@ -151,24 +151,4 @@ export function gutterText(lines: number): string {
   const out: string[] = []
   for (let n = 1; n <= total; n++) out.push(String(n))
   return out.join('\n')
-}
-
-/** The narrowest column, in characters, that fits every number `gutterText`
- * will put in it.
- *
- * The editor's gutter is absolutely positioned, so unlike the read-only pane's
- * it cannot size itself to its content — its width and the padding that pushes
- * the code clear of it are two separate declarations, and a fixed value for
- * both is what clipped a six-digit number on its LEFT (`131072` painting as
- * `31072`, a plausible wrong number rather than a visibly truncated one) on any
- * file long enough to need one. `FILE_CONTENT_CAP` is 256 KiB, which is well
- * over a hundred thousand lines of a log or a generated fixture, so six digits
- * is a real file and not a hypothetical.
- *
- * Floored at 2 so a short file doesn't get a razor-thin rail, and defensive
- * about its input the same way `gutterText` is — the two are always called with
- * the same count and must never disagree about it. */
-export function gutterDigits(lines: number): number {
-  const total = Number.isFinite(lines) ? Math.max(Math.trunc(lines), 1) : 1
-  return Math.max(String(total).length, 2)
 }

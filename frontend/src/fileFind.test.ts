@@ -9,7 +9,6 @@ import {
   matchLabel,
   scrollLeftForBox,
   scrollTopForBox,
-  scrollTopForLine,
   stepMatch,
   type FindMatch,
 } from './fileFind'
@@ -362,43 +361,6 @@ describe('findSegments', () => {
       { text: 'a', match: -1 },
       { text: 'b', match: 0 },
     ])
-  })
-})
-
-describe('scrollTopForLine', () => {
-  // A 100px viewport of 20px rows: five whole lines on screen.
-  const view = 100
-  const lh = 20
-
-  it('leaves a visible line alone', () => {
-    expect(scrollTopForLine(3, lh, view, 0)).toBe(0)
-    expect(scrollTopForLine(5, lh, view, 0)).toBe(0)
-  })
-
-  it('scrolls up to a line above the viewport', () => {
-    expect(scrollTopForLine(2, lh, view, 100)).toBe(20)
-  })
-
-  it('scrolls down the minimum to reveal a line below it', () => {
-    expect(scrollTopForLine(6, lh, view, 0)).toBe(20)
-    expect(scrollTopForLine(10, lh, view, 0)).toBe(100)
-  })
-
-  it('never scrolls above the top', () => {
-    expect(scrollTopForLine(1, lh, view, 50)).toBe(0)
-    expect(scrollTopForLine(1, lh, view, 0)).toBe(0)
-  })
-
-  it('treats a line under 1 as the first line', () => {
-    expect(scrollTopForLine(0, lh, view, 50)).toBe(0)
-    expect(scrollTopForLine(-4, lh, view, 50)).toBe(0)
-  })
-
-  it('leaves the scroll alone when it cannot measure', () => {
-    expect(scrollTopForLine(20, NaN, view, 40)).toBe(40)
-    expect(scrollTopForLine(20, 0, view, 40)).toBe(40)
-    expect(scrollTopForLine(20, lh, 0, 40)).toBe(40)
-    expect(scrollTopForLine(20, lh, NaN, 40)).toBe(40)
   })
 })
 

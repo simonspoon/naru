@@ -1,6 +1,6 @@
 import { refractor } from 'refractor/core'
 import { describe, expect, it } from 'vitest'
-import { highlightOverlaySource, prismGrammar } from './syntaxHighlighter'
+import { prismGrammar } from './syntaxHighlighter'
 
 // Importing the module under test is what runs its registerLanguage calls,
 // and PrismLight's registerLanguage ignores the name it is given and hands the
@@ -92,23 +92,6 @@ describe('prismGrammar', () => {
     expect(prismGrammar('brainfuck')).toBeUndefined()
     expect(prismGrammar('')).toBeUndefined()
     expect(prismGrammar(null)).toBeUndefined()
-  })
-})
-
-describe('highlightOverlaySource', () => {
-  it('leaves a body with no trailing newline alone', () => {
-    expect(highlightOverlaySource('fn main() {}')).toBe('fn main() {}')
-    expect(highlightOverlaySource('')).toBe('')
-  })
-
-  it('pads one newline so <pre> keeps the textarea’s line count', () => {
-    // A <pre> swallows exactly one trailing newline; without the pad, the
-    // caret's line and the painted line drift apart from here on.
-    expect(highlightOverlaySource('a\n')).toBe('a\n\n')
-  })
-
-  it('pads only once however many blank lines trail', () => {
-    expect(highlightOverlaySource('a\n\n\n')).toBe('a\n\n\n\n')
   })
 })
 

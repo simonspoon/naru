@@ -556,7 +556,7 @@ function ContentPane({
     null,
   )
   // The caret the status bar reports (task 809). Local, and not in
-  // `FileUiState`: it describes where one live textarea's cursor is, so it dies
+  // `FileUiState`: it describes where one live editor's cursor is, so it dies
   // with the mounted editor exactly as `saving` does. A freshly opened editor
   // autofocuses at offset 0, which is where this starts.
   const [caret, setCaret] = useState<CaretPosition>({ line: 1, col: 1 })
@@ -732,7 +732,7 @@ function ContentPane({
    * failure the reveal exists to prevent.
    *
    * Focus stays in the query box on purpose: Enter has to keep stepping, and a
-   * textarea that grabbed the caret on every step would swallow the next
+   * editor that grabbed the caret on every step would swallow the next
    * character of the query. Closing the bar is what hands focus back
    * (`closeFind`), with this selection already in place and ready to be typed
    * over. */
@@ -916,8 +916,8 @@ function ContentPane({
   // correct with soft wrap on as much as off. What the browser will not do is
   // *not* scroll: `block: 'center'` re-centres unconditionally, so stepping
   // between two matches a screenful apart threw the file by half a pane on every
-  // Enter while the editor, whose `scrollTopForBox` returns the scroll it was
-  // given for a box already in view, sat still on the same keystroke. Asking
+  // Enter while the editor, whose reveal scrolls to the `nearest` edge and so
+  // leaves a match already in view alone, sat still on the same keystroke. Asking
   // first (`boxNeedsReveal`) is what makes the two panes answer alike. The band
   // it is asked about is not the scrollport: `.files-content-top` is pinned over
   // its top and the status bar over its bottom, and a match painted under either
@@ -1044,15 +1044,15 @@ function ContentPane({
   function startEdit() {
     // Editing and browsing history are mutually exclusive views of the same
     // area — entering edit mode closes history rather than trying to show a
-    // textarea and a commit diff in the same pane.
+    // editor and a commit diff in the same pane.
     setSaveError(null)
     // The editor autofocuses at offset 0, so the status bar must start there
     // too rather than keeping a caret from a previous edit of this file.
     setCaret({ line: 1, col: 1 })
-    // LF, whatever the file on disk uses: a textarea hands its value back
+    // LF, whatever the file on disk uses: the editor holds its text
     // LF-normalised, so a CRLF draft would not be offset-for-offset the string
-    // the browser reports — find would paint its highlights correctly and
-    // select a range one character per line early in the textarea underneath.
+    // the editor holds — find would count its matches correctly and paint and
+    // select each one a character per line early in the editor underneath.
     // See `normalizeNewlines`.
     const content = normalizeNewlines(data!.content)
     carryFind(content)
@@ -1107,7 +1107,7 @@ function ContentPane({
       //
       // Edit mode deliberately STAYS open. Cmd/Ctrl+S is bound to this, and in
       // every editor that chord is the every-thirty-seconds reflex pressed
-      // mid-thought — swapping the textarea for the viewer on each press drops
+      // mid-thought — swapping the editor for the viewer on each press drops
       // the caret, the scroll and the find bar, and on a markdown file lands
       // the user in rendered prose instead of the source they were editing. The
       // Save button shares the binding's meaning rather than the other way
@@ -1418,7 +1418,7 @@ function FileStatusBar({
  *
  * Enter/Shift+Enter step rather than submit: there is no form here, and Enter
  * is the one key every editor's find box binds. Escape closes, which is also
- * the textarea's own discard binding — but the bar is a separate control, so a
+ * the editor's own discard binding — but the bar is a separate control, so a
  * keystroke aimed at it never reaches the editor underneath.
  *
  * **Every button hands the caret back to the query box** (`refocus`), which is

@@ -6001,31 +6001,12 @@ body.live-panel-ratio-resizing {
   font-size: 0.8rem;
 }
 
-/* Full-size editable twin of .files-content-text — same monospace sizing,
-   but a real form control filling the content pane instead of a <pre>. */
-.files-content-editor {
-  display: block;
-  width: 100%;
-  min-height: 60vh;
-  margin: 0;
-  padding: 0;
-  border: none;
-  outline: none;
-  resize: vertical;
-  background: none;
-  color: inherit;
-  font-family: var(--font-mono);
-  font-size: 0.8rem;
-  line-height: 1.4;
-}
-
-/* Syntax-highlighted edit mode (task 658): a coloured, inert copy of the
-   draft painted behind a textarea whose own text is transparent. The stack is
-   the sized, resizable box — both layers fill it absolutely, so neither one's
-   content drives its height, and only the textarea scrolls (its scroll offset
-   is mirrored onto the layer in JS). Any metric that differs between the two
-   shears the colours off the caret, so padding/font/line-height are set once
-   here and inherited by both. */
+/* The code editor (CodeEditor.tsx — CodeMirror 6 since naru task 2742). The
+   stack is the sized, resizable box and the one place the editor's font
+   metrics are stated; CodeMirror's own element fills it absolutely, so the
+   editor's content never drives the box's height and the code scrolls inside
+   it. Everything inside that element — gutter, caret, selection, token
+   colours — is styled from `editorTheme.ts`, in the app's theme variables. */
 .files-editor-stack {
   position: relative;
   height: 60vh;
@@ -6037,12 +6018,20 @@ body.live-panel-ratio-resizing {
   line-height: 1.4;
 }
 
+/* `!important`, and the doubled class, because CodeMirror's own base rule is
+   `position: relative !important` — without both, the editor stays in flow and
+   grows to the height of the file, and the pane scrolls instead of the code. */
+.files-editor-stack > .cm-editor.cm-editor {
+  position: absolute !important;
+  inset: 0;
+}
+
 /* In the Files tab the editor IS the pane, so it takes the pane's height rather
    than a fixed 60vh (task 809). The status bar under it is what made the
    difference conspicuous: `.files-content` is a full-height flex column and the
    bar takes its slack with `margin-top: auto`, so on any window taller than
    60vh the Ln/Col readout sat at the pane's bottom edge with a band of empty
-   pane between it and the last line of the file — and the textarea's own inner
+   pane between it and the last line of the file — and the editor's own inner
    scrollbar nested inside the pane's. `flex: 1` hands that slack to the box the
    bar is describing instead. `resize` goes with the height: a grabber that can
    only fight the flex line is a dead affordance. `min-height` (from the rule
@@ -6058,174 +6047,11 @@ body.live-panel-ratio-resizing {
   resize: none;
 }
 
-.files-editor-stack .files-content-editor,
-.files-editor-highlight,
-.files-editor-find {
-  position: absolute;
-  inset: 0;
-  margin: 0;
-  padding: 0;
-  border: none;
-  font: inherit;
-  line-height: inherit;
-  tab-size: 4;
-  white-space: pre;
-  /* All three reserve the same scrollbar strip, whether or not they show one.
-     Only the textarea scrolls, so on any platform with classic (space-taking)
-     scrollbars — Windows, most Linux, macOS with "Show scroll bars: Always" —
-     it alone would lose ~15px of content width to one. With `wrap="off"` that
-     cost nothing (nothing wraps), which is why `wrap="off"` could be called
-     load-bearing; with soft wrap on it means the textarea breaks a line a
-     character or two earlier than the layers do, and from that line down the
-     colours and the find marks sit a whole visual row off the caret. Reserving
-     the gutter on every layer is what keeps "aligned by construction" true in
-     both wrap modes rather than only on machines with overlay scrollbars. */
-  scrollbar-gutter: stable;
-}
-
-.files-editor-highlight {
-  overflow: hidden;
-  pointer-events: none;
-}
-
-/* The find layer (task 809): the same construction as the highlight layer
-   above and stacked directly on top of it, so a match's background sits over
-   the colours and under the caret. Its own glyphs are transparent — the text
-   is only there to put the marks in the right place, and the readable copy is
-   the coloured layer beneath. Not `z-index`ed: the gutter is (z-index: 1), so
-   it still paints over this, which is what keeps a highlight from sliding out
-   from under the numbers on a sideways scroll. */
-.files-editor-find {
-  overflow: hidden;
-  color: transparent;
-  pointer-events: none;
-  user-select: none;
-}
-
-/* PrismLight puts white-space/overflow inline on BOTH its <pre> and the
-   nested <code>, beating any class selector — the highlight layer scrolls as
-   one box (mirrored from the textarea), so the <pre> inside it must not
-   scroll on its own. Same !important reasoning as .files-frontmatter. */
-.files-editor-highlight pre,
-.files-editor-highlight .files-content-text {
-  overflow: visible !important;
-  white-space: pre !important;
-  font: inherit !important;
-  line-height: inherit !important;
-}
-
-.files-editor-stack .files-content-editor {
-  width: auto;
-  min-height: 0;
-  resize: none;
-  overflow: auto;
-  background: transparent;
-}
-
-/* Only when a highlight layer is actually behind the textarea (a language we
-   carry a grammar for). Without one — the plain fallback — transparent text
-   would be no text at all. */
-.files-editor-stack.overlay .files-content-editor {
-  /* The glyphs come from the layer behind; the caret and the selection
-     highlight are the two things a textarea alone can still draw. */
-  color: transparent;
-  caret-color: var(--text);
-}
-
-/* The global ::selection is opaque (cyan on --bg) — over transparent text it
-   would blank the selected region instead of highlighting it, since the
-   glyphs live in the layer underneath. Translucent, and keep the text
-   transparent so those glyphs still read through. */
-.files-editor-stack.overlay .files-content-editor::selection {
-  background: rgba(var(--cyan-rgb), 0.3);
-  color: transparent;
-}
-
-/* Line numbers beside the editor (task 809): a third layer of the same stack,
-   pinned to the left edge and scrolled vertically in step with the textarea.
-   Opaque, so a sideways scroll slides the code *under* it instead of past it,
-   and `user-select: none` + `aria-hidden` so a copied selection is code and
-   nothing else.
-
-   Alignment is by construction rather than by measurement: the gutter is a
-   single <pre> of newline-joined numbers inheriting the stack's font metrics,
-   so its rows are laid out by the same pass as the code's. `.gutter` on the
-   stack is what makes room for it — one padding value shared by BOTH text
-   layers, since a padding that differed between them would shear the colours
-   off the caret. Absent under `.wrap` (see CodeEditor's comment: a wrapped
-   logical line is several visual rows, so the gutter is hidden, not guessed
-   at).
-
-   The width is derived from the widest number it has to hold rather than
-   fixed: `--files-gutter-digits` is set on the stack by `CodeEditor` from
-   `gutterDigits(lineCount)`. A fixed 3.25rem held about five digits, and
-   FILE_CONTENT_CAP is 256 KiB — ~130k lines of a log or a generated fixture,
-   six — and with `text-align: right` plus `overflow: hidden` the sixth digit is
-   clipped on the LEFT, so line 131072 read as "31072": not a visibly truncated
-   number but a plausible wrong one sitting beside the code. `1ch` is exact
-   here because the box is monospace, and BOTH this width and the text layers'
-   padding below are calculated from that one property, so the numbers and the
-   code cannot end up sized against different counts. */
-.files-editor-gutter {
-  position: absolute;
-  top: 0;
-  left: 0;
-  bottom: 0;
-  z-index: 1;
-  width: calc(var(--files-gutter-digits, 4) * 1ch + 1rem);
-  margin: 0;
-  padding: 0 0.5rem;
-  overflow: hidden;
-  font: inherit;
-  line-height: inherit;
-  text-align: right;
-  white-space: pre;
-  color: var(--muted);
-  background: var(--panel);
-  border-right: 1px solid var(--border);
-  user-select: none;
-  pointer-events: none;
-}
-
-/* The gutter's own width plus a 0.75rem channel, from the same custom property
-   it is sized by — one number, so the code can never start under the numbers
-   however many digits they run to. */
-.files-editor-stack.gutter .files-content-editor,
-.files-editor-stack.gutter .files-editor-highlight,
-.files-editor-stack.gutter .files-editor-find {
-  padding-left: calc(var(--files-gutter-digits, 4) * 1ch + 1.75rem);
-}
-
-/* ...and the same number again as `scroll-padding`, which is what keeps the
-   CARET out from under the numbers. The padding above is part of the
-   scrollable content, not a reserved strip of the scrollport, so at any
-   `scrollLeft > 0` the leftmost visible column is real text — and the caret
-   reveal is the browser's own, which scrolls the minimum amount: holding
-   ArrowLeft back along a line longer than the pane parks the caret flush at
-   the padding-box edge, i.e. behind the opaque gutter, and the user then types
-   and deletes text they cannot see. `scroll-padding` is the one hook a UA
-   scroll-into-view offers for exactly this ("this band of the scrollport is
-   covered"), so it is stated here rather than chased in JS on every caret move.
-   Only the textarea scrolls, so only the textarea needs it — and it is the full
-   padding rather than the gutter's own width, so the caret arrives with the
-   0.75rem channel of code beside it that the find reveal also lands in. */
-.files-editor-stack.gutter .files-content-editor {
-  scroll-padding-left: calc(var(--files-gutter-digits, 4) * 1ch + 1.75rem);
-}
-
-/* Soft wrap (task 809). The textarea's own `wrap="soft"` is the authority on
-   where a line breaks; the highlight layer has to break identically or the
-   colours shear, so it takes the same two properties the browser's UA
-   stylesheet gives a textarea (`pre-wrap` + `break-word`) — and, wrapping, it
-   has nothing left to scroll sideways. Same !important reasoning as the
-   `white-space: pre` rules above: PrismLight sets these inline. */
-.files-editor-stack.wrap .files-content-editor,
-.files-editor-stack.wrap .files-editor-highlight,
-.files-editor-stack.wrap .files-editor-find,
-.files-editor-stack.wrap .files-editor-highlight pre,
-.files-editor-stack.wrap .files-editor-highlight .files-content-text {
-  white-space: pre-wrap !important;
-  overflow-wrap: break-word;
+/* A find match inside the editor is a decoration on the real text, not a
+   layer of transparent glyphs over it (that is the viewer's `.files-find-layer`,
+   below), so here the text keeps its colour and only the background is added. */
+.files-editor-stack .files-find-hit {
+  color: inherit;
 }
 
 .badge.files-lang-badge {
@@ -6350,8 +6176,7 @@ body.live-panel-ratio-resizing {
    So the inline metrics are overridden back to the row's, which is what makes
    "aligned by construction, never by measurement" true on the highlighted path
    as well as the plain-text one. `!important` is load-bearing and not stylistic
-   — an inline style beats any class selector otherwise. Exactly the treatment
-   `.files-editor-highlight pre` already gives the editor's stack. */
+   — an inline style beats any class selector otherwise. */
 .files-code-main pre,
 .files-code-main .files-content-text {
   font: inherit !important;

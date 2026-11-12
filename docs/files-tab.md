@@ -262,37 +262,37 @@ create, on its own stricter gate (`docs/fs-browse.md`).
   the button is disabled while a download is in flight, mirroring Save. A
   non-binary, non-truncated file's content pane
   shows an **Edit** button; clicking it swaps the rendered content for a
-  full-height `<textarea>` (`.files-content-editor`) pre-filled with the
+  full-height code editor (`.files-editor-stack`, one CodeMirror 6 `EditorView`
+  whose contenteditable `.cm-content` carries `.files-content-editor`) pre-filled
+  with the
   current content, with Save/Cancel actions (Escape cancels, Cmd/Ctrl+Enter
   saves) — the same draft/saving/error-state shape as `InlineEdit`, but
   purpose-built rather than reusing that component: `InlineEdit`'s
   click-anywhere-to-edit trigger would fight selecting/copying source code,
   and its fixed `rows={4}` textarea doesn't fit a whole file.
-  That textarea is syntax-highlighted while you type (task 658, `FileEditor`):
-  a `<textarea>` can only paint one colour, so the coloured copy is a
-  separate, inert layer *behind* it (`.files-editor-stack` is the sized,
-  resizable box; `.files-editor-highlight` the layer; the textarea's own text
-  is `color: transparent` with a visible `caret-color`). It runs the same
-  `prismGrammar` + PrismLight pair as the read-only `FileCode`, so edit mode
-  colours exactly what view mode does, and a language with no registered
-  grammar falls back to the plain textarea task 327 shipped. Four things keep
-  the layers aligned, each load-bearing: identical font metrics and zero
-  padding on both, `wrap="off"` on the textarea (it must never soft-wrap where
-  the `<pre>` would not), `highlightOverlaySource()` (a `<pre>` swallows one
-  trailing newline, which would otherwise shear every line below the caret —
-  the one piece of pure logic here, unit-tested in
-  `syntaxHighlighter.test.ts`), and mirroring the textarea's `scrollTop`/
-  `scrollLeft` onto the layer on every scroll event. Only the textarea is a
-  real control — the layer is `aria-hidden` and pointer-transparent, so caret,
-  selection and the accessibility tree all still come from the one element
-  holding the text; its `::selection` is overridden translucent because the
-  global opaque one would blank out the glyphs showing through from behind.
-  The highlight source is a `useDeferredValue` of the draft, so re-tokenising
-  a large file lags a frame behind the caret instead of sitting between the
-  key and the character. This is also the only caller that resolves a
-  **markdown** grammar for a whole file — a saved `.md` renders as prose (see
-  below), but editing one shows markdown source, so `markdown`/`md` map to
-  Prism's markdown grammar in the shared table. Save errors
+  That editor is `CodeEditor.tsx` (a transparent `<textarea>` over a
+  Prism-coloured copy of itself until naru task 2742 moved it onto CodeMirror
+  6; the overlay, its alignment rules and the `execCommand` plumbing went with
+  it). It is syntax-coloured while you type by a grammar loaded per language
+  from `editorLanguage.ts`: each is its own dynamic `import()`, so the chunk
+  is fetched the first time a file of that language is edited and the editor is
+  usable, plain, from the first frame. A Lezer `@codemirror/lang-*` package is
+  used where CodeMirror ships one (Rust, JavaScript/TypeScript/JSX/TSX, JSON,
+  Markdown, HTML, XML, CSS, Python, YAML, SQL, Go, PHP) and the long tail rides
+  `@codemirror/legacy-modes` stream parsers; a `Makefile` uses the shell
+  grammar, the closest CodeMirror has. `csv`, `tsv`, `elixir`, `graphql` and
+  `kql` — and any token with no grammar — edit as plain text
+  (`PLAIN_EDITOR_LANGUAGES` names the deliberate ones; the viewer still colours
+  Elixir, GraphQL and Kusto with Prism). The theme (`editorTheme.ts`) has two
+  halves with two sources: the chrome (text, gutter, caret, selection, active
+  line, brackets, fold marks) is written in the app's CSS variables, so every
+  theme in `docs/themes.md` recolours the editor live, and the token colours are
+  read from the same Prism palette object the read-only viewer renders with, so
+  edit mode colours exactly what view mode does. The **read-only viewer,
+  rendered markdown, code fences and the diff views stay on Prism**; only the
+  editor reads CodeMirror. This is also the only place a **markdown** grammar
+  colours a whole file — a saved `.md` renders as prose (see below), but editing
+  one shows markdown source, so `markdown`/`md` map to `lang-markdown`. Save errors
   (e.g. a 422 if the file changed underneath into something non-editable
   since it was loaded) render inline and keep edit mode open, mirroring
   `InlineEdit`'s own error handling. **Closing** a tab mid-edit discarded its
@@ -312,7 +312,7 @@ create, on its own stricter gate (`docs/fs-browse.md`).
   history can never be shown against
   another file's content. Edit and History are mutually exclusive views of
   the same area: entering edit mode closes history rather than trying to
-  show a textarea and a commit diff at once. The pane's empty states are the
+  show the editor and a commit diff at once. The pane's empty states are the
   Git tab's ladder plus one rung this route adds — an empty commit list
   means the file exists on disk but was never committed, a state, not a
   failure.
@@ -806,66 +806,47 @@ Everything here is a rendering or a keystroke.
 
 As everywhere in this app, the decisions are pure modules with vitest
 coverage and the `.tsx` files hold only the DOM: `editorStatus.ts`
-(caret/line arithmetic), `editorInput.ts` (what a keystroke edits),
+(caret/line arithmetic), `editorInput.ts` (indent unit, the Escape-then-Tab hatch, the one contiguous edit between two texts),
+`editorLanguage.ts` / `editorTheme.ts` (which grammar and which colours the editor takes),
 `fileFind.ts` (matching and stepping), `wordWrap.ts` (the stored preference)
 and `fileDirty.ts` (what "unsaved" means), plus `cycleTab` in `fileTabs.ts`
 and `shouldIgnoreFilesShortcut` in `keyboardScope.ts`.
 
-- **Line numbers and a status bar.** The gutter is another layer of the
-  existing `.files-editor-stack` in edit mode and a sticky-left column beside
-  the code in view mode — `aria-hidden`, `user-select: none`, so a copied
-  selection is code and nothing else, and aligned *by construction* (one
-  `<pre>` of newline-joined numbers inheriting the row's font metrics), never
-  by measurement.
-  - **"By construction" costs one `!important` per stack, and it is
+- **Line numbers and a status bar.** In edit mode the gutter is CodeMirror's
+  (`lineNumbers()`, a fold gutter, and the active line's number picked out): each
+  logical line is a real line element, so the numbers are **correct under soft
+  wrap** — a wrapped line keeps its one number beside its first visual row — and
+  CodeMirror sizes the gutter to the widest number it holds. It sits outside
+  `.cm-content`, so a copied selection is code and nothing else. In view mode it
+  is still a sticky-left column beside the code — `aria-hidden`,
+  `user-select: none`, one `<pre>` of newline-joined numbers inheriting the row's
+  font metrics — aligned *by construction*, never by measurement. (Until task
+  2742 the editor's gutter was the same kind of hand-aligned layer behind a
+  transparent textarea, and was hidden under wrap.)
+  - **"By construction" costs one `!important` on the viewer, and it is
     load-bearing.** react-syntax-highlighter puts vsc-dark-plus's
     `pre[class*="language-"]` block *inline* on the `<pre>` it emits —
     `font-size: 13px; line-height: 1.5` — and `customStyle` overrides only
     margin/padding/background, so the highlighted path is 19.5px per line while
     a 0.8rem/1.4 gutter or find layer beside it is 17.92px. That is 1.58px of
     shear per line: a full line wrong by line 12 and two by line 30, on every
-    file with a registered grammar, i.e. the case users hit most. Both stacks
-    therefore state the metrics once on the container (`.files-editor-stack`,
-    `.files-code-layout`) and force the Prism `<pre>`/`<code>` back to them
-    (`.files-editor-highlight pre`, `.files-code-main pre`). An inline style
-    beats any class selector, so `!important` is the mechanism, not a
-    shortcut — and the metrics living on the container is what makes
-    "inherit" mean the right thing for the code, the numbers and the
-    highlights at once.
-  - **`tab-size: 4` is part of those metrics, and `font: inherit` does not
+    file with a registered grammar, i.e. the case users hit most. The viewer
+    therefore states the metrics once on the container (`.files-code-layout`) and
+    forces the Prism `<pre>`/`<code>` back to them (`.files-code-main pre`). An
+    inline style beats any class selector, so `!important` is the mechanism, not
+    a shortcut — and the metrics living on the container is what makes "inherit"
+    mean the right thing for the code, the numbers and the highlights at once.
+    The editor needs none of this: `.files-editor-stack` states the font once and
+    CodeMirror inherits it, with the gutter and the text in the same line boxes.
+  - **`tab-size: 4` is part of the viewer's metrics, and `font: inherit` does not
     carry it.** The `font` shorthand resets the font properties and nothing
     else, so the Prism `<pre>` forced back to the row's font kept
     vsc-dark-plus's inline `tab-size: 4` while the gutter and the find layer
     beside it used the initial 8 — on a tab-indented file with a grammar (Go,
-    shell) every highlight landed four columns right per leading tab, half a
-    word off one tab in and highlighting the wrong text three tabs in. Both
-    stacks state it on the container beside the other metrics; the viewer
-    matching the editor is also what stops Edit visibly reflowing every
-    indented line to half its width and back again on Cancel.
-  - The editor's gutter is **sized from the count it holds**, not fixed:
-    `gutterDigits(lineCount)` rides down as a `--files-gutter-digits` custom
-    property that feeds both the rail's width and the padding clearing the text
-    layers of it, so the two can never be sized against different numbers. Its
-    predecessor was a fixed 3.25rem, about five digits, with
-    `text-align: right` and `overflow: hidden` — which clips on the *left*, so
-    line 131072 of a 256 KiB log painted as `31072`: not a truncated number a
-    reader would recognise but a plausible wrong one. The view-mode gutter has
-    never needed this (it is `flex: none` and sizes to its content).
-  - **Being opaque and over the scrollport, the editor's gutter has to be
-    declared to two separate reveals.** The padding that clears the text layers
-    of it is scrollable content, not a reserved strip, so at any `scrollLeft > 0`
-    the leftmost visible column is real text. The find reveal is handled in JS
-    (`scrollLeftForBox`'s lead-in, below), but the *caret* reveal is the
-    browser's own and scrolls the minimum amount: holding ArrowLeft back along a
-    line longer than the pane parked the caret flush at the padding-box edge —
-    behind the numbers, with the user typing and deleting text they could not
-    see. `scroll-padding-left` on the textarea, sized from the same
-    `--files-gutter-digits` as the padding and the rail, is the one hook a UA
-    scroll-into-view offers for "this band of the scrollport is covered", which
-    is why it is a declaration rather than a caret listener. Both reveals clear
-    the gutter by the identical amount — the full padding, so a match or a caret
-    arrives with the 0.75rem channel of code beside it rather than abutting the
-    numbers. Neither applies under soft wrap, where there is no gutter.
+    shell) every highlight landed four columns right per leading tab. The row
+    states it beside the other metrics; the editor's `tabSize` is the same 4, which
+    is also what stops Edit visibly reflowing every indented line to half its
+    width and back again on Cancel.
   - The view-mode row is also `width: max-content`: a `position: sticky`
     column is clamped to its containing block, so a row only as wide as the
     scroller lets the gutter detach and scroll away once a minified file or a
@@ -888,10 +869,11 @@ and `shouldIgnoreFilesShortcut` in `keyboardScope.ts`.
     existed.
   - The status bar (`.files-status-bar`) is pinned to the bottom
     of the pane the way the header is pinned to its top, and carries Ln/Col while
-    editing, the line count, the language and the wrap toggle. **Not by the same
-    mechanism**, though: the header sticks at the *start* of the flow and is on
-    screen from the first paint, while a sticky *bottom* only engages once the
-    column outgrows the scrollport — so on any file shorter than the pane the
+    editing (from `CodeEditor`'s `onCaret`, reported on every selection or
+    document change), the line count, the language and the wrap toggle. **Not by
+    the same mechanism**, though: the header sticks at the *start* of the flow and
+    is on screen from the first paint, while a sticky *bottom* only engages once
+    the column outgrows the scrollport — so on any file shorter than the pane the
     bar would sit in normal flow under the last line with dead pane below it.
     `.files-content` is a full-height flex column (`min-height: 100%`) and the
     bar takes the slack with `margin-top: auto`; sticky carries the long-file
@@ -911,64 +893,65 @@ and `shouldIgnoreFilesShortcut` in `keyboardScope.ts`.
     difference conspicuous: with the column full-height and the bar taking its
     slack, any window taller than 60vh put the Ln/Col readout at the pane's
     bottom edge with a band of empty pane between it and the last line — and the
-    textarea's own scrollbar nested inside the pane's. An IDE's editor fills its
+    editor's own scroller nested inside the pane's. An IDE's editor fills its
     pane. Scoped to this context rather than changed on the base rule, because
     the Scripts page's body box is one field of a form, where a fixed 18rem and
     a grabber are right; `min-height: 12rem` still holds the box open on the
-    stacked/narrow tier, where the pane is sized by its content.
-  - **Two line counts, deliberately** (`lineCount` vs `viewerLineCount`): a
-    textarea shows a trailing newline as a real empty last line and a `<pre>`
-    swallows one, so the editor and the viewer count differently. Each drives
-    *both* its own gutter and its own status bar, which is what makes it
-    impossible for the bar and the last number beside it to disagree.
-  - **Soft wrap hides the gutter outright**, in both modes. A wrapped logical
-    line is several visual rows, so logical numbers cannot stay beside it;
-    numbering *visual* rows needs the browser to report where each wrap fell,
-    which it will not. Hiding is the one answer that cannot silently desync.
-    The preference is `wordWrap.ts` — localStorage, one global setting for the
-    tab, same posture as `filesTreeWidth.ts`; held in `FilesView` so both panes
-    of a split and every tab agree on it, and threaded as far as a markdown
-    file's frontmatter panel, so one pane never renders its two halves under two
-    different wrap rules.
-
-    "Wrap on means no line numbers" is a **known gap**, and the way every other
-    editor closes it does not reach here. They give each logical line its own
-    grid row — a number cell beside a code cell as tall as that line wrapped —
-    which needs the code split into one element per line. In the editor the code
-    is a single `<textarea>`: one element by definition, and the only thing
-    holding the caret, the selection and the undo stack. In the viewer it is one
-    Prism tree whose spans cut across line boundaries, so cutting it into rows
-    means rewriting somebody else's markup by offset — precisely what the
-    overlay `FindLayer` exists to avoid. Neither is a measurement problem, so
-    neither is fixed by measuring more carefully.
-  - **Soft wrap is what made a scrollbar an alignment problem**, so all three
-    layers of the editor stack carry `scrollbar-gutter: stable`. Only the
-    textarea scrolls, and on any platform with classic space-taking scrollbars
-    (Windows, most Linux, macOS set to "Show scroll bars: Always") it alone lost
-    ~15px of content width to one — wrapping a character or two earlier than the
-    overlay layers, which put the colours and the find marks a whole visual row
-    off the caret from the first differing line down, and worse with each one
-    after. With `wrap="off"` the difference cost nothing because nothing wrapped;
-    that is what the toggle removed, and reserving the same strip on every layer
-    is what restores "aligned by construction" rather than "aligned on machines
-    with overlay scrollbars".
-- **Editing keys** are decided entirely by `editorKeyEdit()` in
-  `editorInput.ts`: Tab/Shift+Tab (indent, block-indent a multi-line selection,
-  dedent), Enter (carry the leading whitespace, one more unit after `{ [ (`,
-  the three-line expansion when the closer is under the caret), auto-closing
-  and typing over a pair, and Backspace between an empty pair. `null` — the
-  default answer — means the keystroke is untouched, which is what leaves IME,
-  spellcheck and ordinary typing alone. Three things make that claim true rather
-  than nearly true:
-  - **A composing keystroke is never ours.** `CodeEditor` returns on
-    `e.nativeEvent.isComposing` before anything else. The Enter that *commits*
-    an IME candidate arrives as a keydown with `key: 'Enter'` and
-    `isComposing: true`, and `autoIndent` answers non-null on any indented
-    line — so without the guard the one key IME users press most tore the
-    composition down and inserted a newline instead of the candidate.
+    stacked/narrow tier, where the pane is sized by its content. CodeMirror's own
+    element is absolutely positioned inside the stack, so the editor's content
+    never drives the box's height and the code scrolls inside it.
+  - **Two line counts, deliberately** (`lineCount` vs `viewerLineCount`): an
+    editor shows a trailing newline as a real empty last line the caret can sit
+    on and a `<pre>` swallows one, so the editor and the viewer count
+    differently. In edit mode the gutter's numbers are CodeMirror's own and the
+    status bar's count is `lineCount(draft)`, which follows the same rule; in view
+    mode `viewerLineCount` drives *both* the gutter and the bar, which is what
+    makes it impossible for the bar and the last number beside it to disagree.
+  - **Soft wrap** (`wordWrap.ts` — localStorage, one global setting for the tab,
+    same posture as `filesTreeWidth.ts`; held in `FilesView` so both panes of a
+    split and every tab agree on it, and threaded as far as a markdown file's
+    frontmatter panel, so one pane never renders its two halves under two
+    different wrap rules) reaches the editor as `EditorView.lineWrapping` in a
+    compartment, and the gutter stays. **The viewer still hides its gutter under
+    wrap**, and that is a **known gap** that only the editor has closed: a wrapped
+    logical line is several visual rows, and the viewer is one Prism tree whose
+    spans cut across line boundaries, so giving each logical line its own grid row
+    would mean rewriting somebody else's markup by offset — precisely what the
+    `FindLayer` overlay exists to avoid. That is not a measurement problem, so it
+    is not fixed by measuring more carefully.
+- **Editing keys are CodeMirror's, bar a few** (task 2742). `editorInput.ts` is
+  trimmed to the three decisions that are this app's own — `detectIndentUnit`,
+  `tabEscapeAfter` and `replacementRange` — and everything the old module
+  hand-wrote (`editorKeyEdit`, `autoIndent`, `typeOverStepsPast` and their
+  auto-close rules) is CodeMirror's now: Enter's auto-indent
+  (`insertNewlineAndIndent`, plus `indentOnInput`), `closeBrackets()` (closing a
+  pair, typing over its closer, Backspace between an empty pair),
+  `indentMore`/`indentLess`, and the undo history, which is CodeMirror's own
+  rather than the browser's. `keymap.of([...])` is Tab/Shift+Tab, Mod-d,
+  `closeBracketsKeymap`, `defaultKeymap`, `historyKeymap` and `foldKeymap`; the
+  chords are listed in `docs/keyboard.md`. Search is deliberately **not** in it:
+  CodeMirror's search panel is not installed and `searchKeymap` is not bound, so
+  the find bar is the only find UI, and it paints through `matches`. The keys
+  `CodeEditor` decides itself sit in one `Prec.highest` keydown handler, ahead of
+  every keymap, so no built-in binding can shadow them:
+  - **A composing keystroke is never ours.** The handler returns on
+    `event.isComposing` before anything else: the Enter or Escape that commits or
+    abandons an IME candidate belongs to the IME.
+  - **Escape is `onCancel`, once the cursors are one.** With several selection
+    ranges the first Escape is CodeMirror's `simplifySelection` and collapses
+    them, and `onCancel` is not called; the next Escape is the caller's, the way
+    every editor spends the first one.
+  - **Cmd/Ctrl+S and Cmd/Ctrl+Enter are `onSave`**, and only when the caller
+    passed one. The key is swallowed as well as handled — the browser's own
+    Cmd/Ctrl+S opens Save Page, which offers to write an HTML copy of the app
+    over the user's file — but a form with no `onSave` (the Scripts body box)
+    keeps the browser's behaviour rather than silently eating the key, and its
+    Cmd/Ctrl+Enter does nothing: CodeMirror's own `Mod-Enter` ("insert blank
+    line") is left out of the keymap, so the chord never becomes an edit.
   - **Escape arms one Tab as a plain focus move** (`tabEscapeAfter`), the
-    CodeMirror convention, and any other typed key disarms it. Taking Tab from
-    the browser otherwise takes the last keyboard route out of the box on any
+    CodeMirror convention, and any other typed key disarms it (a held modifier
+    does not, or Escape-then-Shift+Tab would disarm itself). Taking Tab from the
+    browser otherwise takes the last keyboard route out of the box on any
     indented line: Tab inserts, and Shift+Tab only falls through once there is
     nothing left to dedent. That is a keyboard trap (WCAG 2.1.2) — worst on the
     Scripts page, where this editor is one field of a form whose other controls
@@ -976,44 +959,37 @@ and `shouldIgnoreFilesShortcut` in `keyboardScope.ts`.
   - **The indent unit is the file's, not this repo's** (`detectIndentUnit`).
     This editor browses arbitrary repos — Naru's own `src/*.rs` is four spaces
     and `scripts/*.sh` is tabs — and a hardcoded two spaces indented both
-    wrongly, the second one *mixedly*: `autoIndent` carries the line's existing
-    tabs (correctly, it is whitespace-agnostic) and then appended two spaces
-    after `{`, so a tool opened to change one line wrote tabs-and-spaces back to
-    disk. The rule is a tally of the leading whitespace of the first 200
-    indented lines — most common width wins, ties to the narrower, tabs winning
-    outright when they outnumber every single space width — with `INDENT_UNIT`
-    as the fallback for a file with nothing to learn from. It decides what a
-    *new* indent looks like and never rewrites indentation already on disk, so a
-    wrong answer is only ever as wrong as the fixed unit was.
-  - **Typing over a closer asks whether that closer is already spoken for**
-    (`typeOverStepsPast`), not merely whether one is under the caret. The bare
-    rule made a literal closer *untypable* wherever one already sat there:
-    `foo)` with the caret before the `)` could never become `foo))`. VS Code
-    answers it from a record of the pairs it inserted, remapped through every
-    later edit — a mutable per-document decoration this pure module has nothing
-    to hold — so it asks the question that tracking is a proxy for. For a
-    bracket that is an unmatched opener before the caret (`bar(|)` steps over,
-    `foo|)` inserts), which covers every auto-closed pair exactly, since the
-    editor only ever closes after inserting the opener. For a quote there is no
-    opener to tell from a closer, so it is an odd number of that quote earlier
-    on the line — the caret is inside the run this one terminates. That also
-    fixes a case the bare rule got wrong in the other direction: typing `'` in
-    front of an existing string (`x + |'b'`) no longer jumps silently into
-    somebody else's. It does not open a pair there either — the keystroke falls
-    through to the auto-close rule, which refuses to close in front of a `'`, so
-    the browser types one bare quote, exactly as a plain textarea always did.
-    Both are heuristics over text with no
-    grammar behind them, the same standing every rule in this module has.
-
-  **Applying an answer goes through `document.execCommand('insertText')`**
-  (or `'delete'`, since `insertText('')` is a no-op in some engines), never an
-  assignment: setting a textarea's value from script wipes the browser's undo
-  stack, so one auto-indent would otherwise cost the user every keystroke typed
-  before it. `replacementRange(before, after)` reduces any answer to the single
-  contiguous span to select first, because execCommand only ever replaces the
-  selection. A refused command falls back to the plain `onChange` — correct
-  text, forfeited undo, never a dropped keystroke. The caret is restored in a
-  layout effect, before paint.
+    wrongly, the second one *mixedly*, writing tabs-and-spaces back to disk from
+    a tool opened to change one line. The rule is a tally of the leading
+    whitespace of the first 200 indented lines — most common width wins, ties to
+    the narrower, tabs winning outright when they outnumber every single space
+    width — with `INDENT_UNIT` as the fallback for a file with nothing to learn
+    from. It is re-read from `value` as the file is edited (a file that starts
+    empty learns its indentation from the first block typed into it) and handed
+    to CodeMirror's `indentUnit` through a compartment, so Tab, block indent and
+    auto-indent all use it. It decides what a *new* indent looks like and never
+    rewrites indentation already on disk. `tabSize` (how wide a tab *draws*) is a
+    fixed 4, the viewer's value, so Edit does not reflow a tab-indented file.
+  - **Cursors and selection beyond one caret.** Alt/Option-click adds a cursor, as
+    does the platform's own Cmd-click (macOS) or Ctrl-click (elsewhere;
+    Ctrl-click is a right-click on macOS, hence the split); Alt-drag is a
+    rectangular selection (`rectangularSelection` + `crosshairCursor`);
+    Cmd/Ctrl+D selects the next occurrence of the selection
+    (`selectNextOccurrence`); other occurrences of the selected text are
+    highlighted (`highlightSelectionMatches`). Alongside them the editor draws the
+    active line and its gutter number, matching brackets, and a fold gutter.
+  - **The `value` is controlled with one rule** that keeps the caret and the undo
+    history intact: a `value` equal to what the editor already holds is never
+    applied — the owner echoing back the text this editor just reported is the
+    common case, and re-setting the document there would reset both. A `value`
+    that really differs (a reload from the watch stream, the other pane of a
+    split typing into the same draft) is applied as **one contiguous replacement**
+    (`replacementRange`: common prefix and suffix give the span), so the caret maps
+    through it instead of jumping and a fold stays put, and it is kept **out of the
+    editor's undo history**, since it is not this editor's edit. Props other than
+    `value` reach the one `EditorView` as transactions on compartments (language,
+    wrap, indent unit, token colours), never a rebuild, which would drop the
+    history and the caret.
 - **Find in file** (`Cmd/Ctrl+F`) is a literal scan, **never a `RegExp`** — a
   query is typing, not a pattern language. Case folding is per *character*
   rather than `text.toLowerCase()`, because `'İ'.toLowerCase()` is two code
@@ -1023,91 +999,71 @@ and `shouldIgnoreFilesShortcut` in `keyboardScope.ts`.
   Capped at `MAX_FIND_MATCHES` (2000), found one *past* the cap so the `2000+`
   label is exact rather than "the array happened to be full".
 
-  **Highlights are a separate inert `<pre>` of the same text laid over
-  untouched Prism output** — one shared `FindLayer`
-  (`frontend/src/components/FindLayer.tsx`) for both the viewer and the editor
-  stack, so the class marking the current match cannot drift between them.
-  Never spliced into Prism's markup, whose nested spans cut across match
-  boundaries: the worst a bug in an overlay can do is misplace a background.
-  Same trick and same alignment rules as the editor's highlight layer.
-  Revealing a match deliberately does **not** focus the textarea — the bar
-  keeps the caret so Enter keeps stepping — which is exactly why the editor
-  needs that layer at all, since browsers paint an unfocused selection faintly
-  or not at all. The editor's reveal-scroll is arithmetic
-  (`scrollTopForLine`, minimal movement, since there is no element inside a
-  textarea to scroll to) with wrap **off**, and a measurement of the current
-  `<mark>`'s own `offsetTop` (`scrollTopForBox`, from an effect, since the mark
-  does not exist in the DOM until React has rendered the new index) with wrap
-  **on** — wrapped, a logical line is several visual rows and the arithmetic
-  undershoots, and skipping the scroll instead was worse than either: the
-  counter stepped and the view sat still, silently, for the rest of a session in
-  which the user had turned wrap on.
+  **Highlights are painted differently in the two panes, with the same classes.**
+  The viewer lays one inert `<pre>` of the same text over untouched Prism
+  output (`FindLayer`, `frontend/src/components/FindLayer.tsx`), never spliced
+  into Prism's markup, whose nested spans cut across match boundaries: the worst
+  a bug in an overlay can do is misplace a background. The editor has no overlay
+  (task 2742). `CodeEditor` takes `matches` and `current` as props and turns them
+  into **mark decorations** on the real text, in a state field of its own:
+  `files-find-hit`, plus `current` on the one being stepped to. The decorations
+  are mapped through edits, so a highlight never sits on the wrong text in the
+  frame between a keystroke and the owner's re-search, and the offsets are
+  clamped to the document with empty ranges dropped (the offsets were computed
+  against the owner's copy of the text, and a mark decoration may not be empty).
+  They are the classes the viewer's layer paints with, so what "current" looks
+  like cannot drift between the panes; in the editor the text keeps its colour
+  (`.files-editor-stack .files-find-hit { color: inherit }`) and only the
+  background is added. Being decorations on the text itself, they travel with
+  soft wrap and scrolling and have no alignment rule to keep.
 
-  **Sideways is measured in both wrap modes** (`scrollLeftForBox`, from the same
-  effect), and it is not optional: because the reveal deliberately does not
-  focus, nothing scrolls the selection into view on its own, so a match past the
-  pane's right edge — a long import, a minified file, any line past ~100 columns
-  in a split pane — moved the counter and the current-match class and showed the
-  user nothing, while the *viewer* revealed the same match correctly on the same
-  keystroke. Measured rather than calculated because a column offset is not a
-  pixel offset once a tab or a wide glyph is in the line. It carries a **lead-in
-  for the gutter**, which is an opaque layer over the left edge of the same box:
-  without it a match brought exactly to `scrollLeft` lands under the numbers and
-  the reveal reports success. Nothing vertical needs one — the header and the
-  status bar are outside that box.
-
-  That effect is armed by the `reveal` call
-  itself — a `pendingReveal` ref, the same shape as the pending caret — and
-  **not** by a dependency list, because a step is an event and neither value it
-  could be inferred from says so: `matches` is a fresh array on every keystroke,
-  so listing it scrolled the pane back to the match on every character typed
-  while the caret was elsewhere in the file, and `current` alone misses the
-  legitimate no-op step (`(0 + 1) % 1 === 0` — Enter on a one-match file), which
-  is the "counter stepped, view sat still" failure over again.
+  Revealing a match deliberately does **not** focus the editor — the bar keeps
+  the caret so Enter keeps stepping. The handle's `reveal(start, end)` selects the
+  range and scrolls it into view with CodeMirror's own measured
+  `scrollIntoView`, `nearest` on both axes (a 36px vertical and a 24px
+  horizontal margin), so a match already on screen does not move the view and
+  one off either edge, or past a long line's right edge, is brought in —
+  **in both wrap modes**. The arithmetic that used to do this (`scrollTopForLine`
+  and the gutter lead-in on a textarea with no element to scroll to) is gone with
+  the textarea. Because focus stays in the bar, the editor styles its selection
+  background the same focused or not (`editorTheme.ts`): browsers paint an
+  unfocused selection faintly or not at all, and the stepped-to match is a
+  selection.
 
   **The viewer's reveal is a real `scrollIntoView` on the current `<mark>`
-  vertically, and the same `scrollLeftForBox` sideways** — armed by the same
-  `pendingReveal` ref, for the same reason: a one-match file's Enter is
-  `(0 + 1) % 1 === 0`, so a dependency list on `current`/`matches` never fires
-  and the counter reads "1 of 1" over a view that has not moved. The vertical
-  half is correct in both wrap modes and needs nothing else — the element exists,
-  so the browser is the thing that knows where it ended up — except for the one
-  thing `block: 'center'` will not do, which is *not* scroll: it re-centres
+  vertically, and `scrollLeftForBox` sideways** — armed by `pendingReveal`, a ref
+  that `reveal()` sets and an effect in `FilesView` consumes, and **not** by a
+  dependency list, because a step is an event and neither value it could be
+  inferred from says so: `matches` is a fresh array on every keystroke, so
+  listing it scrolled the pane back to the match on every character typed while
+  the caret was elsewhere, and `current` alone misses the legitimate no-op step
+  (`(0 + 1) % 1 === 0` — Enter on a one-match file), which leaves the counter
+  reading "1 of 1" over a view that has not moved. (Editing, `reveal()` calls the
+  editor's handle directly; the flag is also how the crossing from view into edit
+  mode asks for a reveal once the editor has mounted.) The vertical half is
+  correct in both wrap modes and needs nothing else — the element exists, so the
+  browser is the thing that knows where it ended up — except for the one thing
+  `block: 'center'` will not do, which is *not* scroll: it re-centres
   unconditionally, so stepping between two matches on one screenful threw the
-  file by half a pane on every Enter while the editor beside it (whose
-  `scrollTopForBox` returns the scroll it was given for a box already in view)
-  sat still on the same keystroke. `boxNeedsReveal` is that missing test, asked
-  about the *readable* band rather than the scrollport — the sticky block covers
-  its top and the status bar its bottom, and a match painted under either is not
-  one the reader can see. (`block: 'nearest'` is not the answer: it would land
-  the match flush at the scrollport's top edge, i.e. behind the header — the
-  vertical twin of the gutter problem below.) The sideways half cannot be
-  left to it: `.files-code-gutter` is `position: sticky` over the left edge of
+  file by half a pane on every Enter while the editor beside it (whose reveal is
+  `nearest` on both axes) sat still on the same keystroke. `boxNeedsReveal` is
+  that missing test, asked about the *readable* band rather than the scrollport —
+  the sticky block covers its top and the status bar its bottom, and a match
+  painted under either is not one the reader can see. (`block: 'nearest'` is not
+  the answer: it would land the match flush at the scrollport's top edge, i.e.
+  behind the header.) The sideways half cannot be left to it:
+  `.files-code-gutter` is `position: sticky` over the left edge of
   `.files-code-scroll`, and `inline: 'nearest'` brings a match lying left of the
   current view flush to that edge — under the numbers, with the counter and the
   `.current` class both reporting success, repaired by one more step, which is
-  the flaky-not-broken signature this pane has produced before. `scrollIntoView`
-  has no notion of an overlay; the scroller has a real `scrollLeft` and the
-  gutter a real `offsetWidth`, so the correction is the editor's own pure
-  function with the viewer's numbers, not a second rule. Only the *lead-in* half
-  of it applies here (the vertical reveal has already happened), which is why the
-  function takes the obscured band as an argument rather than owning one — and
-  the viewer's number is the gutter's width **plus `.files-code-main`'s 0.5rem
-  channel**, which is the same total the editor passes as one computed
-  `padding-left`, so a match revealed from the left arrives with a column of code
-  beside it in both panes rather than flush against the numbers in one of them.
-
-  **A layer that mounts while the textarea is already scrolled is mirrored from
-  a layout effect**, keyed on the two conditions that mount one (a non-empty
-  match list, and `wrap`). `mirrorScroll` otherwise runs only from the
-  textarea's `scroll` event and from a reveal, and neither fires when a *layer*
-  appears — so the find layer, which mounts on the first match of a fresh query,
-  painted lines 1-40's highlights over the text of line 80 with the current
-  match nowhere on screen, repairing itself on the second character typed (which
-  is what made it read as flaky rather than broken); and the gutter, which
-  remounts when Wrap is turned off, showed 1..40 beside line 500. A layout
-  effect, so the correction lands before the frame the layer first appears in is
-  painted.
+  the flaky-not-broken signature this pane has produced before.
+  `scrollIntoView` has no notion of an overlay; the scroller has a real
+  `scrollLeft` and the gutter a real `offsetWidth`, so the correction is a pure
+  function (`scrollLeftForBox`) fed the viewer's numbers. It takes the obscured
+  band as an argument rather than owning one, and the viewer's number is the
+  gutter's width **plus `.files-code-main`'s 0.5rem channel**, so a match
+  revealed from the left arrives with a column of code beside it rather than
+  flush against the numbers.
 
   **A fresh search anchors on what you are looking at** — the caret while
   editing, and in view mode the first line still on screen, measured off the
@@ -1157,15 +1113,18 @@ and `shouldIgnoreFilesShortcut` in `keyboardScope.ts`.
   it, and `autoFocus` focuses without selecting — typing appended (`foofoobar`)
   instead of replacing.
 
-  **The draft is LF-normalised at `startEdit`** (`normalizeNewlines`). A
-  textarea's value is spec-defined to hand back every CR/CRLF as a single LF, so
-  a draft seeded from the bytes on disk is not offset-for-offset the string the
-  DOM reports: in a CRLF file the painted highlights were right while the
-  textarea's selection and the reveal built from it were one character per line
-  early, until the first keystroke replaced the draft with the browser's own
-  copy. Normalising once makes that impossible, and makes the dirty comparison
-  honest as well; the trade is that saving a CRLF file writes LF, which is
-  already what happened the moment the user typed anything.
+  **The draft is LF-normalised at `startEdit`** (`normalizeNewlines`).
+  CodeMirror holds line breaks as structure and reports every offset
+  (`caretOffset`, `reveal`, the `matches` it paints) against the LF form of the
+  text, so a draft seeded from the bytes on disk is not offset-for-offset the
+  string the editor reports: in a CRLF file the selection and the reveal built
+  from it would be one character per line early. (A `<textarea>`'s value was
+  spec-defined to do the same, which is how the rule arrived; it outlived the
+  textarea because the reason did.) Normalising once makes that impossible, and
+  makes the dirty comparison honest as well; the trade is that saving a CRLF
+  file writes LF, which is already what happened the moment the user typed
+  anything. `CodeEditor` also normalises a `value` that still holds a `\r`
+  before applying it, so the contract holds for a caller that did not.
 
   **Every button in the bar hands the caret back to the query box.** Otherwise
   clicking `Aa` or `↓` moves focus onto that button and the next Enter
@@ -1773,7 +1732,7 @@ Two limits are deliberate:
 
 - **The table is the read view; editing still shows raw text.** The `editing`
   branch wins first in the content pane's ternary, so pressing Edit on a `.csv`
-  gives the same textarea, syntax colouring and Save/Cancel as any other text
+  gives the same code editor, syntax colouring and Save/Cancel as any other text
   file, and saving or cancelling comes back to the table. There is no cell
   editing, and `editable` (`!is_binary && !truncated`) is unchanged. A table
   that could be typed into is a different feature with its own questions —

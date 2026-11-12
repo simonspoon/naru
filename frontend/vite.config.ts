@@ -26,8 +26,10 @@ export default defineConfig({
     },
   },
   test: {
-    // Unit tests cover the pure logic modules only — no component rendering,
-    // so there is no React testing library here. Two of those modules still
+    // Unit tests cover the pure logic modules — no component rendering, so
+    // there is no React testing library here. The one exception is
+    // `codeEditor.test.ts` (naru task 2742), which mounts `CodeEditor` with
+    // `createRoot` to check the React-to-CodeMirror seam. Two of those modules still
     // reach for browser globals that exist nowhere else (boardView's
     // `localStorage`, keyboardScope's `document`), so the whole suite runs
     // under jsdom rather than splitting environments per file.

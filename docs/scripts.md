@@ -249,9 +249,9 @@ that outlives the connection that started it. Three shapes, one executor.
   (mesa task 1676, `libraryTab.ts`; it is no longer a left-nav page, and
   `#/scripts` and `#/scripts/runs/<id>` redirect into the tab), plus one Command
   Palette destination. `pages/ScriptsView.tsx` is the list and
-  editor; the body editor reuses the Files tab's overlay editor
+  editor; the body editor reuses the Files tab's code editor
   (`components/CodeEditor.tsx`, lifted out of `FilesView.tsx` rather than
-  forked) with the already-registered `sh` grammar. Reuse means **everything**
+  forked; CodeMirror 6 since naru task 2742) with the `sh` grammar. Reuse means **everything**
   that component grows lands here too, and task 809 grew three things worth
   knowing about on this page (`docs/files-tab.md`): the box now always renders
   inside `.files-editor-stack` — here an 18rem, vertically resizable box with a

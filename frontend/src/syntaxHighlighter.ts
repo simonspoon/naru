@@ -218,15 +218,3 @@ export function prismGrammar(token: string | null | undefined): string | undefin
   if (!token) return undefined
   return PRISM_GRAMMAR[token.toLowerCase()]
 }
-
-/** The source a highlight layer must render to stay line-for-line aligned with
- * a `<textarea>` holding `value` (task 658's editor overlay).
- *
- * A `<pre>` swallows exactly one trailing newline, so `"a\n"` — two lines in
- * the textarea, the caret sitting on the empty second one — would paint as a
- * single line and shear every subsequent scroll position. Padding one extra
- * newline restores the line count. Only the LAST newline is swallowed, so one
- * extra is always enough, however many blank lines trail. */
-export function highlightOverlaySource(value: string): string {
-  return value.endsWith('\n') ? `${value}\n` : value
-}
