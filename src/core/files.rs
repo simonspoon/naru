@@ -22,8 +22,20 @@ use crate::core::types::{
 };
 
 /// Mirrors `git.rs`'s `DIFF_CAP` precedent: one huge file can't balloon the
-/// JSON response.
+/// JSON response. It bounds everything that is only *looked at*: the
+/// read-only view of a file too big to edit ([`read_file`]) and the bytes a
+/// project search reads per file. The editor has its own, larger cap
+/// ([`FILE_EDIT_CAP`]).
 const FILE_CONTENT_CAP: usize = 256 * 1024;
+
+/// The largest text file [`read_file`] sends whole, and so the largest the
+/// Files tab opens in its editor and [`write_file`] accepts back (naru task
+/// 2803). Separate from [`FILE_CONTENT_CAP`] because the two bound different
+/// things: that one a read-only render, this one what the editor stays
+/// responsive on (measured; see `docs/files-tab.md`). A file past it is
+/// served as its first `FILE_CONTENT_CAP` bytes, `truncated`, and is never
+/// writable.
+pub const FILE_EDIT_CAP: usize = 5 * 1024 * 1024;
 
 /// Entries returned for one directory level (`tree_level`) before it stops
 /// adding more. Applies per call now, not to a whole recursive walk — a
@@ -588,9 +600,14 @@ pub fn create_dir(parent: &str, name: &str) -> Result<DirEntry, CreateDirError> 
 ///   - extension in a known-binary set, OR a NUL byte in the first 8 KiB ->
 ///     `Some(FileContentView{is_binary: true, content: "", truncated: false,
 ///     language})`.
-///   - else: read up to [`FILE_CONTENT_CAP`] bytes (lossy UTF-8, same
-///     `capped` char-boundary truncation as `git.rs`),
-///     `Some(FileContentView{is_binary: false, content, truncated, language})`.
+///   - else, a file of at most [`FILE_EDIT_CAP`] bytes: all of it (lossy
+///     UTF-8), `truncated: false` — the only shape [`write_file`] accepts
+///     back.
+///   - else: its first [`FILE_CONTENT_CAP`] bytes (lossy UTF-8, same
+///     `capped` char-boundary truncation as `git.rs`), `truncated: true`.
+///     Not the first `FILE_EDIT_CAP`: nothing can be done with a cut file
+///     but look at it, and megabytes of read-only text is what that smaller
+///     cap exists to keep out of the browser.
 ///
 /// `language` is derived from the path in both branches — it describes the
 /// FILE, not the content, so it's set even for binaries.
@@ -605,12 +622,13 @@ pub fn read_file(root: &str, rel: &str) -> Option<FileContentView> {
         .as_deref()
         .is_some_and(|e| BINARY_EXTENSIONS.contains(&e));
 
-    // Read at most FILE_CONTENT_CAP+1 bytes — enough to both sniff and cap
-    // content without pulling an arbitrarily large file fully into memory.
+    // Read at most FILE_EDIT_CAP+1 bytes — enough to sniff, and to tell a
+    // file that fits the editor from one that does not, without pulling an
+    // arbitrarily large file fully into memory.
     let mut file = fs::File::open(&path).ok()?;
     let mut bytes = Vec::new();
     (&mut file)
-        .take(FILE_CONTENT_CAP as u64 + 1)
+        .take(FILE_EDIT_CAP as u64 + 1)
         .read_to_end(&mut bytes)
         .ok()?;
     let is_binary = ext_is_binary || sniff_binary(&bytes);
@@ -621,16 +639,25 @@ pub fn read_file(root: &str, rel: &str) -> Option<FileContentView> {
             content: String::new(),
             truncated: false,
             language: language.map(str::to_string),
+            edit_limit: FILE_EDIT_CAP as u32,
         });
     }
 
-    let (content, truncated) = capped(&bytes);
+    let (content, truncated) = if bytes.len() > FILE_EDIT_CAP {
+        // A few bytes past the view cap, so `capped` sees that there is more
+        // and cuts on a char boundary rather than mid-sequence.
+        let (content, _) = capped(&bytes[..FILE_CONTENT_CAP + 4]);
+        (content, true)
+    } else {
+        (String::from_utf8_lossy(&bytes).into_owned(), false)
+    };
     Some(FileContentView {
         path: rel.to_string(),
         is_binary: false,
         content,
         truncated,
         language: language.map(str::to_string),
+        edit_limit: FILE_EDIT_CAP as u32,
     })
 }
 
@@ -698,7 +725,7 @@ pub fn read_file_download(root: &str, rel: &str) -> Result<(String, Vec<u8>), Do
 ///   - `Validation(reason)`: the target resolves to a real file but can't be
 ///     safely edited from the capped, possibly-lossy view the editor showed
 ///     — binary content, a truncated read (the true file is bigger than
-///     [`FILE_CONTENT_CAP`], so what was displayed wasn't the whole file),
+///     [`FILE_EDIT_CAP`], so what was displayed wasn't the whole file),
 ///     or new content that itself exceeds the cap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WriteFileError {
@@ -721,7 +748,7 @@ pub fn write_file(root: &str, rel: &str, content: &str) -> Result<(), WriteFileE
             "file is larger than mesa can safely edit",
         ));
     }
-    if content.len() > FILE_CONTENT_CAP {
+    if content.len() > FILE_EDIT_CAP {
         return Err(WriteFileError::Validation(
             "content is larger than mesa can safely write",
         ));
@@ -2073,13 +2100,45 @@ mod tests {
     fn read_file_caps_oversized_content() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_str().unwrap();
-        let big = "a".repeat(FILE_CONTENT_CAP + 1000);
+        let big = "a".repeat(FILE_EDIT_CAP + 1000);
         fs::write(dir.path().join("big.txt"), &big).unwrap();
 
         let v = read_file(root, "big.txt").unwrap();
         assert!(!v.is_binary);
         assert!(v.truncated);
-        assert!(v.content.len() <= FILE_CONTENT_CAP);
+        // Only the view cap's worth of a file too big to edit, not megabytes.
+        assert_eq!(v.content.len(), FILE_CONTENT_CAP);
+        assert_eq!(v.edit_limit as usize, FILE_EDIT_CAP);
+    }
+
+    #[test]
+    fn read_file_sends_a_file_up_to_the_edit_cap_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_str().unwrap();
+        // Past the old 256 KiB view cap, and exactly at the edit cap.
+        for len in [FILE_CONTENT_CAP + 1000, FILE_EDIT_CAP] {
+            let big = "é\n".repeat(len / 3) + &"a".repeat(len % 3);
+            assert_eq!(big.len(), len);
+            fs::write(dir.path().join("big.txt"), &big).unwrap();
+
+            let v = read_file(root, "big.txt").unwrap();
+            assert!(!v.truncated, "{len} bytes must not be truncated");
+            assert!(v.content == big, "{len} bytes must arrive whole");
+        }
+    }
+
+    #[test]
+    fn read_file_cuts_an_over_cap_file_on_a_char_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_str().unwrap();
+        // One ASCII byte, then 2-byte chars: the view cap lands mid-char.
+        let big = format!("a{}", "é".repeat(FILE_EDIT_CAP / 2 + 1));
+        fs::write(dir.path().join("big.txt"), &big).unwrap();
+
+        let v = read_file(root, "big.txt").unwrap();
+        assert!(v.truncated);
+        assert_eq!(v.content.len(), FILE_CONTENT_CAP - 1);
+        assert!(big.starts_with(&v.content));
     }
 
     #[test]
@@ -2506,7 +2565,7 @@ mod tests {
     fn read_file_download_returns_an_over_display_cap_file_whole() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_str().unwrap();
-        let big = "a".repeat(FILE_CONTENT_CAP + 1000);
+        let big = "a".repeat(FILE_EDIT_CAP + 1000);
         fs::write(dir.path().join("big.txt"), &big).unwrap();
         // The viewer shows this one `truncated`; the download is the whole file.
         assert!(read_file(root, "big.txt").unwrap().truncated);
@@ -2638,7 +2697,7 @@ mod tests {
     fn write_file_rejects_truncated_file() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_str().unwrap();
-        let big = "a".repeat(FILE_CONTENT_CAP + 1000);
+        let big = "a".repeat(FILE_EDIT_CAP + 1000);
         fs::write(dir.path().join("big.txt"), &big).unwrap();
 
         let err = write_file(root, "big.txt", "short replacement").unwrap_err();
@@ -2647,7 +2706,43 @@ mod tests {
             WriteFileError::Validation("file is larger than mesa can safely edit")
         );
         // The write must never have happened — the file is untouched.
-        assert_eq!(fs::read_to_string(dir.path().join("big.txt")).unwrap(), big);
+        assert!(fs::read_to_string(dir.path().join("big.txt")).unwrap() == big);
+    }
+
+    /// The save that would cut a file on disk (naru task 2803): the client
+    /// sends back exactly the truncated content it was shown. Under every
+    /// size cap, so only the `truncated` guard stands between it and the file.
+    #[test]
+    fn write_file_never_writes_back_a_truncated_view() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let big = "line\n".repeat(FILE_EDIT_CAP / 5 + 1);
+        fs::write(dir.path().join("big.txt"), &big).unwrap();
+
+        let view = read_file(root, "big.txt").unwrap();
+        assert!(view.truncated);
+        assert!(view.content.len() < big.len());
+
+        let err = write_file(root, "big.txt", &view.content).unwrap_err();
+        assert_eq!(
+            err,
+            WriteFileError::Validation("file is larger than mesa can safely edit")
+        );
+        assert!(fs::read(dir.path().join("big.txt")).unwrap() == big.as_bytes());
+    }
+
+    #[test]
+    fn write_file_saves_a_file_past_the_view_cap_byte_exact() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let big = "fn f() { /* é */ }\n".repeat(2 * FILE_CONTENT_CAP / 20);
+        assert!(big.len() > FILE_CONTENT_CAP);
+        fs::write(dir.path().join("big.rs"), &big).unwrap();
+
+        let edited = read_file(root, "big.rs").unwrap().content + "// tail\n";
+        assert_eq!(write_file(root, "big.rs", &edited), Ok(()));
+        let on_disk = fs::read(dir.path().join("big.rs")).unwrap();
+        assert!(on_disk == format!("{big}// tail\n").as_bytes());
     }
 
     #[test]
@@ -2655,7 +2750,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_str().unwrap();
         fs::write(dir.path().join("small.txt"), "hi").unwrap();
-        let big_content = "a".repeat(FILE_CONTENT_CAP + 1);
+        let big_content = "a".repeat(FILE_EDIT_CAP + 1);
 
         let err = write_file(root, "small.txt", &big_content).unwrap_err();
         assert_eq!(
@@ -3732,6 +3827,23 @@ mod tests {
         assert_eq!(res.files[0].matches.len(), MAX_SEARCH_MATCHES_PER_FILE);
         assert!(res.files[0].truncated);
         assert_eq!(res.total_matches as usize, MAX_SEARCH_MATCHES_PER_FILE);
+    }
+
+    /// The search keeps its own, smaller read cap (naru task 2803 raised only
+    /// the editor's): a hit past the first 256 KiB of a file is not found.
+    #[test]
+    fn search_files_still_reads_only_the_view_cap_of_each_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let body = format!(
+            "needle early\n{}\nneedle late\n",
+            "x".repeat(FILE_CONTENT_CAP)
+        );
+        fs::write(dir.path().join("big.txt"), body).unwrap();
+
+        let res = search_files(root, "needle", SearchOptions::default()).unwrap();
+        assert_eq!(res.total_matches, 1);
+        assert_eq!(res.files[0].matches[0].line, 1);
     }
 
     #[test]

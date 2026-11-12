@@ -43,8 +43,11 @@ create, on its own stricter gate (`docs/fs-browse.md`).
 - `pub fn read_file(root: &str, rel: &str) -> Option<FileContentView>`
   resolves `rel` via `safe_path`, rejects directories, detects binaries via an
   extension allowlist or a NUL-byte sniff (`content: ""` for those), else
-  reads up to `FILE_CONTENT_CAP` (256 KiB, mirrors the Git tab's `DIFF_CAP`)
-  bytes with the same lossy-UTF8/char-boundary truncation as `git.rs::capped`.
+  sends a file of at most `FILE_EDIT_CAP` (5 MiB) whole, lossy UTF-8,
+  `truncated: false`; a bigger one is its first `FILE_CONTENT_CAP` (256 KiB,
+  mirrors the Git tab's `DIFF_CAP`) bytes with the same char-boundary
+  truncation as `git.rs::capped`, `truncated: true`. Every view carries
+  `edit_limit` (`FILE_EDIT_CAP` in bytes). See "Large files" below.
   `language` is an extension→tag lookup (e.g. `rs`→`rust`) set in both
   branches — it describes the file, not the content. `.xml` and .NET's
   `.csproj`/`.xaml` — XML documents wearing a bespoke extension — all tag as
@@ -71,9 +74,9 @@ create, on its own stricter gate (`docs/fs-browse.md`).
   actual `fs::write` — never a second path-resolution rule. Rejects (as
   `WriteFileError::Validation(reason)`, never writing anything): a binary
   target, a target whose `read_file` view was itself `truncated` (its true
-  on-disk size exceeds `FILE_CONTENT_CAP`, so the capped view the editor
+  on-disk size exceeds `FILE_EDIT_CAP`, so the capped view the pane
   showed wasn't the whole file — saving it back would silently truncate it),
-  or new `content` that itself exceeds `FILE_CONTENT_CAP`. Everything
+  or new `content` that itself exceeds `FILE_EDIT_CAP`. Everything
   `read_file` itself collapses to `None` (traversal, absolute path,
   unlisted/nonexistent path, a directory) — plus an `fs::write` I/O failure —
   collapses the same way here, to `WriteFileError::NotFound`.
@@ -1254,8 +1257,8 @@ is gone with the mode it guarded.
   The preview renders the draft once there is one (`viewText`); an SVG's is the
   raw route, so it shows the last save.
 - **Read-only stays read-only.** A binary, an image, media and a truncated file
-  never mount an editor; the `truncated` badge and "Binary file — cannot
-  display." say why, and Download is still there. The one bend: `editable`
+  never mount an editor; the too-large notice ("Large files" below) and
+  "Binary file — cannot display." say why, and Download is still there. The one bend: `editable`
   stays true while a draft is dirty, so a file that grows past the cap on disk
   under unsaved work does not hide that work.
 - **The editor takes the caret only when asked.** `CodeEditor` is mounted with
@@ -1378,6 +1381,66 @@ presentational.
   empty replacement deletes.
 - **Hidden in a read-only view** (`replace={null}`): a truncated file's find
   bar has no Replace toggle and the chord does nothing there.
+
+### Large files (naru task 2803)
+
+Two caps in `core/files.rs`, because they bound different things:
+
+- **`FILE_CONTENT_CAP`, 256 KiB** — what is only *looked at*: the bytes a
+  project search reads per file, and the read-only view of a file too big to
+  edit. It is the original Files tab cap (one huge file must not balloon the
+  JSON a browser renders, `git.rs`'s `DIFF_CAP` precedent) and both of those
+  behave as they always did.
+- **`FILE_EDIT_CAP`, 5 MiB** — the largest text file `read_file` sends whole,
+  so the largest that opens in the editor and that `write_file` accepts back.
+  The content PATCH has its own body limit (`FILES_CONTENT_BODY_LIMIT`, twice
+  the cap plus 1 MiB for JSON escaping) because axum's default is 2 MiB.
+
+A file past `FILE_EDIT_CAP` is `truncated`: its first 256 KiB, read-only, with
+the notice `Too large to edit here (5 MB limit). This is the start of the
+file, read-only; Download saves all of it.` under the header
+(`fileLimit.ts::tooLargeNotice`, fed `FileContentView.edit_limit`, so the
+number shown is the number enforced). `write_file` refuses any write to such a
+file whatever the content, so a truncated view can never be saved over the
+file it came from (`write_file_never_writes_back_a_truncated_view`).
+
+**Highlighting stops at 2 MiB.** `editorLanguage.ts::highlightsAt`: a document
+longer than `HIGHLIGHT_MAX_CHARS` is edited as plain text. Everything else
+about the editor is unchanged.
+
+Both numbers are measured, not guessed. Headless Chrome on the dev serve,
+real Rust source cut to size, 30 inserted characters per position, time from
+the insert until the main thread is idle again (two zero-delay timers later),
+median / 90th percentile in ms. The machine was under load, so the floor is
+the small file's own figure, about 20–30 ms:
+
+| Size | Start | Middle | End |
+| --- | --- | --- | --- |
+| 20 KB | 31 / 44 | 32 / 51 | 31 / 45 |
+| 0.5 MB | 21 / 42 | 23 / 45 | 21 / 42 |
+| 1 MB | 19 / 42 | 16 / 37 | 16 / 42 |
+| 2 MB | 22 / 59 | 18 / 45 | 25 / 48 |
+| 3 MB | 31 / 59 | 31 / 48 | 51 / 72 |
+| 4 MB | 32 / 52 | 29 / 54 | 53 / 137 |
+| 5 MB | 34 / 55 | 37 / 70 | 57 / 139 |
+| 5 MB, plain | 38 / 55 | 35 / 61 | 37 / 59 |
+| 8 MB | 50 / 82 | 48 / 73 | 69 / 170 |
+| 8 MB, plain | 52 / 71 | 46 / 70 | 50 / 71 |
+
+So: up to 2 MB typing is at the floor; from 3 MB the grammar costs about
+20 ms a key near the end of the file (and the colours there arrive seconds
+late — 2.5 s at 2 MB, 6.4 s at 5 MB, never within 30 s at 8 MB), which is why
+highlighting stops at 2 MiB; plain text is still within ~10 ms of the floor
+at 5 MB and twice the floor at 8 MB, which is why the cap is 5 MiB. Open is
+0.1–0.2 s and a save under 1 s at 5 MB, byte-exact apart from the edit.
+**Markdown previews stop at 1 MiB.** The preview is one synchronous render
+of the whole text (1.5 s measured at 1.8 MB), so a markdown file longer than
+`fileLimit.ts::PREVIEW_MAX_CHARS` on disk is not `renderable`: it opens in
+the editor like any other text file, with no Preview toggle. HTML (an
+iframe `srcDoc`) and delimited files (1000 rendered rows) are unaffected.
+
+Known cost at size that was left alone: the find bar recounts on every query
+keystroke (about 0.5 s at 5 MB in the same loaded harness).
 
 ### Go to line (naru task 2743)
 
@@ -2161,15 +2224,15 @@ Two limits are deliberate:
   that could be typed into is a different feature with its own questions —
   quoting on write, what a ragged row means, what happens to a file the parse
   disagreed with.
-- **1000 data rows are rendered.** Every row is live DOM, and a file capped at
-  `FILE_CONTENT_CAP` can still hold tens of thousands; past the cap the view
+- **1000 data rows are rendered.** Every row is live DOM, and a file within
+  the edit cap can still hold tens of thousands; past the cap the view
   renders the first 1000 and a muted note, so a capped view says what it is
   short of instead of quietly ending. Download is how the whole file is read.
 
   The note **claims only what is true**, which is why `CsvBody` takes
   `FileContentView.truncated` as well as the table. The parser's `total` counts
   the rows in the text this pane was handed, and on a file over
-  `FILE_CONTENT_CAP` that text is the first 256 KiB — so `Showing first 1,000 of
+  `FILE_EDIT_CAP` that text is the first 256 KiB — so `Showing first 1,000 of
   13,717 rows.` on a 20,000-row file is not a rounding error but a wrong number.
   A `truncated` file therefore gets `Showing the first 1,000 rows; the file was
   truncated before it was read.` and no total at all; an untruncated one keeps

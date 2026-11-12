@@ -7,9 +7,19 @@ export type FileContentView = { path: string, is_binary: boolean,
 /**
  * "" when is_binary is true — binary bytes are never put on the wire.
  */
-content: string, truncated: boolean, 
+content: string, 
+/**
+ * True iff the file is bigger than `edit_limit`: `content` is then only
+ * its beginning, read-only, and a write of it is refused.
+ */
+truncated: boolean, 
 /**
  * Extension-derived language tag (e.g. "rs" -> "rust"), or None when
  * unrecognized. "" is never used in place of None here.
  */
-language: string | null, };
+language: string | null, 
+/**
+ * `core::files::FILE_EDIT_CAP` in bytes — the largest file sent whole
+ * and accepted back, so the client can name the limit it hit.
+ */
+edit_limit: number, };

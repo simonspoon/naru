@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest'
 import {
   EDITOR_LANGUAGE_LOADERS,
   PLAIN_EDITOR_LANGUAGES,
+  HIGHLIGHT_MAX_CHARS,
   editorLanguageId,
+  highlightsAt,
   loadEditorLanguage,
 } from './editorLanguage'
 
@@ -65,6 +67,14 @@ describe('editorLanguageId', () => {
     // Not a key of the table, only of Object.prototype.
     expect(editorLanguageId('constructor')).toBeUndefined()
     expect(editorLanguageId('toString')).toBeUndefined()
+  })
+})
+
+describe('highlightsAt', () => {
+  it('keeps the grammar up to the threshold and drops it past it', () => {
+    expect(highlightsAt(0)).toBe(true)
+    expect(highlightsAt(HIGHLIGHT_MAX_CHARS)).toBe(true)
+    expect(highlightsAt(HIGHLIGHT_MAX_CHARS + 1)).toBe(false)
   })
 })
 

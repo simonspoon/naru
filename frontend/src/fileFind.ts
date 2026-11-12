@@ -46,8 +46,8 @@ export interface FindResult {
 /** The most matches one search reports.
  *
  * Not a performance guess: the read-only pane renders one element per match,
- * and a single-letter query against a 256 KiB file (the content route's own
- * ceiling) is tens of thousands of them — enough DOM to lock the tab up for
+ * and a single-letter query against a 256 KiB file (what the content route
+ * sends of one too large to edit) is tens of thousands of them — enough DOM to lock the tab up for
  * seconds on a keystroke that was probably a typo on the way to a longer word.
  * Stopping is the honest answer, and `capped` is how the label says so ("1 of
  * 2000+") rather than quietly claiming the file has exactly this many. */

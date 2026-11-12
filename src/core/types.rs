@@ -4572,10 +4572,15 @@ pub struct FileContentView {
     pub is_binary: bool,
     /// "" when is_binary is true — binary bytes are never put on the wire.
     pub content: String,
+    /// True iff the file is bigger than `edit_limit`: `content` is then only
+    /// its beginning, read-only, and a write of it is refused.
     pub truncated: bool,
     /// Extension-derived language tag (e.g. "rs" -> "rust"), or None when
     /// unrecognized. "" is never used in place of None here.
     pub language: Option<String>,
+    /// `core::files::FILE_EDIT_CAP` in bytes — the largest file sent whole
+    /// and accepted back, so the client can name the limit it hit.
+    pub edit_limit: u32,
 }
 
 /// One hit in a project-wide file search (mesa task 813, see

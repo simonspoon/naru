@@ -219,6 +219,19 @@ export const EDITOR_LANGUAGE_LOADERS: Record<EditorLanguageId, () => Promise<Ext
   groovy: () => import('@codemirror/legacy-modes/mode/groovy').then((m) => stream(m.groovy)),
 }
 
+/** The longest document (in characters) the editor still parses for colours
+ * (naru task 2803). Measured on Rust source: up to 2 MB typing costs what it
+ * does on a small file; from 3 MB the parse adds ~20 ms to every keystroke
+ * near the end of the file, where the colours also arrive seconds late.
+ * Plain text holds its typing speed up to the server's 5 MiB edit cap, so
+ * past this the file is edited without a grammar rather than not at all. */
+export const HIGHLIGHT_MAX_CHARS = 2 * 1024 * 1024
+
+/** Whether a document of `length` characters gets its grammar. */
+export function highlightsAt(length: number): boolean {
+  return length <= HIGHLIGHT_MAX_CHARS
+}
+
 /** The CodeMirror extension for a language token, or `null` for plain text.
  * Resolves `null` rather than rejecting when a chunk fails to load: an editor
  * without colours is still an editor. */

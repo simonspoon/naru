@@ -4514,7 +4514,10 @@ fn router(state: AppState) -> Router {
             "/api/projects/{id}/files/content",
             get(get_project_files_content)
                 .patch(update_project_files_content)
-                .post(create_project_file),
+                .post(create_project_file)
+                // Its own body limit (naru task 2803): the editor saves files
+                // up to `FILE_EDIT_CAP`, past axum's 2 MiB default.
+                .layer(DefaultBodyLimit::max(FILES_CONTENT_BODY_LIMIT)),
         )
         // The same file as raw bytes, for saving to disk (task 683). A
         // separate route rather than a flag on the one above because the two
@@ -12920,7 +12923,8 @@ struct FilesContentUpdate {
 /// `FileContentView` (matches every other mutation in this API echoing the
 /// full updated object). `core::files::write_file`'s `NotFound` collapses
 /// path-traversal/nonexistent/directory/write-failure into 404 `not_found`;
-/// `Validation` (binary target, truncated target, oversized new content) is
+/// `Validation` (binary target, truncated target — one past
+/// `files::FILE_EDIT_CAP` — or oversized new content) is
 /// 422 `validation` — mirrors the read route's own collapse-many-causes
 /// precedent.
 async fn update_project_files_content(
@@ -13061,6 +13065,13 @@ fn evict_files_tree_level(state: &AppState, root: &str, rel: &str) {
         .unwrap()
         .remove(&(root.to_string(), rel_key));
 }
+
+/// Upper bound on the raw HTTP body of the Files tab save. The content rides
+/// a JSON string, where a byte costs at most six (a control character as
+/// `\u001b`), so six times [`files::FILE_EDIT_CAP`] carries any at-cap text
+/// file (plus a megabyte for the framing) and an over-cap save still reaches
+/// `core::files::write_file`'s own 422 rather than a bare 413.
+const FILES_CONTENT_BODY_LIMIT: usize = files::FILE_EDIT_CAP * 6 + 1024 * 1024;
 
 /// Upper bound on the raw HTTP body of the Files tab upload, by
 /// [`ATTACHMENT_BODY_LIMIT`]'s reasoning: base64 costs 33% on the wire, so
@@ -18017,7 +18028,7 @@ mod tests {
         let (dir, state) = test_state();
         let root = dir.path().join("repo");
         std::fs::create_dir_all(&root).unwrap();
-        let big = "a".repeat(300 * 1024);
+        let big = "a".repeat(files::FILE_EDIT_CAP + 1024);
         std::fs::write(root.join("big.txt"), &big).unwrap();
         let root_str = root.to_str().unwrap().to_string();
         let id = new_project(&state, Some(&root_str));

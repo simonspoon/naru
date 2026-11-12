@@ -17,7 +17,7 @@
 export const INDENT_UNIT = '  '
 
 /** How many lines of a file are worth reading to decide how it is indented.
- * A whole 256 KiB file per keystroke would be a scan nobody asked for, and a
+ * A whole multi-megabyte file per keystroke would be a scan nobody asked for, and a
  * file whose first two hundred lines say nothing about its indentation is not
  * going to be settled by its last two hundred either. */
 const DETECT_LINES = 200

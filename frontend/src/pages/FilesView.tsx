@@ -100,6 +100,7 @@ import { SideBySideDiff } from '../components/SideBySideDiff'
 import { splitFrontmatter } from '../frontmatter'
 import { delimiterFor, parseDelimited, type DelimitedTable } from '../fileCsv'
 import { isHtmlDocumentPath } from '../fileHtml'
+import { previewsAt, tooLargeNotice } from '../fileLimit'
 import { isImagePath } from '../fileImage'
 import { setDragOutData } from '../fileDragOut'
 import {
@@ -537,7 +538,7 @@ interface FindState {
 const MAX_LANDING_REVEALS = 3
 
 /** How many data rows of a delimited file the table view renders (mesa task
- * 1110). A file capped at `FILE_CONTENT_CAP` can still hold tens of thousands
+ * 1110). A file within the edit cap can still hold tens of thousands
  * of rows, and every one of them is a live DOM row; past this the view renders
  * the first `MAX_CSV_ROWS` and says how many it is short of. Download is how
  * the whole file is read. */
@@ -586,9 +587,10 @@ interface SearchLanding {
  *
  * A text file that is neither binary nor truncated opens **in the editor**
  * (naru task 2743) — there is no edit mode to enter or leave. A truncated
- * file's displayed bytes aren't its full content, so saving them back would
- * corrupt it (the same reason the API itself refuses that write); it and a
- * binary stay read-only. The rendered types (markdown, HTML, a delimited
+ * file (one past the server's edit cap, `edit_limit`; naru task 2803) says so
+ * under its header. Its displayed bytes aren't its full content, so saving
+ * them back would corrupt it (the same reason the API itself refuses that
+ * write); it and a binary stay read-only. The rendered types (markdown, HTML, a delimited
  * table, an SVG) open as their preview, with the editor one toggle away. */
 function ContentPane({
   projectId,
@@ -762,7 +764,8 @@ function ContentPane({
   const renderable =
     data != null &&
     (isImagePath(data.path) ||
-      data.language === 'markdown' ||
+      // By the size on disk, not the draft's, so typing cannot flip the pane.
+      (data.language === 'markdown' && previewsAt(data.content.length)) ||
       isHtmlDocumentPath(data.path) ||
       csvDelimiter !== null)
   /** Whether the body is the editor: an editable file, and for a rendered
@@ -1588,6 +1591,13 @@ function ContentPane({
             </button>
           </span>
         </p>
+        {/* Why there is no editor here (naru task 2803): the badge alone
+            left a find-and-replace chord that did nothing unexplained. */}
+        {data.truncated && (
+          <p className="files-too-large" role="note">
+            {tooLargeNotice(data.edit_limit)}
+          </p>
+        )}
         {/* Under the header rather than over the file, for the reason the
             close prompt is under the tab strip: pushing the content down is
             what makes it impossible to miss. */}
@@ -2596,8 +2606,8 @@ function FileMediaBody({
  * the wrong column, and a longer one widens the table past its own header.
  *
  * The note says what the view is short of — but only what is TRUE. `table.total`
- * counts the rows in the text this pane was given, and the content route caps
- * that at `FILE_CONTENT_CAP`: on a `truncated` file it is the row count of the
+ * counts the rows in the text this pane was given, and the content route cuts
+ * a file over its edit cap short: on a `truncated` file it is the row count of the
  * first 256 KiB, not of the file, so naming it would state a number that is
  * simply wrong. There the note claims the rendered count alone and says the
  * bytes ran out. */

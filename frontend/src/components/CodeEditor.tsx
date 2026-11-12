@@ -44,7 +44,7 @@ import { usePrismStyle } from '../syntaxHighlighter'
 import { normalizeNewlines } from '../editorStatus'
 import type { CaretPosition } from '../editorStatus'
 import { detectIndentUnit, replacementRange, tabEscapeAfter } from '../editorInput'
-import { loadEditorLanguage } from '../editorLanguage'
+import { highlightsAt, loadEditorLanguage } from '../editorLanguage'
 import { editorChrome, editorHighlighting } from '../editorTheme'
 import type { FindMatch, TextEdit } from '../fileFind'
 
@@ -380,8 +380,8 @@ export function CodeEditor({
   // How *this* file is indented, re-read as it is edited rather than fixed at
   // mount: a file that starts empty (the Files tab's create) learns its
   // indentation from the first block typed into it. Bounded by
-  // `detectIndentUnit`'s own line budget, so it costs the same on a 256 KiB
-  // file as on a short one.
+  // `detectIndentUnit`'s own line budget, so it costs the same on a
+  // multi-megabyte file as on a short one.
   const unit = useMemo(() => detectIndentUnit(value), [value])
   useLayoutEffect(() => {
     viewRef.current?.dispatch({ effects: indentConf.reconfigure(indentUnit.of(unit)) })
@@ -396,10 +396,13 @@ export function CodeEditor({
 
   // The grammar arrives as its own chunk (`editorLanguage.ts`), so the editor
   // is usable — plain — from the first frame and coloured a moment later. A
-  // language with no grammar simply stays plain.
+  // language with no grammar simply stays plain — and so does a document too
+  // long to parse without slowing the typing (`highlightsAt`).
+  const highlighted = highlightsAt(value.length)
   useEffect(() => {
     let stale = false
     viewRef.current?.dispatch({ effects: languageConf.reconfigure([]) })
+    if (!highlighted) return
     void loadEditorLanguage(language).then((extension) => {
       if (stale || extension === null) return
       viewRef.current?.dispatch({ effects: languageConf.reconfigure(extension) })
@@ -407,7 +410,7 @@ export function CodeEditor({
     return () => {
       stale = true
     }
-  }, [language])
+  }, [language, highlighted])
 
   // After the `value` effect above, so the offsets are applied to the text
   // they were computed against.
