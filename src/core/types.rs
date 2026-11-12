@@ -1644,6 +1644,66 @@ pub struct ProjectGitStashes {
     pub stashes: Option<Vec<GitStash>>,
 }
 
+/// The last commit of a worktree, for the commit box's Amend switch (naru
+/// task 2740). Untrusted repo text.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct GitHeadCommit {
+    pub hash: String,
+    pub short_hash: String,
+    /// The whole raw message (`%B`), never capped: an amend starts from it.
+    pub message: String,
+    /// More than one parent.
+    pub is_merge: bool,
+}
+
+/// What the commit box needs to know about one worktree before it commits
+/// (naru task 2740, `core::git::commit_info_of`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct GitCommitInfo {
+    /// The checked-out branch; None when HEAD is detached.
+    pub branch: Option<String>,
+    pub detached: bool,
+    /// HEAD's branch has no commit yet (`head` is None).
+    pub unborn: bool,
+    pub head: Option<GitHeadCommit>,
+    /// The branch's upstream (`origin/main`), if it has one.
+    pub upstream: Option<String>,
+    /// HEAD is already contained in `upstream` (not ahead of it): amending
+    /// rewrites published history. Always false without an upstream.
+    pub head_published: bool,
+    /// `git config user.name` / `user.email` as that worktree sees them;
+    /// None when unset or blank.
+    pub author_name: Option<String>,
+    pub author_email: Option<String>,
+    /// Same value as `GitRepoView.operation`.
+    pub operation: Option<String>,
+    /// Git's prepared message (`MERGE_MSG`, comment lines dropped) while a
+    /// merge, cherry-pick or revert is in progress; else None.
+    pub prepared_message: Option<String>,
+}
+
+/// `GET /api/projects/{id}/git/commit-info` response; `info` null = no
+/// local_path / folder gone / not a repo.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct ProjectGitCommitInfo {
+    pub path: Option<String>,
+    pub info: Option<GitCommitInfo>,
+}
+
+/// `POST /api/projects/{id}/git/commit` success: the commit that now is HEAD
+/// and the worktree's fresh view.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct GitCommitResult {
+    pub hash: String,
+    pub short_hash: String,
+    pub amended: bool,
+    pub view: GitRepoView,
+}
+
 /// One git repo discovered under a project's `local_path` (see
 /// `core::git::discover_repos`), for the git tab's repo picker.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]

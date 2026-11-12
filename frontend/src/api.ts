@@ -63,6 +63,8 @@ import type { ProjectGitWorktreeDetails } from './types/ProjectGitWorktreeDetail
 import type { GitCommitFile } from './types/GitCommitFile'
 import type { GitFileDiff } from './types/GitFileDiff'
 import type { GitRepoView } from './types/GitRepoView'
+import type { GitCommitResult } from './types/GitCommitResult'
+import type { ProjectGitCommitInfo } from './types/ProjectGitCommitInfo'
 import type { InboxItem } from './types/InboxItem'
 import type { InboxKind } from './types/InboxKind'
 import type { LibraryBundle } from './types/LibraryBundle'
@@ -584,6 +586,37 @@ export function unstageProjectGitHunks(id: number, body: GitHunkBody): Promise<G
  * `createGitActions` (gitActions.ts), which asks the person first. */
 export function discardProjectGitHunks(id: number, body: GitHunkBody): Promise<GitRepoView> {
   return request(`/api/projects/${id}/git/discard-hunks`, jsonInit('POST', body))
+}
+
+/** What the commit box needs before committing (naru task 2740): branch, HEAD,
+ * upstream, author identity, operation, git's prepared message. Never cached
+ * server-side. `worktree` / `repo` select like `getProjectGit`. */
+export function getProjectGitCommitInfo(
+  id: number,
+  worktree?: string,
+  repo?: string,
+): Promise<ProjectGitCommitInfo> {
+  return request(`/api/projects/${id}/git/commit-info${gitQuery({ worktree, repo })}`)
+}
+
+/** Body of the commit route (naru task 2740). `worktree` is the explicit path
+ * and never omitted; `expected_head` is required with `amend` (the `head.hash`
+ * the message was loaded from); `allow_published` only after the person
+ * confirmed amending a commit that is already on its upstream. */
+export interface GitCommitBody {
+  worktree: string
+  repo?: string
+  message: string
+  amend?: boolean
+  expected_head?: string
+  allow_published?: boolean
+}
+
+/** Commit (or amend HEAD) in one worktree. Call it only through
+ * `createGitActions` (gitActions.ts), which asks first for a published amend;
+ * a test pins that this is its only caller. */
+export function commitProjectGit(id: number, body: GitCommitBody): Promise<GitCommitResult> {
+  return request(`/api/projects/${id}/git/commit`, jsonInit('POST', body))
 }
 
 /** Recent commit log for the project's local_path repo, or for one of its

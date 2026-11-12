@@ -5,6 +5,7 @@
 // else, and `gitActions.test.ts` pins both that and the single reference to
 // `discardProjectGit` and the discard route string. No React, no DOM.
 import {
+  commitProjectGit,
   discardProjectGit,
   discardProjectGitHunks,
   stageProjectGit,
@@ -12,11 +13,12 @@ import {
   unstageProjectGit,
   unstageProjectGitHunks,
 } from './api'
-import type { GitHunkBody, GitWriteBody } from './api'
+import type { GitCommitBody, GitHunkBody, GitWriteBody } from './api'
 import { picksSubject } from './gitHunks'
 import type { HunkPick } from './gitHunks'
 import { shortFolder } from './gitPanel'
 import type { BulkTarget } from './gitWorktree'
+import type { GitCommitResult } from './types/GitCommitResult'
 import type { GitRepoView } from './types/GitRepoView'
 
 /** Paths the discard dialog lists before "and N more". */
@@ -207,6 +209,7 @@ export interface GitWriteApi {
   stageHunks(body: GitHunkBody): Promise<GitRepoView>
   unstageHunks(body: GitHunkBody): Promise<GitRepoView>
   discardHunks(body: GitHunkBody): Promise<GitRepoView>
+  commit(body: GitCommitBody): Promise<GitCommitResult>
 }
 
 /** The real routes of one project. The component gets its api only from
@@ -220,6 +223,7 @@ export function projectGitApi(projectId: number): GitWriteApi {
     stageHunks: (b) => stageProjectGitHunks(projectId, b),
     unstageHunks: (b) => unstageProjectGitHunks(projectId, b),
     discardHunks: (b) => discardProjectGitHunks(projectId, b),
+    commit: (b) => commitProjectGit(projectId, b),
   }
 }
 
@@ -234,6 +238,29 @@ export type WriteOutcome =
   | { ok: true; view: GitRepoView }
   | { ok: false; reason: 'cancelled' | 'no-worktree' | 'empty' }
   | { ok: false; reason: 'error'; code: string; message: string; prefix: string }
+
+/** What the commit box asks of the gate (naru task 2740). `published` = the
+ * amended HEAD is already on its upstream: the gate asks `plan` first. */
+export type CommitRequest = {
+  message: string
+  amend: boolean
+  /** The `head.hash` the amended message was loaded from; required with `amend`. */
+  expectedHead?: string
+  published: boolean
+  plan?: DiscardPlan
+}
+
+export type CommitOutcome =
+  | { ok: true; result: GitCommitResult }
+  | { ok: false; reason: 'cancelled' | 'no-worktree' | 'empty' | 'busy' }
+  | { ok: false; reason: 'error'; code: string; message: string; prefix: string }
+
+/** "Could not commit to main in /path/to/worktree:" */
+export function commitFailurePrefix(amend: boolean, branch: string, worktree: string): string {
+  return amend
+    ? `Could not amend the last commit on ${branch} in ${worktree}:`
+    : `Could not commit to ${branch} in ${worktree}:`
+}
 
 function bodyFor(ctx: WriteCtx & { worktree: string }, target: BulkTarget): GitWriteBody {
   const body: GitWriteBody = { worktree: ctx.worktree }
@@ -330,6 +357,36 @@ export function createGitActions(deps: {
       sendHunks('stage', ctx, t, (b) => api.stageHunks(b)),
     unstageHunks: (ctx: WriteCtx, t: HunkTarget): Promise<WriteOutcome> =>
       sendHunks('unstage', ctx, t, (b) => api.unstageHunks(b)),
+    /** Commit or amend. Amending a published HEAD asks first (`req.plan`) and
+     * only then sends, with `allow_published`; nothing else ever asks. */
+    async commit(ctx: WriteCtx, req: CommitRequest): Promise<CommitOutcome> {
+      if (ctx.worktree === null) return { ok: false, reason: 'no-worktree' }
+      if (req.amend && (req.expectedHead === undefined || req.expectedHead === '')) {
+        return { ok: false, reason: 'empty' }
+      }
+      const body: GitCommitBody = { worktree: ctx.worktree, message: req.message }
+      if (ctx.repo !== undefined) body.repo = ctx.repo
+      if (req.amend) {
+        body.amend = true
+        body.expected_head = req.expectedHead
+        if (req.published) {
+          if (req.plan === undefined || !(await confirm(req.plan))) {
+            return { ok: false, reason: 'cancelled' }
+          }
+          body.allow_published = true
+        }
+      }
+      try {
+        return { ok: true, result: await api.commit(body) }
+      } catch (e) {
+        return {
+          ok: false,
+          reason: 'error',
+          ...describeError(e),
+          prefix: commitFailurePrefix(req.amend, ctx.branch, ctx.worktree),
+        }
+      }
+    },
     /** Like `discard`: asks first, with the lines to be lost (`lost`). */
     async discardHunks(ctx: WriteCtx, t: HunkTarget, lost: string[]): Promise<WriteOutcome> {
       if (ctx.worktree === null) return { ok: false, reason: 'no-worktree' }

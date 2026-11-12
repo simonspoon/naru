@@ -10,8 +10,9 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use crate::core::types::{
-    DiffStat, GitBranch, GitBranchKind, GitCommit, GitCommitDetail, GitCommitFile, GitFile, GitRef,
-    GitRefKind, GitRepo, GitRepoView, GitStash, GitStatus, GitWorktree, GitWorktreeDetail,
+    DiffStat, GitBranch, GitBranchKind, GitCommit, GitCommitDetail, GitCommitFile, GitCommitInfo,
+    GitFile, GitHeadCommit, GitRef, GitRefKind, GitRepo, GitRepoView, GitStash, GitStatus,
+    GitWorktree, GitWorktreeDetail,
 };
 
 /// Diff text is capped so one huge file can't balloon the JSON response
@@ -1584,6 +1585,317 @@ pub fn apply_hunks(dir: &str, op: WriteOp, patch: Vec<u8>) -> Result<(), String>
         WriteOp::Discard => &["apply", "--reverse", "--whitespace=nowarn", "-"],
     };
     run_write(dir, args, Some(patch))
+}
+
+// ---- Commit and amend (naru task 2740) ------------------------------------
+//
+// `git commit` runs the repo's hooks and may call gpg, so it is not a
+// `run_write`: stdout AND stderr are captured, it has a timeout, and it is the
+// one write that must NOT set `GIT_LITERAL_PATHSPECS` (a hook's own git
+// pathspecs inherit the environment). The message goes in on stdin, never argv.
+
+/// Cap on the output a failed commit carries (a hook can be chatty).
+const COMMIT_ERR_CAP: usize = 64 * 1024;
+
+/// How long a commit may run (hooks, gpg) before its process group is stopped.
+const COMMIT_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// How long a TERMed commit gets to clean up (git removes its own lock
+/// files) before git itself is killed, and how long the pipe readers get to
+/// finish once the child is gone.
+const COMMIT_GRACE: Duration = Duration::from_secs(2);
+
+/// The text `git commit -F -` is fed, or `None` when nothing is left:
+/// `\r\n` becomes `\n`, leading blank lines go, trailing whitespace of the
+/// whole text goes, and exactly one `\n` ends it. Nothing else changes: a `#`
+/// line is ordinary text (the commit runs with `--cleanup=verbatim`), inner
+/// whitespace, unicode and a leading `-` survive.
+pub fn normalize_commit_message(raw: &str) -> Option<String> {
+    let text = raw.replace("\r\n", "\n");
+    let mut start = 0;
+    for line in text.split_inclusive('\n') {
+        if !line.trim().is_empty() {
+            break;
+        }
+        start += line.len();
+    }
+    let body = text[start..].trim_end();
+    if body.is_empty() {
+        return None;
+    }
+    Some(format!("{body}\n"))
+}
+
+/// True when some file has a staged change (what a non-amend commit records).
+pub fn any_staged(files: &[GitFile]) -> bool {
+    files.iter().any(has_staged)
+}
+
+/// `git commit` of the index with `message` (already normalised); `amend`
+/// replaces HEAD. See [`commit_within`].
+pub fn commit(dir: &str, message: &str, amend: bool) -> Result<(), String> {
+    commit_within(dir, message, amend, COMMIT_TIMEOUT)
+}
+
+/// `git -C <dir> commit --cleanup=verbatim -F - [--amend]`, message on stdin.
+/// Hooks run normally (no `--no-verify`), nothing is allowed empty, no
+/// pathspec. The child leads its own process group: past `timeout` the group
+/// is sent TERM (git removes its lock files); if git is still running after
+/// [`COMMIT_GRACE`] the group is KILLed; if git exited in time nothing more
+/// is signalled, so a hook child that ignores TERM may linger. `Err` is git's stderr then stdout
+/// (hooks print to either), lossy UTF-8, trimmed, the last
+/// [`COMMIT_ERR_CAP`] bytes kept. Never retried; `index.lock` is never touched.
+fn commit_within(dir: &str, message: &str, amend: bool, timeout: Duration) -> Result<(), String> {
+    use std::io::Write;
+    use std::sync::{Arc, Mutex, mpsc};
+    let mut cmd = Command::new("git");
+    cmd.args(["-C", dir, "commit", "--cleanup=verbatim", "-F", "-"]);
+    if amend {
+        cmd.arg("--amend");
+    }
+    cmd.env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    crate::core::proc::isolate(&mut cmd);
+    let mut child = cmd.spawn().map_err(|e| format!("could not run git: {e}"))?;
+    if let Some(mut pipe) = child.stdin.take() {
+        let data = message.as_bytes().to_vec();
+        // A thread, so a git that fills a pipe first cannot deadlock us; a
+        // git that exits early just closes the pipe.
+        std::thread::spawn(move || {
+            let _ = pipe.write_all(&data);
+        });
+    }
+    // Each pipe is drained on a thread into a shared buffer that keeps the
+    // LAST COMMIT_ERR_CAP bytes (a hook's real failure line is at the end)
+    // and flags that it dropped some; it signals when the pipe is done.
+    let drain = |mut pipe: Box<dyn Read + Send>| {
+        let buf = Arc::new(Mutex::new((Vec::<u8>::new(), false)));
+        let (tx, rx) = mpsc::channel::<()>();
+        let shared = buf.clone();
+        std::thread::spawn(move || {
+            let mut chunk = [0u8; 8192];
+            while let Ok(n) = pipe.read(&mut chunk) {
+                if n == 0 {
+                    break;
+                }
+                let mut b = shared.lock().unwrap();
+                b.0.extend_from_slice(&chunk[..n]);
+                if b.0.len() > COMMIT_ERR_CAP {
+                    let excess = b.0.len() - COMMIT_ERR_CAP;
+                    b.0.drain(..excess);
+                    b.1 = true;
+                }
+            }
+            let _ = tx.send(());
+        });
+        (buf, rx)
+    };
+    let (err_buf, err_done) = drain(Box::new(child.stderr.take().unwrap()));
+    let (out_buf, out_done) = drain(Box::new(child.stdout.take().unwrap()));
+    let deadline = Instant::now() + timeout;
+    let mut timed_out = false;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break Some(s),
+            Ok(None) if Instant::now() >= deadline => {
+                timed_out = true;
+                let pgid = i64::from(child.id());
+                crate::core::proc::signal_group(pgid, "TERM");
+                let grace = Instant::now() + COMMIT_GRACE;
+                let exited = loop {
+                    match child.try_wait() {
+                        Ok(Some(s)) => break Some(s),
+                        Ok(None) if Instant::now() < grace => {
+                            std::thread::sleep(Duration::from_millis(20))
+                        }
+                        _ => break None,
+                    }
+                };
+                if exited.is_none() {
+                    // The leader is not yet reaped, so its pid (the group id)
+                    // cannot have been reused: the group KILL is safe here,
+                    // and only here.
+                    crate::core::proc::signal_group(pgid, "KILL");
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+                break exited;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+        }
+    };
+    // A descendant that left the group can hold a pipe open: wait a bounded
+    // time and keep whatever was read.
+    let _ = err_done.recv_timeout(COMMIT_GRACE);
+    let _ = out_done.recv_timeout(COMMIT_GRACE);
+    if !timed_out && status.is_some_and(|s| s.success()) {
+        return Ok(());
+    }
+    let mut truncated = false;
+    let mut text = |b: &Arc<Mutex<(Vec<u8>, bool)>>| {
+        let b = b.lock().unwrap();
+        let t = String::from_utf8_lossy(&b.0).to_string();
+        if b.1 {
+            truncated = true;
+            // The cut may have split a character at the front.
+            return t.trim_start_matches('\u{FFFD}').to_string();
+        }
+        t
+    };
+    let (e, o) = (text(&err_buf), text(&out_buf));
+    let mut out = [e, o]
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if out.len() > COMMIT_ERR_CAP {
+        let cut = (out.len() - COMMIT_ERR_CAP..=out.len()).find(|i| out.is_char_boundary(*i));
+        out = out[cut.unwrap_or(out.len())..].to_string();
+        truncated = true;
+    }
+    if truncated {
+        out = format!("[output truncated]\n{out}");
+    }
+    if timed_out {
+        let head = format!(
+            "git commit did not finish within {} s and was stopped. Nothing was retried.",
+            timeout.as_secs()
+        );
+        return Err(if out.is_empty() {
+            head
+        } else {
+            format!("{head}\n{out}")
+        });
+    }
+    if out.is_empty() {
+        return Err(match status {
+            Some(s) => format!("git commit failed ({s})"),
+            None => "git commit failed".to_string(),
+        });
+    }
+    Err(out)
+}
+
+/// `git <args>` read-only in `dir`: exit code and raw stdout. Optional locks
+/// off (a read never takes the index lock), stdin null, stderr dropped.
+fn read_git(dir: &str, args: &[&str]) -> Option<(i32, Vec<u8>)> {
+    let out = Command::new("git")
+        .args(["-C", dir])
+        .args(args)
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    Some((out.status.code()?, out.stdout))
+}
+
+/// [`read_git`] that answers only on exit 0, trimmed, non-empty.
+fn read_git_line(dir: &str, args: &[&str]) -> Option<String> {
+    let (code, out) = read_git(dir, args)?;
+    let s = String::from_utf8_lossy(&out).trim().to_string();
+    (code == 0 && !s.is_empty()).then_some(s)
+}
+
+/// HEAD's full and short hash, `None` on an unborn or unreadable HEAD.
+pub fn head_of(dir: &str) -> Option<(String, String)> {
+    let full = read_git_line(dir, &["rev-parse", "--verify", "-q", "HEAD^{commit}"])?;
+    let short = read_git_line(dir, &["rev-parse", "--short", &full])?;
+    Some((full, short))
+}
+
+/// What the commit box needs from `dir`'s worktree; `None` when it is not a
+/// repo. Every read is best-effort and never panics: an unreadable HEAD is
+/// "not unborn" with no `head`; a failed upstream, identity or MERGE_MSG read
+/// is `None`. Nothing is cached and nothing is written.
+pub fn commit_info_of(dir: &str) -> Option<GitCommitInfo> {
+    let git_dir = read_git_line(dir, &["rev-parse", "--absolute-git-dir"])?;
+    let branch = read_git_line(dir, &["symbolic-ref", "-q", "--short", "HEAD"]);
+    let unborn = head_is_unborn(dir).unwrap_or(false);
+    let head = if unborn {
+        None
+    } else {
+        // `-z`: the record ends in NUL, so `%B` is exactly the message.
+        read_git(
+            dir,
+            &[
+                "log",
+                "-z",
+                "-n",
+                "1",
+                "--no-show-signature",
+                "--format=%H%x00%h%x00%P%x00%B",
+                "HEAD",
+            ],
+        )
+        .filter(|(c, _)| *c == 0)
+        .and_then(|(_, raw)| {
+            let text = String::from_utf8_lossy(&raw).into_owned();
+            let text = text.strip_suffix('\0').unwrap_or(&text);
+            let mut it = text.splitn(4, '\0');
+            let (hash, short, parents, message) = (it.next()?, it.next()?, it.next()?, it.next()?);
+            Some(GitHeadCommit {
+                hash: hash.to_string(),
+                short_hash: short.to_string(),
+                message: message.to_string(),
+                is_merge: parents.split_whitespace().count() > 1,
+            })
+        })
+    };
+    let upstream = read_git_line(
+        dir,
+        &[
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ],
+    );
+    let head_published = head.is_some()
+        && read_git_line(dir, &["rev-parse", "--symbolic-full-name", "@{upstream}"])
+            .and_then(|full| read_git(dir, &["merge-base", "--is-ancestor", "HEAD", &full]))
+            .is_some_and(|(c, _)| c == 0);
+    let config = |key: &str| read_git_line(dir, &["config", "--get", key]);
+    let operation = operation_in(std::path::Path::new(&git_dir));
+    let prepared_message = operation
+        .as_deref()
+        .filter(|o| matches!(*o, "merge" | "cherry-pick" | "revert"))
+        .and_then(|_| std::fs::read(std::path::Path::new(&git_dir).join("MERGE_MSG")).ok())
+        .and_then(|raw| {
+            let text = String::from_utf8_lossy(&raw);
+            let mut kept = text
+                .lines()
+                .filter(|l| !l.starts_with('#'))
+                .collect::<Vec<_>>()
+                .join("\n")
+                .trim_end()
+                .to_string();
+            if kept.len() > BODY_CAP {
+                let cut = (0..=BODY_CAP).rev().find(|i| kept.is_char_boundary(*i));
+                kept.truncate(cut.unwrap_or(0));
+            }
+            (!kept.is_empty()).then_some(kept)
+        });
+    Some(GitCommitInfo {
+        detached: branch.is_none(),
+        branch,
+        unborn,
+        head,
+        upstream,
+        head_published,
+        author_name: config("user.name"),
+        author_email: config("user.email"),
+        operation,
+        prepared_message,
+    })
 }
 
 /// Recent commit log (`git -C <dir> log -n LOG_CAP --date=iso-strict
@@ -5316,5 +5628,430 @@ mod tests {
         let u = unstaged(&d);
         assert!(u.contains("old mode 100644\nnew mode 100755\n"), "{u}");
         assert!(!u.contains("@@"), "{u}");
+    }
+}
+
+/// Commit and amend (naru task 2740): real temp repos. Each fixture sets its
+/// own identity, `commit.gpgsign false` and a local `core.hooksPath`, so the
+/// developer's global config and hooks never reach a test.
+#[cfg(test)]
+mod commit_tests {
+    use super::*;
+    use std::path::Path;
+
+    fn gb(dir: &Path, args: &[&str]) -> Vec<u8> {
+        let out = Command::new("git")
+            .args(["-C", dir.to_str().unwrap()])
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        out.stdout
+    }
+
+    fn g(dir: &Path, args: &[&str]) -> String {
+        String::from_utf8(gb(dir, args)).unwrap().trim().to_string()
+    }
+
+    /// An empty repo on `main` with identity, no signing and its own hooks dir.
+    fn bare_repo() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        g(d, &["init", "-q", "-b", "main"]);
+        g(d, &["config", "user.name", "Tester"]);
+        g(d, &["config", "user.email", "t@example.com"]);
+        g(d, &["config", "commit.gpgsign", "false"]);
+        let hooks = d.join(".git/hooks");
+        g(d, &["config", "core.hooksPath", hooks.to_str().unwrap()]);
+        tmp
+    }
+
+    /// `bare_repo` plus one commit ("base") holding `a.txt` and `b.txt`.
+    fn repo() -> tempfile::TempDir {
+        let tmp = bare_repo();
+        let d = tmp.path();
+        std::fs::write(d.join("a.txt"), "a\n").unwrap();
+        std::fs::write(d.join("b.txt"), "b\n").unwrap();
+        g(d, &["add", "a.txt", "b.txt"]);
+        g(d, &["commit", "-q", "-m", "base"]);
+        tmp
+    }
+
+    fn s(d: &Path) -> &str {
+        d.to_str().unwrap()
+    }
+
+    fn head(d: &Path) -> String {
+        g(d, &["rev-parse", "HEAD"])
+    }
+
+    fn count(d: &Path) -> usize {
+        g(d, &["rev-list", "--count", "HEAD"]).parse().unwrap()
+    }
+
+    /// The raw message of HEAD: the bytes after the first blank line of the
+    /// commit object.
+    fn raw_message(d: &Path) -> Vec<u8> {
+        let obj = gb(d, &["cat-file", "commit", "HEAD"]);
+        let at = obj.windows(2).position(|w| w == b"\n\n").unwrap();
+        obj[at + 2..].to_vec()
+    }
+
+    fn hook(d: &Path, name: &str, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = d.join(".git/hooks");
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join(name);
+        std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    fn normalize_commit_message_table() {
+        let cases: &[(&str, Option<&str>)] = &[
+            ("fix it", Some("fix it\n")),
+            ("a\r\nb\r\n", Some("a\nb\n")),
+            ("\n\n  \nsubject\n\nbody", Some("subject\n\nbody\n")),
+            ("subject  \n\n\n  \t\n", Some("subject\n")),
+            ("  indented first\n", Some("  indented first\n")),
+            ("", None),
+            (" \r\n\t\n  ", None),
+            ("# only a comment", Some("# only a comment\n")),
+            ("--amend -m x", Some("--amend -m x\n")),
+            ("a\n\n\n\nb\n", Some("a\n\n\n\nb\n")),
+            ("café 🎉 日本語\n", Some("café 🎉 日本語\n")),
+        ];
+        for (raw, want) in cases {
+            assert_eq!(normalize_commit_message(raw).as_deref(), *want, "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn commit_creates_one_commit_with_the_staged_tree_and_the_exact_message() {
+        let tmp = repo();
+        let d = tmp.path();
+        let big = format!("subject\n\n{}", "x".repeat(100 * 1024));
+        let messages = [
+            "subject\n\nbody line one\nbody line two\n\n  indented\n".to_string(),
+            "emoji 🎉 ünïcode 日本語\n\nтело сообщения\n".to_string(),
+            "--amend -m x\n".to_string(),
+            "# not a comment\n\nbody\n".to_string(),
+            normalize_commit_message(&big).unwrap(),
+        ];
+        // An unstaged change and an untracked file that must stay untouched.
+        std::fs::write(d.join("b.txt"), "b changed, unstaged\n").unwrap();
+        std::fs::write(d.join("new.txt"), "untracked\n").unwrap();
+        for (i, m) in messages.iter().enumerate() {
+            std::fs::write(d.join("a.txt"), format!("a{i}\n")).unwrap();
+            g(d, &["add", "a.txt"]);
+            let tree = g(d, &["write-tree"]);
+            let (old, n) = (head(d), count(d));
+            commit(s(d), m, false).unwrap();
+            assert_eq!(count(d), n + 1);
+            assert_eq!(g(d, &["rev-parse", "HEAD^"]), old);
+            assert_eq!(g(d, &["rev-parse", "HEAD^{tree}"]), tree);
+            assert_eq!(raw_message(d), m.as_bytes(), "message {i}");
+            let info = commit_info_of(s(d)).unwrap();
+            assert_eq!(
+                normalize_commit_message(&info.head.unwrap().message).as_deref(),
+                Some(m.as_str())
+            );
+            assert_eq!(
+                g(d, &["status", "--porcelain"]),
+                "M b.txt\n?? new.txt",
+                "unstaged and untracked left alone"
+            );
+        }
+    }
+
+    #[test]
+    fn commit_on_an_unborn_head_creates_the_root_commit() {
+        let tmp = bare_repo();
+        let d = tmp.path();
+        std::fs::write(d.join("a.txt"), "a\n").unwrap();
+        g(d, &["add", "a.txt"]);
+        let tree = g(d, &["write-tree"]);
+        commit(s(d), "first\n", false).unwrap();
+        assert_eq!(count(d), 1);
+        assert_eq!(g(d, &["rev-parse", "HEAD^{tree}"]), tree);
+        assert!(
+            g(d, &["rev-list", "--parents", "-n", "1", "HEAD"])
+                .split(' ')
+                .count()
+                == 1
+        );
+    }
+
+    #[test]
+    fn amend_replaces_head_keeps_its_author_and_takes_the_index() {
+        let tmp = repo();
+        let d = tmp.path();
+        std::fs::write(d.join("a.txt"), "second\n").unwrap();
+        g(d, &["add", "a.txt"]);
+        g(
+            d,
+            &[
+                "commit",
+                "-q",
+                "--author",
+                "Old Author <old@example.com>",
+                "--date",
+                "2020-01-02T03:04:05",
+                "-m",
+                "second",
+            ],
+        );
+        let who = g(d, &["log", "-1", "--format=%an|%ae|%aI"]);
+        let parent = g(d, &["rev-parse", "HEAD^"]);
+        let n = count(d);
+        // Message only: the tree stays.
+        let tree = g(d, &["rev-parse", "HEAD^{tree}"]);
+        commit(s(d), "reworded\n\nwith a body\n", true).unwrap();
+        assert_eq!(count(d), n);
+        assert_eq!(g(d, &["rev-parse", "HEAD^"]), parent);
+        assert_eq!(raw_message(d), b"reworded\n\nwith a body\n");
+        assert_eq!(g(d, &["rev-parse", "HEAD^{tree}"]), tree);
+        assert_eq!(g(d, &["log", "-1", "--format=%an|%ae|%aI"]), who);
+        // With a staged change: the tree is the index.
+        std::fs::write(d.join("b.txt"), "b amended\n").unwrap();
+        g(d, &["add", "b.txt"]);
+        let tree = g(d, &["write-tree"]);
+        commit(s(d), "--final -x\n", true).unwrap();
+        assert_eq!(count(d), n);
+        assert_eq!(g(d, &["rev-parse", "HEAD^"]), parent);
+        assert_eq!(g(d, &["rev-parse", "HEAD^{tree}"]), tree);
+        assert_eq!(raw_message(d), b"--final -x\n");
+        assert_eq!(g(d, &["log", "-1", "--format=%an|%ae|%aI"]), who);
+    }
+
+    #[test]
+    fn failing_hooks_return_both_outputs_and_change_nothing() {
+        for name in ["pre-commit", "commit-msg"] {
+            let tmp = repo();
+            let d = tmp.path();
+            hook(
+                d,
+                name,
+                "echo out-from-hook\necho err-from-hook >&2\nexit 1",
+            );
+            std::fs::write(d.join("a.txt"), "changed\n").unwrap();
+            g(d, &["add", "a.txt"]);
+            let (old, tree) = (head(d), g(d, &["write-tree"]));
+            let e = commit(s(d), "msg\n", false).unwrap_err();
+            assert!(e.contains("out-from-hook"), "{name}: {e}");
+            assert!(e.contains("err-from-hook"), "{name}: {e}");
+            assert_eq!(head(d), old);
+            assert_eq!(g(d, &["write-tree"]), tree);
+            assert_eq!(count(d), 1);
+        }
+    }
+
+    #[test]
+    fn a_chatty_failing_hook_keeps_the_tail_of_its_output() {
+        let tmp = repo();
+        let d = tmp.path();
+        hook(
+            d,
+            "pre-commit",
+            "i=0\nwhile [ $i -lt 4000 ]; do echo \"noise line number $i padding padding\"; i=$((i+1)); done\necho THE-REAL-FAILURE >&2\nexit 1",
+        );
+        std::fs::write(d.join("a.txt"), "changed\n").unwrap();
+        g(d, &["add", "a.txt"]);
+        let e = commit(s(d), "msg\n", false).unwrap_err();
+        assert!(e.starts_with("[output truncated]\n"), "{}", &e[..60]);
+        assert!(e.contains("THE-REAL-FAILURE"), "the tail was lost");
+        assert!(e.contains("noise line number 3999"));
+        assert!(!e.contains("noise line number 0 "));
+        assert!(e.len() <= COMMIT_ERR_CAP * 2 + 64);
+        assert_eq!(count(d), 1);
+    }
+
+    #[test]
+    fn a_passing_hook_still_commits() {
+        let tmp = repo();
+        let d = tmp.path();
+        hook(d, "pre-commit", "echo checking\nexit 0");
+        hook(d, "commit-msg", "exit 0");
+        std::fs::write(d.join("a.txt"), "changed\n").unwrap();
+        g(d, &["add", "a.txt"]);
+        commit(s(d), "ok\n", false).unwrap();
+        assert_eq!(count(d), 2);
+        assert_eq!(raw_message(d), b"ok\n");
+    }
+
+    #[test]
+    fn a_held_index_lock_fails_and_stays() {
+        let tmp = repo();
+        let d = tmp.path();
+        std::fs::write(d.join("a.txt"), "changed\n").unwrap();
+        g(d, &["add", "a.txt"]);
+        let lock = d.join(".git/index.lock");
+        std::fs::write(&lock, "").unwrap();
+        let old = head(d);
+        let e = commit(s(d), "msg\n", false).unwrap_err();
+        assert!(e.contains("index.lock"), "{e}");
+        assert_eq!(head(d), old);
+        assert!(lock.exists(), "the lock is never removed");
+    }
+
+    #[test]
+    fn a_hung_hook_is_stopped_at_the_timeout_and_leaves_no_lock() {
+        let tmp = repo();
+        let d = tmp.path();
+        hook(d, "pre-commit", "echo started\nsleep 30");
+        std::fs::write(d.join("a.txt"), "changed\n").unwrap();
+        g(d, &["add", "a.txt"]);
+        let old = head(d);
+        let t = Instant::now();
+        let e = commit_within(s(d), "msg\n", false, Duration::from_secs(1)).unwrap_err();
+        assert!(t.elapsed() < Duration::from_secs(15), "{:?}", t.elapsed());
+        assert!(
+            e.starts_with(
+                "git commit did not finish within 1 s and was stopped. Nothing was retried."
+            ),
+            "{e}"
+        );
+        assert!(e.contains("started"), "{e}");
+        assert_eq!(head(d), old);
+        assert!(!d.join(".git/index.lock").exists());
+    }
+
+    #[test]
+    fn a_failing_signer_returns_git_text_promptly() {
+        let tmp = repo();
+        let d = tmp.path();
+        let prog = tmp.path().join(".git/fake-gpg");
+        std::fs::write(&prog, "#!/bin/sh\necho signer-says-no >&2\nexit 1\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&prog, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        g(d, &["config", "gpg.format", "openpgp"]);
+        g(d, &["config", "commit.gpgsign", "true"]);
+        g(d, &["config", "gpg.program", prog.to_str().unwrap()]);
+        std::fs::write(d.join("a.txt"), "changed\n").unwrap();
+        g(d, &["add", "a.txt"]);
+        let old = head(d);
+        let t = Instant::now();
+        let e = commit(s(d), "msg\n", false).unwrap_err();
+        assert!(t.elapsed() < Duration::from_secs(15));
+        assert!(e.contains("gpg") || e.contains("sign"), "{e}");
+        assert_eq!(head(d), old);
+    }
+
+    #[test]
+    fn commit_info_reads_born_unborn_and_detached() {
+        let tmp = bare_repo();
+        let d = tmp.path();
+        let i = commit_info_of(s(d)).unwrap();
+        assert!(i.unborn && i.head.is_none() && !i.detached);
+        assert_eq!(i.branch.as_deref(), Some("main"));
+        assert!(!i.head_published && i.upstream.is_none());
+        assert_eq!(i.author_name.as_deref(), Some("Tester"));
+        assert_eq!(i.author_email.as_deref(), Some("t@example.com"));
+
+        std::fs::write(d.join("a.txt"), "a\n").unwrap();
+        g(d, &["add", "a.txt"]);
+        g(d, &["commit", "-q", "-m", "one\n\nbody"]);
+        let h = commit_info_of(s(d)).unwrap().head.unwrap();
+        assert_eq!(h.hash, head(d));
+        assert_eq!(h.short_hash, g(d, &["rev-parse", "--short", "HEAD"]));
+        assert!(h.message.starts_with("one\n\nbody"));
+        assert!(!h.is_merge);
+
+        g(d, &["checkout", "-q", "--detach"]);
+        let i = commit_info_of(s(d)).unwrap();
+        assert!(i.detached && !i.unborn && i.branch.is_none());
+        assert_eq!(i.head.unwrap().hash, head(d));
+        assert!(commit_info_of(tempfile::tempdir().unwrap().path().to_str().unwrap()).is_none());
+    }
+
+    #[test]
+    fn commit_info_identity_is_none_when_blank() {
+        let tmp = repo();
+        let d = tmp.path();
+        g(d, &["config", "user.name", " "]);
+        g(d, &["config", "user.email", ""]);
+        let i = commit_info_of(s(d)).unwrap();
+        assert!(i.author_name.is_none() && i.author_email.is_none());
+    }
+
+    #[test]
+    fn commit_info_knows_whether_head_is_published() {
+        let tmp = repo();
+        let d = tmp.path();
+        let remote = tempfile::tempdir().unwrap();
+        g(remote.path(), &["init", "-q", "--bare", "-b", "main"]);
+        g(
+            d,
+            &["remote", "add", "origin", remote.path().to_str().unwrap()],
+        );
+        assert!(!commit_info_of(s(d)).unwrap().head_published);
+        g(d, &["push", "-q", "-u", "origin", "main"]);
+        let i = commit_info_of(s(d)).unwrap();
+        assert_eq!(i.upstream.as_deref(), Some("origin/main"));
+        assert!(i.head_published);
+        std::fs::write(d.join("a.txt"), "more\n").unwrap();
+        g(d, &["commit", "-q", "-a", "-m", "local only"]);
+        let i = commit_info_of(s(d)).unwrap();
+        assert_eq!(i.upstream.as_deref(), Some("origin/main"));
+        assert!(!i.head_published);
+    }
+
+    #[test]
+    fn commit_info_prepared_message_drops_comment_lines() {
+        let tmp = repo();
+        let d = tmp.path();
+        g(d, &["checkout", "-q", "-b", "other"]);
+        std::fs::write(d.join("a.txt"), "other\n").unwrap();
+        g(d, &["commit", "-q", "-a", "-m", "other side"]);
+        g(d, &["checkout", "-q", "main"]);
+        std::fs::write(d.join("a.txt"), "main\n").unwrap();
+        g(d, &["commit", "-q", "-a", "-m", "main side"]);
+        let merge = Command::new("git")
+            .args(["-C", s(d), "merge", "other"])
+            .output()
+            .unwrap();
+        assert!(!merge.status.success(), "the merge must conflict");
+        let on_disk = std::fs::read_to_string(d.join(".git/MERGE_MSG")).unwrap();
+        assert!(on_disk.lines().any(|l| l.starts_with('#')), "{on_disk}");
+        let i = commit_info_of(s(d)).unwrap();
+        assert_eq!(i.operation.as_deref(), Some("merge"));
+        let m = i.prepared_message.unwrap();
+        assert!(m.starts_with("Merge branch 'other'"), "{m}");
+        assert!(m.lines().all(|l| !l.starts_with('#')), "{m}");
+        assert_eq!(m, m.trim_end());
+        // No operation, no prepared message.
+        g(d, &["merge", "--abort"]);
+        assert!(commit_info_of(s(d)).unwrap().prepared_message.is_none());
+    }
+
+    #[test]
+    fn commit_info_of_a_linked_worktree_reports_its_own_branch_and_head() {
+        let tmp = repo();
+        let d = tmp.path();
+        let linked = tempfile::tempdir().unwrap();
+        let l = linked.path().join("wt");
+        g(
+            d,
+            &["worktree", "add", "-q", "-b", "feat", l.to_str().unwrap()],
+        );
+        std::fs::write(l.join("c.txt"), "c\n").unwrap();
+        g(&l, &["add", "c.txt"]);
+        commit(s(&l), "on feat\n", false).unwrap();
+        let main = commit_info_of(s(d)).unwrap();
+        let feat = commit_info_of(s(&l)).unwrap();
+        assert_eq!(main.branch.as_deref(), Some("main"));
+        assert_eq!(feat.branch.as_deref(), Some("feat"));
+        assert_eq!(
+            feat.head.as_ref().unwrap().hash,
+            g(&l, &["rev-parse", "HEAD"])
+        );
+        assert_ne!(main.head.unwrap().hash, feat.head.unwrap().hash);
     }
 }

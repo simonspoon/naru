@@ -1212,7 +1212,7 @@ function GitRepoPane({
           }}
         />
       )}
-      {!(mode === 'tree' && fresh && files.length > 0) && (
+      {!(mode === 'tree' && fresh) && (
       <p className="git-repo-header">
         {fresh && (
           <>
@@ -1335,8 +1335,6 @@ function GitRepoPane({
         />
       ) : !fresh ? (
         error ? <p className="error">{error}</p> : <p className="muted">Loading…</p>
-      ) : files.length === 0 ? (
-        <p className="muted">Working tree clean — no changed files.</p>
       ) : (
         <GitWorkingTree
           projectId={projectId}
@@ -1361,6 +1359,10 @@ function GitRepoPane({
           }
           refetch={refetch}
           onSelectedPath={setSelectedPath}
+          onOpenCommit={(sha) => {
+            setMode('history')
+            setOpenRequest((r) => ({ sha, nonce: (r?.nonce ?? 0) + 1 }))
+          }}
           backRef={treeBack}
         />
       )}

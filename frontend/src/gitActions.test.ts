@@ -11,6 +11,7 @@ import {
   discardPlan,
   hunkFailurePrefix,
   failurePrefix,
+  commitFailurePrefix,
 } from './gitActions'
 import type { DiscardItem, DiscardPlan, GitWriteApi } from './gitActions'
 import type { GitRepoView } from './types/GitRepoView'
@@ -36,6 +37,8 @@ const untrackedDir = (path: string): DiscardItem => ({
   alsoStaged: false,
 })
 
+const commitResult = { hash: 'a'.repeat(40), short_hash: 'aaaaaaa', amended: false, view }
+
 function harness(answer: boolean | (() => Promise<boolean>) = true) {
   const api: GitWriteApi = {
     stage: vi.fn(async () => view),
@@ -44,6 +47,7 @@ function harness(answer: boolean | (() => Promise<boolean>) = true) {
     stageHunks: vi.fn(async () => view),
     unstageHunks: vi.fn(async () => view),
     discardHunks: vi.fn(async () => view),
+    commit: vi.fn(async () => commitResult),
   }
   const confirm = vi.fn(async (plan: DiscardPlan) => {
     void plan
@@ -322,6 +326,85 @@ describe('hunk and line writes', () => {
   })
 })
 
+describe('commit and amend', () => {
+  const plan = { title: 'Amend a published commit?' } as DiscardPlan
+  const HEAD = 'h'.repeat(40)
+
+  it('a plain commit never asks and sends the message once', async () => {
+    const { api, confirm, actions } = harness(false)
+    const out = await actions.commit({ ...ctx, repo: 'sub' }, { message: 'msg', amend: false, published: false })
+    expect(out).toEqual({ ok: true, result: commitResult })
+    expect(confirm).not.toHaveBeenCalled()
+    expect(api.commit).toHaveBeenCalledTimes(1)
+    expect(api.commit).toHaveBeenCalledWith({ worktree: WT, repo: 'sub', message: 'msg' })
+  })
+
+  it('an unpublished amend never asks and sends expected_head', async () => {
+    const { api, confirm, actions } = harness(false)
+    await actions.commit(ctx, { message: 'm', amend: true, expectedHead: HEAD, published: false })
+    expect(confirm).not.toHaveBeenCalled()
+    expect(api.commit).toHaveBeenCalledWith({ worktree: WT, message: 'm', amend: true, expected_head: HEAD })
+  })
+
+  it('a published amend: false never reaches the api', async () => {
+    const { api, confirm, actions } = harness(false)
+    const out = await actions.commit(ctx, { message: 'm', amend: true, expectedHead: HEAD, published: true, plan })
+    expect(out).toEqual({ ok: false, reason: 'cancelled' })
+    expect(confirm).toHaveBeenCalledWith(plan)
+    expect(api.commit).not.toHaveBeenCalled()
+  })
+
+  it('a published amend: true sends once with allow_published, after the answer', async () => {
+    let release: (v: boolean) => void = () => {}
+    const { api, confirm, actions } = harness(() => new Promise<boolean>((r) => (release = r)))
+    const p = actions.commit(ctx, { message: 'm', amend: true, expectedHead: HEAD, published: true, plan })
+    await Promise.resolve()
+    expect(api.commit).not.toHaveBeenCalled()
+    release(true)
+    expect(await p).toEqual({ ok: true, result: commitResult })
+    expect(confirm).toHaveBeenCalledTimes(1)
+    expect(api.commit).toHaveBeenCalledTimes(1)
+    expect(api.commit).toHaveBeenCalledWith({
+      worktree: WT,
+      message: 'm',
+      amend: true,
+      expected_head: HEAD,
+      allow_published: true,
+    })
+  })
+
+  it('sends nothing without a worktree, or an amend without its expected head', async () => {
+    const { api, confirm, actions } = harness(true)
+    const none = { worktree: null, branch: 'b' }
+    expect(await actions.commit(none, { message: 'm', amend: false, published: false })).toEqual({
+      ok: false,
+      reason: 'no-worktree',
+    })
+    expect(await actions.commit(ctx, { message: 'm', amend: true, published: false })).toEqual({
+      ok: false,
+      reason: 'empty',
+    })
+    expect(confirm).not.toHaveBeenCalled()
+    expect(api.commit).not.toHaveBeenCalled()
+  })
+
+  it('a failure keeps git message verbatim under a prefix naming branch and worktree; no retry', async () => {
+    const { api, actions } = harness(true)
+    const msg = 'hook failed\nline 2'
+    vi.mocked(api.commit).mockRejectedValueOnce(Object.assign(new Error(msg), { code: 'conflict' }))
+    const out = await actions.commit(ctx, { message: 'm', amend: false, published: false })
+    expect(out).toEqual({
+      ok: false,
+      reason: 'error',
+      code: 'conflict',
+      message: msg,
+      prefix: `Could not commit to feat/x in ${WT}:`,
+    })
+    expect(api.commit).toHaveBeenCalledTimes(1)
+    expect(commitFailurePrefix(true, 'main', WT)).toBe(`Could not amend the last commit on main in ${WT}:`)
+  })
+})
+
 describe('the discard endpoint has one caller', () => {
   const root = join(__dirname)
   const sources: string[] = []
@@ -362,6 +445,13 @@ describe('the discard endpoint has one caller', () => {
     expect(src.match(/api\.discard\(/g)).toHaveLength(1)
     expect(src.indexOf('await confirm(plan)')).toBeGreaterThan(0)
     expect(src.indexOf('await confirm(plan)')).toBeLessThan(src.indexOf('api.discard('))
+  })
+
+  it('commitProjectGit is defined in api.ts and used only by gitActions.ts', () => {
+    expect(withText('commitProjectGit')).toEqual(['api.ts', 'gitActions.ts'])
+    const src = readFileSync(join(root, 'gitActions.ts'), 'utf8')
+    expect(src.match(/api\.commit\(/g)).toHaveLength(1)
+    expect(src.indexOf('await confirm(req.plan)')).toBeLessThan(src.indexOf('api.commit('))
   })
 
   it('no other module calls api.discard(', () => {

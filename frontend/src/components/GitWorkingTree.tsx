@@ -4,6 +4,7 @@ import { getProjectGitDiff } from '../api'
 import { useFetch } from '../useFetch'
 import { DiffView } from './DiffView'
 import type { DiffStaging } from './DiffView'
+import { GitCommitBox } from './GitCommitBox'
 import { GitConfirmDialog } from './GitConfirmDialog'
 import {
   alertText,
@@ -12,7 +13,15 @@ import {
   plural,
   projectGitApi,
 } from '../gitActions'
-import type { DiscardItem, DiscardPlan, Verb, WriteCtx, WriteOutcome } from '../gitActions'
+import type {
+  CommitOutcome,
+  CommitRequest,
+  DiscardItem,
+  DiscardPlan,
+  Verb,
+  WriteCtx,
+  WriteOutcome,
+} from '../gitActions'
 import { hunkLostLines, wholeHunk } from '../gitHunks'
 import type { HunkPick } from '../gitHunks'
 import {
@@ -175,6 +184,7 @@ export function GitWorkingTree({
   toolbarStart,
   refetch,
   onSelectedPath,
+  onOpenCommit,
   backRef,
 }: {
   projectId: number
@@ -194,6 +204,8 @@ export function GitWorkingTree({
   refetch: () => Promise<void>
   /** The path whose diff is open, for the live focus. */
   onSelectedPath: (path: string | null) => void
+  /** A commit's short sha was clicked: open it in History. */
+  onOpenCommit: (sha: string) => void
   /** Esc in the diff: the tab's key handler calls this to go back to the row. */
   backRef: MutableRefObject<(() => boolean) | null>
 }) {
@@ -312,6 +324,26 @@ export function GitWorkingTree({
       if (!out.ok && out.reason === 'no-worktree') {
         setAlert({ prefix: 'Nothing was sent:', message: 'The worktree path is unknown.' })
       }
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /** The commit box's write: it shares `busy` with the list's writes (each
+   * turns the other's controls off) and re-reads the view and, through `rev`,
+   * the commit info, whatever happened. The box shows its own result. */
+  async function runCommit(req: CommitRequest): Promise<CommitOutcome> {
+    if (busy) return { ok: false, reason: 'busy' }
+    setBusy(true)
+    setAlert(null)
+    setKeepFocus(false)
+    try {
+      const out = await actions.commit(ctx, req)
+      if (out.ok || out.reason === 'error') {
+        await refetch()
+        setRev((n) => n + 1)
+      }
+      return out
     } finally {
       setBusy(false)
     }
@@ -691,7 +723,13 @@ export function GitWorkingTree({
             </div>
           )}
           <div className="git-wt-scroll" ref={scrollRef} data-git-list="tree">
-            {total === 0 && <p className="muted git-wt-hint">No changed files match.</p>}
+            {total === 0 && (
+              <p className="muted git-wt-hint">
+                {repoView.files.length === 0
+                  ? 'Working tree clean — no changed files.'
+                  : 'No changed files match.'}
+              </p>
+            )}
             {SECTION_ORDER.map((k) => (
               <Fragment key={k}>
                 {k === 'staged' &&
@@ -703,29 +741,47 @@ export function GitWorkingTree({
                     </p>
                   )}
                 {renderSection(k)}
+                {k === 'staged' && (
+                  <GitCommitBox
+                    key={`${projectId}\0${repo ?? ''}\0${worktreePath ?? ''}`}
+                    projectId={projectId}
+                    repo={repo}
+                    worktreePath={worktreePath}
+                    diffWorktree={diffWorktree}
+                    stagedCount={split.staged.length}
+                    hasConflicts={split.conflicts.length > 0}
+                    busy={busy}
+                    rev={rev}
+                    branch={branch}
+                    onCommit={runCommit}
+                    onOpenCommit={onOpenCommit}
+                  />
+                )}
               </Fragment>
             ))}
           </div>
         </div>
-        <div className="git-diff-pane" tabIndex={0} data-git-diff="tree" aria-label="Diff">
-          {primary === null ? (
-            <p className="muted">Select a file to see its diff.</p>
-          ) : primary.file.path.endsWith('/') ? (
-            <p className="muted">
-              An untracked folder: its files are listed once it is staged. Stage it to see them.
-            </p>
-          ) : (
-            <DiffPane
-              projectId={projectId}
-              path={primary.file.path}
-              worktree={diffWorktree}
-              repo={repo}
-              staged={staged}
-              rev={rev}
-              hunkOps={hunkOps}
-            />
-          )}
-        </div>
+        {repoView.files.length > 0 && (
+          <div className="git-diff-pane" tabIndex={0} data-git-diff="tree" aria-label="Diff">
+            {primary === null ? (
+              <p className="muted">Select a file to see its diff.</p>
+            ) : primary.file.path.endsWith('/') ? (
+              <p className="muted">
+                An untracked folder: its files are listed once it is staged. Stage it to see them.
+              </p>
+            ) : (
+              <DiffPane
+                projectId={projectId}
+                path={primary.file.path}
+                worktree={diffWorktree}
+                repo={repo}
+                staged={staged}
+                rev={rev}
+                hunkOps={hunkOps}
+              />
+            )}
+          </div>
+        )}
       </div>
       {pending !== null && <GitConfirmDialog plan={pending.plan} onResolve={resolvePending} />}
     </div>

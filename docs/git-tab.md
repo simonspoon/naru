@@ -13,7 +13,8 @@ directly). **Reads** (every GET) sit behind the standard middleware guard only
 three POST routes `git/stage`, `git/unstage` and `git/discard` ("Write
 operations" below), and since naru task 2739 the three `git/stage-hunks`,
 `git/unstage-hunks` and `git/discard-hunks` ("Hunk and line staging" below),
-change the repo, so they carry the agent-grade `require_agent_access` gate on
+and since naru task 2740 `git/commit` ("Commit and amend" below), change the
+repo, so they carry the agent-grade `require_agent_access` gate on
 top of the standard guard. No other route here writes.
 
 - **Several repos under one folder** (mesa task 1509).
@@ -514,6 +515,125 @@ Hunk and line staging lives in the working-tree diff pane only (`GitWorkingTree`
 - **Untrusted text**: diff text, paths and git's messages reach the page as text nodes only; classes come from the model.
 - **Test hooks**: `[data-hunk-index]`, `[data-hunk-action]`, `[data-line-pick]` (+ `aria-pressed`), `[data-lines-bar]`, `[data-lines-action]`, `[data-hunk-note]`; the confirm dialog keeps its `data-git-confirm` hooks.
 
+## Commit and amend (naru task 2740)
+
+`POST /api/projects/{id}/git/commit` makes one commit of the **index** (never
+the working tree) or amends HEAD; `GET .../git/commit-info` is what the
+commit box reads first. The control is for the person: it is **not wired into
+any agent flow** (an agent commits with `git` in its terminal).
+
+**`GET .../git/commit-info[?worktree=][&repo=]`** → `ProjectGitCommitInfo
+{ path, info }`. Standard guard only, **not cached**, the usual empty-state
+ladder (`path` null = no `local_path`; `info` null = dead folder or not a
+repo), the same `?repo=`/`?worktree=` allowlists (unlisted → 404).
+`git::commit_info_of` (every read `GIT_OPTIONAL_LOCKS=0`, stdin null, argv
+only; a read that fails is `None`/`false`, never a panic):
+
+- `branch`/`detached` from `symbolic-ref -q --short HEAD`; `unborn` from
+  `head_is_unborn` (an unreadable HEAD reads as *not* unborn, with no `head`).
+- `head` (None when unborn): hash, short hash, `message` = git's `%B` of HEAD
+  read with `log -z`, so it is the whole raw message, uncapped, with nothing
+  added; `is_merge` = more than one parent.
+- `upstream` = `rev-parse --abbrev-ref --symbolic-full-name @{upstream}`;
+  `head_published` = an upstream exists and `merge-base --is-ancestor HEAD
+  <full upstream ref>` exits 0 (false with no upstream or on an unborn HEAD).
+  It looks only at the branch's configured upstream: a branch pushed without
+  tracking, or a detached HEAD, is not detected and gets no confirm.
+- `author_name`/`author_email` = `git -C <dir> config --get user.name|email`
+  (so the worktree's or repo's own config applies); None when unset or blank.
+  Only config is read: an identity supplied by `GIT_AUTHOR_*` in the server's
+  environment is not seen, and the commit is refused for lack of one.
+- `operation` as in `GitRepoView.operation`; `prepared_message` while it is a
+  `merge`, `cherry-pick` or `revert` and `<git dir>/MERGE_MSG` exists: that
+  text without its `#` lines, trailing whitespace trimmed, capped at the 64 KiB
+  body cap; None when empty.
+
+**`POST .../git/commit`.** Body `{ worktree, repo?, message, amend?,
+expected_head?, allow_published? }`. `require_agent_access` first, never a GET
+(405), JSON Content-Type. Success `200` → `GitCommitResult { hash,
+short_hash, amended, view }` (`view` = a fresh `view_of`). Order, nothing that
+writes runs before every check passes:
+
+1. Shape, `422 validation`: `worktree` missing or empty; `message` missing;
+   `message` empty after normalisation (`commit message is empty`); amend
+   without `expected_head` or with one that is not a FULL lowercase hash
+   (exactly 40 or 64 hex digits), so a short or uppercase one is never a
+   misleading 409.
+2. Project folder, repo, worktree: `404`, exactly as `git_write`.
+3. A **fresh** `view_of` (404 when not a repo) and a fresh `commit_info_of`.
+4. `422`: a conflicted file (`<path> has conflicts; resolve it in the
+   terminal, then stage it`); no identity (`No author identity is set. Run: git
+   config user.name "Your Name" and git config user.email you@example.com`);
+   amend on an unborn HEAD (`there is no commit to amend`); amend while an
+   operation is in progress (`A <op> is in progress in this worktree; amend is
+   not available`); no amend and nothing staged (`nothing is staged`) unless the
+   operation is `merge` (concluding a merge may stage nothing).
+5. `409 conflict`: amend and `expected_head` is not HEAD's full sha (`HEAD
+   moved since the last commit was loaded. It was reloaded; nothing was
+   committed.`, caches dropped); amend and `head_published` without
+   `allow_published: true` (`The last commit is already on <upstream>. Amending
+   rewrites published history; confirm to proceed.`).
+6. `git::commit` (below). Git or a hook failing is `409 conflict` carrying the
+   text.
+7. After **every** attempt past step 5, success or failure,
+   `drop_git_caches` runs and `git_file_log_cache` is cleared; on success the
+   new HEAD is resolved (`git::head_of`) and returned.
+
+**What runs.** `git -C <dir> commit --cleanup=verbatim -F -` (+ `--amend`),
+message on **stdin**, never argv or a temp file. Env: `GIT_TERMINAL_PROMPT=0`
+only; `GIT_LITERAL_PATHSPECS` is deliberately **not** set, because hooks
+inherit the environment and their own git pathspecs must keep working. Never
+`--no-verify`, `--allow-empty`, a pathspec or `-m`; never a push, a retry, or a
+removal of `index.lock` (a held lock is git's own error, and the file stays).
+Hooks run normally and inherit the server's environment, so a hook that needs a
+tool missing from a launchd `PATH` fails with its own message. Amend is
+check-then-act: HEAD is compared to `expected_head` in the handler and again
+just before git runs (same 409), but the window is one git spawn, not atomic
+(an atomic `commit-tree` + `update-ref` would skip the hooks).
+
+**Message.** `normalize_commit_message`: `\r\n` to `\n`, leading blank lines
+dropped, trailing whitespace of the whole text trimmed, exactly one `\n` last;
+nothing left is `None`. Nothing else is touched: with `--cleanup=verbatim` a
+`#` line is ordinary text (default cleanup would delete it), and inner
+whitespace, unicode and a leading `-` survive. The commit's raw message
+(`git cat-file commit HEAD`, after the first blank line) is byte-equal to the
+normalised text, and `normalize_commit_message(head.message)` reads back the
+same value.
+
+**Output and timeout.** stdout and stderr are both captured (a hook may print
+to either) on their own threads, so a chatty hook cannot deadlock the pipes,
+and a failure returns stderr then stdout, lossy UTF-8, trimmed, capped at 64 KiB
+(`COMMIT_ERR_CAP`) keeping the **tail** (a hook's real failure line is last);
+when anything was dropped `[output truncated]\n` is prepended. `COMMIT_TIMEOUT` is 120 s:
+the child leads its own process group (`proc::isolate`); past the deadline the
+**group** gets TERM (git removes its own lock files); if git has not exited
+2 s later the group gets KILL. If git did exit in that time, nothing more is
+signalled (its pid may be reused once reaped), so a hook child that ignores
+TERM and outlives git may linger. The error is `git commit did not finish within 120 s
+and was stopped. Nothing was retried.` plus whatever was captured.
+`commit_within` takes the timeout so a test can use 1 s. A descendant that
+left the group and holds a pipe is waited on for at most 2 s.
+
+**Signing.** `commit.gpgsign` and `gpg.program` apply as configured; a signer
+that fails or hangs is git's error text, or the timeout. Naru never prompts
+(`GIT_TERMINAL_PROMPT=0`), so a signer needing a pinentry fails or times out.
+
+**Tests.** `src/core/git.rs` `commit_tests` (real temp repos, own identity,
+`commit.gpgsign false`, own `core.hooksPath`): exactly one new commit whose
+tree equals the pre-commit `write-tree` and whose message bytes equal the input
+(multi-line, unicode, a leading `-`, a leading `#`, 100 KiB), unstaged and
+untracked files untouched, root commit, amend (parent, count, message, tree,
+author preserved), failing `pre-commit`/`commit-msg` (both outputs, HEAD and
+index unchanged), a passing hook, a held `index.lock` (stays), a hung hook
+stopped at an injected 1 s timeout with no lock left, a failing gpg program,
+`normalize_commit_message`, `commit_info_of` (born/unborn/detached, identity,
+published, prepared message, linked worktree). `src/api.rs` `git_commit_*`:
+happy path with fresh follow-up reads, the 422 table, unborn amend, conflict
+and merge, stale `expected_head`, published amend with and without
+`allow_published`, a failing hook, 404s, the agent gate, a linked worktree
+moving only its own branch, the commit-info ladder. `scripts/api-check.sh`
+asserts the gate halves and that `commit-info` answers 200.
+
 ## Diff view (naru task 2734)
 
 Both diff panes — the working-tree file and the commit file — render the
@@ -653,6 +773,7 @@ Logic is in `frontend/src/gitSearch.ts` (pure, `gitSearch.test.ts`).
   | `/` | Focus the search box (History) or the file filter (Working tree) |
 | click, `⌘`/`Ctrl`-click, `Shift`-click | Working tree: select one file, toggle one, extend a range over the visible rows of one section (naru task 2738) |
   | `[` `]` | Previous / next changed file of the open list, opening it (section and folder headers are skipped); focus stays where it is |
+  | `⌘`/`Ctrl` + `Enter` | In the commit subject or body: commit, or amend while Amend is on (naru task 2740) |
   | `?` | Show / hide the key list (also the `?` button by the mode toggle) |
 
   A key the tab handles stops there (`preventDefault` + `stopPropagation`),
@@ -851,12 +972,103 @@ server's ("Write operations" above); this section is the client.
   `.git-shell`, whose phone drawer is `position: fixed`. At `<= 52rem` of
   container width (a narrow Custom-layout pane or a phone, regardless of the
   viewport) the list stacks over the diff: the list scroller keeps 10rem to
-  24rem, the diff is 30rem, and the pane scrolls. Above 52rem the pane hands its
+  the larger of 24rem and 80vh (so the commit box under a short Staged list is not cut off), the diff is 30rem, and the pane scrolls. Above 52rem the pane hands its
   box to `.git-layout` (side by side, 16rem floor, so a banner plus an alert
   cannot squeeze the list to nothing). The banner (5rem) and the alert (7rem)
   are capped and scroll inside; the alert's title wraps anywhere.
 - **One target line.** `[data-wt-target]` ("<branch> ↑n ↓n <full path>", one
   ellipsised line, full path in the tooltip) is the single statement of where
-  the controls act; the tab's own `.git-repo-header` is hidden while the list is
-  shown (it still shows for History, a clean tree and loading). Section headers
+  the controls act; the tab's own `.git-repo-header` is hidden whenever the
+  working-tree list is shown, a clean tree included (it still shows for History
+  and loading). Section headers
   truncate the title and keep count and bulk button apart.
+
+## Commit box (naru task 2740)
+
+Client half; the server routes are in the commit section above.
+`components/GitCommitBox.tsx` lays out; every rule is pure in
+`frontend/src/gitCommit.ts` (`gitCommit.test.ts`), the gate in
+`gitActions.ts` (`commit`, `CommitOutcome`). For the person only: no CLI,
+agent or workflow reaches it.
+
+- **Placement.** `GitWorkingTree` renders it directly under the Staged section
+  (after the "Nothing staged" hint when Staged is empty), inside the list
+  column. It is remounted per project + repo + worktree (`key`), so a draft
+  never crosses worktrees.
+- **Fields.** Target line `[data-commit-target]` (branch, or "detached at
+  <sha>", and the worktree's full path, ellipsised, full in the tooltip), the
+  author identity `Name <email>` as text (`[data-commit-identity]`), a subject
+  `<input>` (`aria-label="Commit subject"`), a plain body `<textarea>`
+  (monospace, vertical resize), "N files staged". The message is the subject,
+  plus a blank line and the body when the body has text; the server normalises
+  whitespace and `#` lines are ordinary text. Fields are read-only while a
+  commit is in flight.
+- **Subject guide.** `52/50` in code points: `ok` <= 50, `long` 51-72 (amber),
+  `over` > 72 (red). A guide, never a block.
+- **Button** `[data-commit-button]`: its text and `aria-label` name the target,
+  `Commit 3 files to main in …/folder` / `Amend last commit abc1234 on main in
+  …/folder`; in flight it reads "Committing…" / "Amending…" with `aria-busy`.
+  Off with the first reason shown beside it (`[data-commit-reason]`, also the
+  tooltip): "The worktree path is unknown." / "Another change is in
+  progress." / "Loading commit details…" / "Resolve the conflicts first." /
+  "No git author identity is set. Run git config user.name "Your Name" and git
+  config user.email you@example.com (add --global to set it for every repo)." /
+  "Enter a commit message." / "Nothing is staged." (not required when
+  amending, nor during a merge). Warnings `[data-commit-warning]`: detached
+  HEAD ("HEAD is detached: this commit will be on no branch."), a merge /
+  cherry-pick / revert in progress ("this commit concludes it"), a published
+  amend. The operation banner of the working tree is not repeated.
+- **Cmd/Ctrl+Enter** in the subject or body commits. A synchronous latch
+  (`createSubmitGuard`, held in a ref) lets only one of two clicks or keydowns
+  in the same tick through; the button is disabled during the request.
+- **Draft.** `localStorage` `naru-git-commit-draft:<project>:<repo>:<worktree
+  path>` = `{ subject, body, amend?: { head, subject, body, on } }`; saved on
+  every change, restored on mount / worktree switch / reload / tab switch,
+  garbage reads as empty, an empty draft removes the key, a success clears it
+  (an amend keeps the ordinary draft that was set aside).
+- **Amend** `[data-commit-amend]`: a checkbox, not rendered on an unborn HEAD,
+  disabled with its reason (`[data-commit-amend-reason]`) during an operation.
+  On: the fields load HEAD's message (or the stored amend draft, only when its
+  `head` is still HEAD); off: the ordinary draft returns untouched. Sends
+  `amend: true, expected_head: head.hash`. When HEAD is already on its upstream
+  the click asks first through `GitConfirmDialog` ("Amend a published
+  commit?": worktree, branch, `<sha> <subject>`, that it is already on
+  `<upstream>`, that the branch and upstream diverge); only "Amend commit"
+  sends, with `allow_published: true`. A plain commit and an unpublished amend
+  never ask.
+- **HEAD moved under an amend.** An amend draft is for one HEAD. If HEAD
+  changes (a commit from elsewhere, or the server's 409 "HEAD moved") while the
+  amend text is live or edited, the fields show the ordinary draft and
+  `[data-commit-stale-amend]` says "The last commit changed since you started
+  amending (your text was for <old sha>)." with "Use my text for the new
+  commit" (`[data-commit-stale-use]`, re-aims the text at the current HEAD) and
+  "Discard it" (`[data-commit-stale-drop]`). Until one is chosen the Amend
+  checkbox is disabled ("Decide what to do with your earlier amend text
+  first."), so `startAmend` never overwrites typed text.
+- **Merge default.** While a merge, cherry-pick or revert is in progress the
+  fields start from git's `prepared_message`, once per mount, only into an
+  empty ordinary draft.
+- **Success** `[data-commit-success]` (`role="status"`): "Committed abc1234" /
+  "Amended abc1234"; the sha is a button (`[data-commit-open]`) that opens the
+  commit in History (`onOpenCommit`, same mechanism as a stash).
+- **Failure** `[data-commit-error]` (`role="alert"`): "Could not commit to
+  <branch> in <full path>:" (or "Could not amend the last commit on …"), then
+  git's message in a plain-text `<pre>` (pre-wrap, scrolls inside 40vh, so a
+  long hook log is read in full), dismissible. The draft and the Amend switch
+  stay as they were; nothing is retried.
+- **Busy sharing.** The box's request runs through `GitWorkingTree`'s `busy`:
+  while a stage / unstage / discard is in flight the commit button is off, and
+  while a commit is in flight the list's write controls are off. After any
+  attempt the view is re-read and `rev` is bumped, which re-reads the commit
+  info (`GET …/git/commit-info`, never cached; also re-read on window focus).
+- **Clean tree.** `GitRepoPane` now mounts `GitWorkingTree` whenever the view
+  is fresh; on a clean tree it shows "Working tree clean — no changed files."
+  with the commit box (so the success line survives committing everything and
+  the last message can be amended) and no diff pane.
+- **Phone.** Inside the `.git-wt-root` container the box is one column; at
+  <= 600px the subject and body are 16px (no iOS zoom), the button fills the
+  row, and the button, sha and amend row are >= 44px. Theme tokens only.
+- **Hooks:** `[data-commit]`, `-target`, `-path`, `-identity`, `-subject`,
+  `-body`, `-count` (value = ok|long|over), `-staged`, `-amend`,
+  `-amend-reason`, `-warning`, `-button`, `-reason`, `-success`, `-open`,
+  `-error`.

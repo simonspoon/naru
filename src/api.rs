@@ -40,23 +40,23 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::core::{
     AgentSession, ArchiveOutcome, Artifact, ArtifactPatch, ArtifactSummary, AudioTestResult,
     CcDashboard, CcLiveSession, CcScorecard, CcUsage, ConfigServe, Error, FileTreeEntry, GitBranch,
-    GitCommit, GitCommitDetail, GitCommitFile, GitFile, GitFileDiff, GitRepo, GitRepoView,
-    GitStash, GitStatus, GitWorktree, GitWorktreeDetail, InboxItem, InboxKind, LIVE_AUDIO_MAX,
-    LIVE_BOARD_INK_STATE_MAX, LIVE_BOARD_KEEP, LIVE_INK_MAX, LibraryBuiltinAction, LibraryBundle,
-    LibraryImportResult, LibraryKind, LibraryPatch, LibraryScope, LiveBoardHistoryEntry,
-    LiveBoardHistoryPage, LiveBoardInkEntry, LiveBoardKind, LiveBoardSummary, LiveContext,
-    LiveNotebookEntry, LiveNotice, LiveOffer, LiveState, LiveStatus, LiveTranscript, LiveWindow,
-    ModelRates, NaruVersion, NextResult, Priority, ProjectAgents, ProjectFileNames,
-    ProjectFileTree, ProjectGitBranches, ProjectGitLog, ProjectGitRepos, ProjectGitStashes,
-    ProjectGitStatus, ProjectGitView, ProjectGitWorktreeDetails, ProjectPatch, ProjectVersion,
-    ReceiptPatch, STALE_CLAIM_MINUTES, Script, ScriptArg, ScriptPatch, ScriptRunEvent,
-    ServeBoolSetting, ServeHostsSetting, ServeNumberSetting, Status, Store, SystemInfo, Task,
-    TaskNote, TaskPatch, TaskSummary, WorkflowEdgeKind, WorkflowGateStatus, WorkflowNodeKind,
-    WorkflowNodeNew, WorkflowNodePatch, WorkflowPatch, WorkflowTrigger, WorkflowType, agents,
-    attachments, audio, board, claude_trust, config, files, git, guard, hooks, inbox_triage, kb,
-    library, listen, live, memory_job, model_router, notify, orbit, project_memory, receipt,
-    runner, script_runs, scripts, speech, supervisor, system, validate_live_client, version,
-    workflow,
+    GitCommit, GitCommitDetail, GitCommitFile, GitCommitResult, GitFile, GitFileDiff, GitRepo,
+    GitRepoView, GitStash, GitStatus, GitWorktree, GitWorktreeDetail, InboxItem, InboxKind,
+    LIVE_AUDIO_MAX, LIVE_BOARD_INK_STATE_MAX, LIVE_BOARD_KEEP, LIVE_INK_MAX, LibraryBuiltinAction,
+    LibraryBundle, LibraryImportResult, LibraryKind, LibraryPatch, LibraryScope,
+    LiveBoardHistoryEntry, LiveBoardHistoryPage, LiveBoardInkEntry, LiveBoardKind,
+    LiveBoardSummary, LiveContext, LiveNotebookEntry, LiveNotice, LiveOffer, LiveState, LiveStatus,
+    LiveTranscript, LiveWindow, ModelRates, NaruVersion, NextResult, Priority, ProjectAgents,
+    ProjectFileNames, ProjectFileTree, ProjectGitBranches, ProjectGitCommitInfo, ProjectGitLog,
+    ProjectGitRepos, ProjectGitStashes, ProjectGitStatus, ProjectGitView,
+    ProjectGitWorktreeDetails, ProjectPatch, ProjectVersion, ReceiptPatch, STALE_CLAIM_MINUTES,
+    Script, ScriptArg, ScriptPatch, ScriptRunEvent, ServeBoolSetting, ServeHostsSetting,
+    ServeNumberSetting, Status, Store, SystemInfo, Task, TaskNote, TaskPatch, TaskSummary,
+    WorkflowEdgeKind, WorkflowGateStatus, WorkflowNodeKind, WorkflowNodeNew, WorkflowNodePatch,
+    WorkflowPatch, WorkflowTrigger, WorkflowType, agents, attachments, audio, board, claude_trust,
+    config, files, git, guard, hooks, inbox_triage, kb, library, listen, live, memory_job,
+    model_router, notify, orbit, project_memory, receipt, runner, script_runs, scripts, speech,
+    supervisor, system, validate_live_client, version, workflow,
 };
 
 /// The Vite build output, embedded into the binary at compile time.
@@ -4423,6 +4423,16 @@ fn router(state: AppState) -> Router {
         .route(
             "/api/projects/{id}/git/discard-hunks",
             post(post_project_git_discard_hunks),
+        )
+        // Commit and amend (naru task 2740): the write is agent-gated like the
+        // routes above; the info read is a plain git read.
+        .route(
+            "/api/projects/{id}/git/commit",
+            post(post_project_git_commit),
+        )
+        .route(
+            "/api/projects/{id}/git/commit-info",
+            get(get_project_git_commit_info),
         )
         // Commit history: recent log, one commit's changed files, and one
         // commit-file's diff. Same read-only/standard-guard-only posture as
@@ -10877,6 +10887,180 @@ async fn post_project_git_discard(
     require_agent_access(&state, &addr, &headers)?;
     let Json(body) = body?;
     git_write(&state, id, git::WriteOp::Discard, body).await
+}
+
+/// The 409 for an amend whose `expected_head` is no longer HEAD.
+const HEAD_MOVED: &str =
+    "HEAD moved since the last commit was loaded. It was reloaded; nothing was committed.";
+
+/// Body of `POST .../git/commit` (naru task 2740).
+#[derive(Deserialize)]
+struct GitCommitBody {
+    /// REQUIRED, as for `GitWriteBody`.
+    worktree: Option<String>,
+    repo: Option<String>,
+    /// REQUIRED: the raw text; `git::normalize_commit_message` shapes it.
+    message: Option<String>,
+    amend: Option<bool>,
+    /// REQUIRED when amending: the full HEAD sha the client loaded.
+    expected_head: Option<String>,
+    /// Confirms amending a commit already on the upstream.
+    allow_published: Option<bool>,
+}
+
+/// `GET .../git/commit-info[?repo=][&worktree=]` — what the commit box needs
+/// about one worktree (`git::commit_info_of`). Read-only, standard guard
+/// only, never cached.
+async fn get_project_git_commit_info(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Query(q): Query<GitViewQuery>,
+) -> ApiResult<Response> {
+    let (path, base) = git_ladder_base(&state, id, q.repo.as_deref()).await?;
+    let info = match &base {
+        Some(base) => {
+            let (dir, _) = resolve_git_dir(&state, base, q.worktree.as_deref()).await?;
+            tokio::task::spawn_blocking(move || git::commit_info_of(&dir))
+                .await
+                .unwrap_or(None)
+        }
+        None => None,
+    };
+    Ok(Json(ProjectGitCommitInfo { path, info }).into_response())
+}
+
+/// `POST /api/projects/{id}/git/commit` — `{worktree, repo?, message, amend?,
+/// expected_head?, allow_published?}`. Agent-grade gate, like `stage`. Order:
+/// body shape (422), project/repo/worktree (404), a FRESH view and commit
+/// info, the per-state rules (422), a moved HEAD or a published amend (409),
+/// then the one `git commit` (409 with git's and the hooks' output). Caches
+/// drop after any attempt past the 409s; success returns the new HEAD and the
+/// fresh view. Nothing here is wired into an agent flow.
+async fn post_project_git_commit(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    body: Result<Json<GitCommitBody>, JsonRejection>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let Json(body) = body?;
+    let worktree = body
+        .worktree
+        .as_deref()
+        .filter(|w| !w.is_empty())
+        .ok_or_else(|| git_write_validation("worktree is required"))?;
+    let raw = body
+        .message
+        .as_deref()
+        .ok_or_else(|| git_write_validation("message is required"))?;
+    let message = git::normalize_commit_message(raw)
+        .ok_or_else(|| git_write_validation("commit message is empty"))?;
+    let amend = body.amend.unwrap_or(false);
+    let expected = match (amend, body.expected_head.as_deref()) {
+        (true, None) => return Err(git_write_validation("expected_head is required to amend")),
+        (true, Some(h))
+            if !matches!(h.len(), 40 | 64)
+                || !h.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) =>
+        {
+            return Err(git_write_validation(
+                "expected_head must be a full lowercase commit hash",
+            ));
+        }
+        (_, h) => h,
+    };
+    let not_found = |message: String| ApiError {
+        status: StatusCode::NOT_FOUND,
+        code: "not_found",
+        message,
+    };
+    let conflict = |message: String| ApiError {
+        status: StatusCode::CONFLICT,
+        code: "conflict",
+        message,
+    };
+    let local_path = state.store.lock().unwrap().get_project(id)?.local_path;
+    let Some(local_path) = local_path.filter(|p| std::path::Path::new(p).is_dir()) else {
+        return Err(not_found("project has no git folder".into()));
+    };
+    let base = resolve_repo_dir(&state, &local_path, body.repo.as_deref()).await?;
+    let (dir, _worktrees) = resolve_git_dir(&state, &base, Some(worktree)).await?;
+    let (view, info) = {
+        let d = dir.clone();
+        tokio::task::spawn_blocking(move || (git::view_of(&d), git::commit_info_of(&d)))
+            .await
+            .unwrap_or((None, None))
+    };
+    let (Some(view), Some(info)) = (view, info) else {
+        return Err(not_found(format!("not a git repo: {dir}")));
+    };
+    if let Some(f) = view.files.iter().find(|f| git::is_conflicted(f)) {
+        return Err(git_write_validation(format!(
+            "{} has conflicts; resolve it in the terminal, then stage it",
+            f.path
+        )));
+    }
+    if info.author_name.is_none() || info.author_email.is_none() {
+        return Err(git_write_validation(
+            "No author identity is set. Run: git config user.name \"Your Name\" and git config user.email you@example.com",
+        ));
+    }
+    if amend {
+        if info.head.is_none() {
+            return Err(git_write_validation("there is no commit to amend"));
+        }
+        if let Some(op) = info.operation.as_deref() {
+            return Err(git_write_validation(format!(
+                "A {op} is in progress in this worktree; amend is not available"
+            )));
+        }
+    } else if !git::any_staged(&view.files) && info.operation.as_deref() != Some("merge") {
+        return Err(git_write_validation("nothing is staged"));
+    }
+    if amend {
+        let head = info.head.as_ref().map(|h| h.hash.as_str());
+        if head != expected {
+            drop_git_caches(&state);
+            state.git_file_log_cache.lock().unwrap().clear();
+            return Err(conflict(HEAD_MOVED.into()));
+        }
+        if info.head_published && body.allow_published != Some(true) {
+            let upstream = info.upstream.as_deref().unwrap_or("its upstream");
+            return Err(conflict(format!(
+                "The last commit is already on {upstream}. Amending rewrites published history; confirm to proceed."
+            )));
+        }
+    }
+    let written = {
+        let d = dir.clone();
+        let expected = expected.map(str::to_string);
+        tokio::task::spawn_blocking(move || {
+            // Amend is check-then-act: re-read HEAD right before git runs.
+            if amend && git::head_of(&d).map(|h| h.0) != expected {
+                return Err(HEAD_MOVED.to_string());
+            }
+            git::commit(&d, &message, amend)
+        })
+        .await
+        .unwrap_or_else(|_| Err("git commit task panicked".into()))
+    };
+    drop_git_caches(&state);
+    state.git_file_log_cache.lock().unwrap().clear();
+    written.map_err(conflict)?;
+    let d = dir.clone();
+    let (head, view) = tokio::task::spawn_blocking(move || (git::head_of(&d), git::view_of(&d)))
+        .await
+        .unwrap_or((None, None));
+    match (head, view) {
+        (Some((hash, short_hash)), Some(view)) => Ok(Json(GitCommitResult {
+            hash,
+            short_hash,
+            amended: amend,
+            view,
+        })
+        .into_response()),
+        _ => Err(not_found(format!("not a git repo: {dir}"))),
+    }
 }
 
 /// Body of the three hunk routes (naru task 2739).
@@ -28523,6 +28707,562 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             }
         }
         assert_eq!(git_lines(&root), ["?? new.txt"], "a refused request wrote");
+    }
+
+    // --- Git commit and amend (naru task 2740) ---------------------------
+
+    /// `git_write_fixture` with what a real commit needs in the repo's OWN
+    /// config (the fixture's `git_in` passes identity per call only), and the
+    /// repo's own hooks dir so no global hook can reach the test.
+    fn git_commit_fixture(
+        state: &AppState,
+    ) -> (tempfile::TempDir, std::path::PathBuf, i64, String) {
+        let f = git_write_fixture(state);
+        git_in(&f.1, &["config", "user.name", "Tester"]);
+        git_in(&f.1, &["config", "user.email", "t@example.com"]);
+        let hooks = f.1.join(".git/hooks");
+        git_in(&f.1, &["config", "core.hooksPath", hooks.to_str().unwrap()]);
+        f
+    }
+
+    fn gco(dir: &std::path::Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}");
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    }
+
+    async fn commit_post_as(
+        state: &AppState,
+        id: i64,
+        body: serde_json::Value,
+        addr: SocketAddr,
+        headers: HeaderMap,
+    ) -> ApiResult<Response> {
+        let b = Ok(Json(serde_json::from_value::<GitCommitBody>(body).unwrap()));
+        post_project_git_commit(
+            State(state.clone()),
+            ConnectInfo(addr),
+            headers,
+            Path(id),
+            b,
+        )
+        .await
+    }
+
+    async fn commit_post(
+        state: &AppState,
+        id: i64,
+        body: serde_json::Value,
+    ) -> ApiResult<Response> {
+        commit_post_as(state, id, body, loopback(), hdrs(Some("localhost:0"), None)).await
+    }
+
+    async fn commit_info_get(state: &AppState, id: i64, uri: &str) -> ApiResult<serde_json::Value> {
+        let q = Query::<GitViewQuery>::try_from_uri(&uri.parse().unwrap()).unwrap();
+        let resp = get_project_git_commit_info(State(state.clone()), Path(id), q).await?;
+        Ok(json_body(resp).await)
+    }
+
+    #[tokio::test]
+    async fn git_commit_commits_the_index_and_the_next_reads_are_fresh() {
+        let (_db, state) = test_state();
+        let (_tmp, root, id, wt) = git_commit_fixture(&state);
+        std::fs::write(root.join("new.txt"), "n\n").unwrap();
+        std::fs::write(root.join("loose.txt"), "l\n").unwrap();
+        git_in(&root, &["add", "new.txt"]);
+        // Prime the 5 s view and log caches.
+        assert_eq!(
+            git_get_files(&state, id).await,
+            ["A. new.txt", "?? loose.txt"]
+        );
+        let log = |state: AppState| async move {
+            let q = Query::<GitLogQuery>::try_from_uri(&"/x".parse().unwrap()).unwrap();
+            json_body(
+                get_project_git_log(State(state), Path(id), q)
+                    .await
+                    .unwrap(),
+            )
+            .await
+        };
+        assert_eq!(log(state.clone()).await["commits"][0]["subject"], "base");
+        let resp = commit_post(
+            &state,
+            id,
+            json!({"worktree": wt, "message": "\n  add new\r\n\nwith body  \n\n"}),
+        )
+        .await
+        .unwrap();
+        let r = json_body(resp).await;
+        let head = gco(&root, &["rev-parse", "HEAD"]);
+        assert_eq!(r["hash"], head);
+        assert_eq!(r["amended"], false);
+        assert_eq!(
+            r["short_hash"],
+            gco(&root, &["rev-parse", "--short", "HEAD"])
+        );
+        assert_eq!(r["view"]["files"].as_array().unwrap().len(), 1);
+        assert!(gco(&root, &["cat-file", "commit", "HEAD"]).ends_with("  add new\n\nwith body"));
+        assert_eq!(git_get_files(&state, id).await, ["?? loose.txt"]);
+        let l = log(state.clone()).await;
+        assert_eq!(l["commits"][0]["subject"], "  add new");
+        assert_eq!(l["commits"][0]["hash"], head);
+    }
+
+    #[tokio::test]
+    async fn git_commit_validates_before_it_spawns_anything() {
+        let (_db, state) = test_state();
+        let (_tmp, root, id, wt) = git_commit_fixture(&state);
+        std::fs::write(root.join("new.txt"), "n\n").unwrap();
+        git_in(&root, &["add", "new.txt"]);
+        let old = gco(&root, &["rev-parse", "HEAD"]);
+        let cases = [
+            (json!({"message": "m"}), "worktree is required"),
+            (
+                json!({"worktree": "", "message": "m"}),
+                "worktree is required",
+            ),
+            (json!({"worktree": wt}), "message is required"),
+            (
+                json!({"worktree": wt, "message": " \r\n\t\n"}),
+                "commit message is empty",
+            ),
+            (
+                json!({"worktree": wt, "message": "m", "amend": true}),
+                "expected_head is required",
+            ),
+            (
+                json!({"worktree": wt, "message": "m", "amend": true, "expected_head": "HEAD"}),
+                "expected_head must be",
+            ),
+            (
+                json!({"worktree": wt, "message": "m", "amend": true, "expected_head": "-x"}),
+                "expected_head must be",
+            ),
+            (
+                json!({"worktree": wt, "message": "m", "amend": true, "expected_head": "abc1234"}),
+                "expected_head must be",
+            ),
+            (
+                json!({"worktree": wt, "message": "m", "amend": true, "expected_head": "A".repeat(40)}),
+                "expected_head must be",
+            ),
+        ];
+        for (body, want) in cases {
+            let e = commit_post(&state, id, body.clone()).await.err().unwrap();
+            assert_eq!(e.status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+            assert!(e.message.contains(want), "{body}: {}", e.message);
+            assert_eq!(gco(&root, &["rev-parse", "HEAD"]), old, "{body}");
+        }
+        // Nothing staged.
+        git_in(&root, &["reset", "-q"]);
+        let e = commit_post(&state, id, json!({"worktree": wt, "message": "m"}))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(e.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(e.message, "nothing is staged");
+        // No author identity.
+        git_in(&root, &["add", "new.txt"]);
+        git_in(&root, &["config", "user.name", ""]);
+        let e = commit_post(&state, id, json!({"worktree": wt, "message": "m"}))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(e.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            e.message
+                .starts_with("No author identity is set. Run: git config user.name")
+        );
+        assert_eq!(gco(&root, &["rev-parse", "HEAD"]), old);
+        assert_eq!(gco(&root, &["rev-list", "--count", "HEAD"]), "2");
+    }
+
+    #[tokio::test]
+    async fn git_commit_refuses_amend_on_an_unborn_head_and_changes_nothing() {
+        let (_db, state) = test_state();
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+        git_in(&root, &["init", "-q"]);
+        git_in(&root, &["config", "user.name", "Tester"]);
+        git_in(&root, &["config", "user.email", "t@example.com"]);
+        git_in(&root, &["config", "commit.gpgsign", "false"]);
+        let hooks = root.join(".git/hooks");
+        git_in(
+            &root,
+            &["config", "core.hooksPath", hooks.to_str().unwrap()],
+        );
+        let id = new_project(&state, Some(root.to_str().unwrap()));
+        let wt = git::worktrees_of(root.to_str().unwrap()).unwrap()[0]
+            .path
+            .clone();
+        std::fs::write(root.join("a.txt"), "a\n").unwrap();
+        git_in(&root, &["add", "a.txt"]);
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        let e = commit_post(
+            &state,
+            id,
+            json!({"worktree": wt, "message": "m", "amend": true, "expected_head": sha}),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert_eq!(e.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(e.message, "there is no commit to amend");
+        assert!(
+            std::process::Command::new("git")
+                .args([
+                    "-C",
+                    root.to_str().unwrap(),
+                    "rev-parse",
+                    "-q",
+                    "--verify",
+                    "HEAD"
+                ])
+                .output()
+                .unwrap()
+                .stdout
+                .is_empty()
+        );
+        // The first commit of an unborn branch works.
+        let r = json_body(
+            commit_post(&state, id, json!({"worktree": wt, "message": "root"}))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(r["hash"], gco(&root, &["rev-parse", "HEAD"]));
+    }
+
+    #[tokio::test]
+    async fn git_commit_refuses_a_conflict_and_amend_during_a_merge() {
+        let (_db, state) = test_state();
+        let (_tmp, root, id, wt) = git_commit_fixture(&state);
+        git_in(&root, &["branch", "-M", "main"]);
+        git_in(&root, &["checkout", "-q", "-b", "other"]);
+        std::fs::write(root.join("base.txt"), "other\n").unwrap();
+        std::fs::write(root.join("o.txt"), "o\n").unwrap();
+        git_in(&root, &["add", "."]);
+        git_in(&root, &["commit", "-q", "-m", "other side"]);
+        git_in(&root, &["checkout", "-q", "main"]);
+        std::fs::write(root.join("base.txt"), "main\n").unwrap();
+        git_in(&root, &["commit", "-q", "-a", "-m", "main side"]);
+        let old = gco(&root, &["rev-parse", "HEAD"]);
+        // Conflicted.
+        let _ = std::process::Command::new("git")
+            .args(["-C", root.to_str().unwrap(), "merge", "other"])
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .unwrap();
+        let e = commit_post(&state, id, json!({"worktree": wt, "message": "m"}))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(e.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            e.message
+                .contains("base.txt has conflicts; resolve it in the terminal, then stage it"),
+            "{}",
+            e.message
+        );
+        // Resolved and staged: a merge in progress, amend refused, commit ok.
+        std::fs::write(root.join("base.txt"), "resolved\n").unwrap();
+        git_in(&root, &["add", "base.txt"]);
+        let e = commit_post(
+            &state,
+            id,
+            json!({"worktree": wt, "message": "m", "amend": true, "expected_head": old}),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert_eq!(e.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            e.message,
+            "A merge is in progress in this worktree; amend is not available"
+        );
+        assert_eq!(gco(&root, &["rev-parse", "HEAD"]), old);
+        commit_post(
+            &state,
+            id,
+            json!({"worktree": wt, "message": "Merge other"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(gco(&root, &["rev-parse", "HEAD^"]), old);
+        assert_eq!(
+            gco(&root, &["rev-list", "--parents", "-n", "1", "HEAD"])
+                .split(' ')
+                .count(),
+            3
+        );
+    }
+
+    #[tokio::test]
+    async fn git_commit_amends_only_the_head_it_was_shown() {
+        let (_db, state) = test_state();
+        let (_tmp, root, id, wt) = git_commit_fixture(&state);
+        let old = gco(&root, &["rev-parse", "HEAD"]);
+        let stale = "1111111111111111111111111111111111111111";
+        let e = commit_post(
+            &state,
+            id,
+            json!({"worktree": wt, "message": "new words", "amend": true, "expected_head": stale}),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert_eq!(e.status, StatusCode::CONFLICT);
+        assert_eq!(e.code, "conflict");
+        assert_eq!(
+            e.message,
+            "HEAD moved since the last commit was loaded. It was reloaded; nothing was committed."
+        );
+        assert_eq!(gco(&root, &["rev-parse", "HEAD"]), old);
+        let r = json_body(
+            commit_post(
+                &state,
+                id,
+                json!({"worktree": wt, "message": "new words", "amend": true, "expected_head": old}),
+            )
+            .await
+            .unwrap(),
+        )
+        .await;
+        assert_eq!(r["amended"], true);
+        assert_ne!(r["hash"], old.as_str());
+        assert_eq!(gco(&root, &["rev-list", "--count", "HEAD"]), "2");
+        assert_eq!(gco(&root, &["log", "-1", "--format=%s"]), "new words");
+    }
+
+    #[tokio::test]
+    async fn git_commit_asks_before_amending_published_history() {
+        let (_db, state) = test_state();
+        let (tmp, root, id, wt) = git_commit_fixture(&state);
+        let remote = tmp.path().join("remote.git");
+        std::fs::create_dir_all(&remote).unwrap();
+        git_in(&remote, &["init", "-q", "--bare"]);
+        git_in(
+            &root,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        let branch = gco(&root, &["rev-parse", "--abbrev-ref", "HEAD"]);
+        git_in(&root, &["push", "-q", "-u", "origin", &branch]);
+        let old = gco(&root, &["rev-parse", "HEAD"]);
+        let body = |allow: Option<bool>| {
+            json!({"worktree": wt, "message": "rewritten", "amend": true,
+                   "expected_head": old, "allow_published": allow})
+        };
+        for allow in [None, Some(false)] {
+            let e = commit_post(&state, id, body(allow)).await.err().unwrap();
+            assert_eq!(e.status, StatusCode::CONFLICT);
+            assert_eq!(
+                e.message,
+                format!(
+                    "The last commit is already on origin/{branch}. Amending rewrites published history; confirm to proceed."
+                )
+            );
+            assert_eq!(gco(&root, &["rev-parse", "HEAD"]), old);
+        }
+        let r = json_body(commit_post(&state, id, body(Some(true))).await.unwrap()).await;
+        assert_eq!(r["amended"], true);
+        assert_ne!(gco(&root, &["rev-parse", "HEAD"]), old);
+    }
+
+    #[tokio::test]
+    async fn git_commit_reports_a_failing_hook_as_a_conflict_and_changes_nothing() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_db, state) = test_state();
+        let (_tmp, root, id, wt) = git_commit_fixture(&state);
+        let hook = root.join(".git/hooks/pre-commit");
+        std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        std::fs::write(
+            &hook,
+            "#!/bin/sh\necho lint failed on stdout\necho and stderr >&2\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(root.join("new.txt"), "n\n").unwrap();
+        git_in(&root, &["add", "new.txt"]);
+        let old = gco(&root, &["rev-parse", "HEAD"]);
+        let e = commit_post(&state, id, json!({"worktree": wt, "message": "m"}))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(e.status, StatusCode::CONFLICT);
+        assert!(
+            e.message.contains("lint failed on stdout") && e.message.contains("and stderr"),
+            "{}",
+            e.message
+        );
+        assert_eq!(gco(&root, &["rev-parse", "HEAD"]), old);
+        // The index stays staged; caches were dropped, so the view is fresh.
+        assert_eq!(git_get_files(&state, id).await, ["A. new.txt"]);
+    }
+
+    #[tokio::test]
+    async fn git_commit_404s_an_unlisted_worktree_or_repo() {
+        let (_db, state) = test_state();
+        let (tmp, root, id, wt) = git_commit_fixture(&state);
+        std::fs::write(root.join("new.txt"), "n\n").unwrap();
+        git_in(&root, &["add", "new.txt"]);
+        let elsewhere = tmp.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        for body in [
+            json!({"worktree": elsewhere.to_str().unwrap(), "message": "m"}),
+            json!({"worktree": wt, "repo": "nope", "message": "m"}),
+            json!({"worktree": wt, "repo": "..", "message": "m"}),
+        ] {
+            let e = commit_post(&state, id, body.clone()).await.err().unwrap();
+            assert_eq!(e.status, StatusCode::NOT_FOUND, "{body}");
+        }
+        assert_eq!(gco(&root, &["rev-list", "--count", "HEAD"]), "2");
+    }
+
+    #[tokio::test]
+    async fn git_commit_route_needs_the_agent_gate() {
+        let (_db, state) = test_state();
+        let (_tmp, root, id, wt) = git_commit_fixture(&state);
+        std::fs::write(root.join("new.txt"), "n\n").unwrap();
+        git_in(&root, &["add", "new.txt"]);
+        let old = gco(&root, &["rev-parse", "HEAD"]);
+        let lan: SocketAddr = "192.168.1.9:4000".parse().unwrap();
+        let cases = [
+            ("non-loopback peer", lan, hdrs(Some("localhost:0"), None)),
+            (
+                "foreign Origin",
+                loopback(),
+                hdrs(Some("localhost:0"), Some("http://evil.example")),
+            ),
+            ("foreign Host", loopback(), hdrs(Some("evil.example"), None)),
+            ("no Host", loopback(), hdrs(None, None)),
+        ];
+        for (what, addr, h) in cases {
+            let e = commit_post_as(&state, id, json!({"worktree": wt, "message": "m"}), addr, h)
+                .await
+                .err()
+                .unwrap_or_else(|| panic!("{what} was let through"));
+            assert_eq!(e.status, StatusCode::FORBIDDEN, "{what}");
+        }
+        assert_eq!(
+            gco(&root, &["rev-parse", "HEAD"]),
+            old,
+            "a refused request committed"
+        );
+    }
+
+    #[tokio::test]
+    async fn git_commit_in_a_linked_worktree_moves_only_that_branch() {
+        let (_db, state) = test_state();
+        let (tmp, root, id, main_wt) = git_commit_fixture(&state);
+        let linked = tmp.path().join("linked");
+        git_in(
+            &root,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feat",
+                linked.to_str().unwrap(),
+            ],
+        );
+        let linked_wt = git::worktrees_of(root.to_str().unwrap())
+            .unwrap()
+            .into_iter()
+            .map(|w| w.path)
+            .find(|p| *p != main_wt)
+            .unwrap();
+        let main_head = gco(&root, &["rev-parse", "HEAD"]);
+        let main_branch = gco(&root, &["rev-parse", "--abbrev-ref", "HEAD"]);
+        std::fs::write(linked.join("l.txt"), "l\n").unwrap();
+        git_in(&linked, &["add", "l.txt"]);
+        let r = json_body(
+            commit_post(
+                &state,
+                id,
+                json!({"worktree": linked_wt, "message": "on feat"}),
+            )
+            .await
+            .unwrap(),
+        )
+        .await;
+        assert_eq!(r["hash"], gco(&linked, &["rev-parse", "HEAD"]));
+        assert_eq!(gco(&root, &["rev-parse", "HEAD"]), main_head);
+        assert_eq!(
+            gco(&root, &["rev-parse", "--abbrev-ref", "HEAD"]),
+            main_branch
+        );
+        assert_eq!(gco(&root, &["rev-parse", "feat^"]), main_head);
+        // commit-info follows the selector.
+        let enc = |p: &str| p.replace('/', "%2F");
+        let i = commit_info_get(&state, id, &format!("/x?worktree={}", enc(&linked_wt)))
+            .await
+            .unwrap();
+        assert_eq!(i["info"]["branch"], "feat");
+        assert_eq!(i["info"]["head"]["hash"], r["hash"]);
+        let i = commit_info_get(&state, id, "/x").await.unwrap();
+        assert_eq!(i["info"]["branch"], main_branch.as_str());
+        assert_eq!(i["info"]["head"]["hash"], main_head.as_str());
+    }
+
+    #[tokio::test]
+    async fn git_commit_info_ladder_and_selectors() {
+        let (_db, state) = test_state();
+        // No local_path.
+        let id = new_project(&state, None);
+        let i = commit_info_get(&state, id, "/x").await.unwrap();
+        assert!(i["path"].is_null() && i["info"].is_null());
+        // A dead folder and a folder that is not a repo: path only.
+        let tmp = tempfile::tempdir().unwrap();
+        let dead = tmp.path().join("gone");
+        let id = new_project(&state, Some(dead.to_str().unwrap()));
+        let i = commit_info_get(&state, id, "/x").await.unwrap();
+        assert_eq!(i["path"], dead.to_str().unwrap());
+        assert!(i["info"].is_null());
+        let plain = tmp.path().join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        let id = new_project(&state, Some(plain.to_str().unwrap()));
+        let i = commit_info_get(&state, id, "/x").await.unwrap();
+        assert!(i["info"].is_null());
+        // A repo: every field, never cached.
+        let (_t, root, id, wt) = git_commit_fixture(&state);
+        let i = commit_info_get(&state, id, "/x").await.unwrap();
+        let info = &i["info"];
+        assert_eq!(info["unborn"], false);
+        assert_eq!(info["detached"], false);
+        assert_eq!(info["head"]["message"], "base\n");
+        assert_eq!(info["head"]["is_merge"], false);
+        assert_eq!(info["author_name"], "Tester");
+        assert_eq!(info["author_email"], "t@example.com");
+        assert!(info["upstream"].is_null() && info["operation"].is_null());
+        assert_eq!(info["head_published"], false);
+        git_in(&root, &["commit", "-q", "--allow-empty", "-m", "second"]);
+        let i = commit_info_get(&state, id, "/x").await.unwrap();
+        assert_eq!(i["info"]["head"]["message"], "second\n");
+        let enc = wt.replace('/', "%2F");
+        let i = commit_info_get(&state, id, &format!("/x?worktree={enc}"))
+            .await
+            .unwrap();
+        assert_eq!(i["info"]["head"]["message"], "second\n");
+        // Unlisted selectors are 404.
+        let e = commit_info_get(&state, id, "/x?worktree=%2Fnot%2Flisted")
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(e.status, StatusCode::NOT_FOUND);
+        let e = commit_info_get(&state, id, "/x?repo=nope")
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(e.status, StatusCode::NOT_FOUND);
     }
 
     // --- Git hunk and line staging (naru task 2739) ----------------------
