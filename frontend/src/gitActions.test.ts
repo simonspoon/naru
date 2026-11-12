@@ -462,3 +462,455 @@ describe('the discard endpoint has one caller', () => {
     expect(offenders).toEqual([])
   })
 })
+
+// ---- branch and stash writes (naru task 2741) ----
+
+import {
+  UNMERGED_LIST_MAX,
+  createGitRefActions,
+  deleteBranchPlan,
+  dropPlan,
+  forceDeletePlan,
+  popPlan,
+  switchPlan,
+} from './gitActions'
+import type { ConfirmPlan, GitRefApi } from './gitActions'
+import type { GitBranchDeleteResult } from './types/GitBranchDeleteResult'
+import type { GitCommit } from './types/GitCommit'
+import type { GitRefResult } from './types/GitRefResult'
+import type { GitStash } from './types/GitStash'
+
+const refResult = (notice: string | null = null): GitRefResult => ({ view, notice })
+const commit = (n: number): GitCommit =>
+  ({ hash: `${n}`.padStart(40, 'a'), short_hash: `abc${n}`.padEnd(7, '0'), subject: `subject ${n}` }) as GitCommit
+const TIP = 'b'.repeat(40)
+const merged: GitBranchDeleteResult = {
+  deleted: true,
+  refusal: null,
+  hash: TIP,
+  unmerged: [],
+  unmerged_more: false,
+  view,
+}
+const refused = (n: number, more = false): GitBranchDeleteResult => ({
+  deleted: false,
+  refusal: "error: the branch 'x' is not fully merged.",
+  hash: TIP,
+  unmerged: Array.from({ length: n }, (_, i) => commit(i + 1)),
+  unmerged_more: more,
+  view,
+})
+const stash: GitStash = {
+  index: 2,
+  name: 'stash@{2}',
+  hash: 'c'.repeat(40),
+  message: 'wip <b>x</b>',
+  branch: 'main',
+  date: '2026-01-01T00:00:00Z',
+}
+const plain = { isMain: false, linked: 2, detached: false }
+
+function refHarness(answers: boolean | boolean[] = true) {
+  const queue = Array.isArray(answers) ? [...answers] : null
+  const api: GitRefApi = {
+    createBranch: vi.fn(async () => refResult()),
+    switchBranch: vi.fn(async () => refResult()),
+    renameBranch: vi.fn(async () => refResult()),
+    deleteBranch: vi.fn(async () => merged),
+    pushStash: vi.fn(async () => refResult()),
+    applyStash: vi.fn(async () => refResult()),
+    popStash: vi.fn(async () => refResult()),
+    dropStash: vi.fn(async () => refResult()),
+    readDirty: vi.fn(async () => false as boolean | null),
+  }
+  const confirm = vi.fn(async (p: ConfirmPlan) => {
+    void p
+    return queue === null ? (answers as boolean) : (queue.shift() ?? false)
+  })
+  return { api, confirm, actions: createGitRefActions({ api, confirm }) }
+}
+const rctx = { worktree: WT, branch: 'feat/x' }
+
+describe('delete branch: always asks, twice before a force', () => {
+  it('a false answer never reaches the api', async () => {
+    const { api, confirm, actions } = refHarness(false)
+    const out = await actions.deleteBranch(rctx, 'old', TIP)
+    expect(out).toEqual({ ok: false, reason: 'cancelled' })
+    expect(confirm).toHaveBeenCalledTimes(1)
+    expect(api.deleteBranch).not.toHaveBeenCalled()
+  })
+
+  it('a merged branch: one confirm, one call, no force', async () => {
+    const { api, confirm, actions } = refHarness()
+    const out = await actions.deleteBranch({ ...rctx, repo: 'sub' }, 'old', TIP)
+    expect(out).toEqual({ ok: true, notice: null, deleted: true })
+    expect(confirm).toHaveBeenCalledTimes(1)
+    expect(api.deleteBranch).toHaveBeenCalledTimes(1)
+    expect(api.deleteBranch).toHaveBeenCalledWith({ worktree: WT, repo: 'sub', name: 'old' })
+  })
+
+  it('an unmerged refusal asks a SECOND, distinct confirm before force', async () => {
+    const { api, confirm, actions } = refHarness()
+    vi.mocked(api.deleteBranch)
+      .mockResolvedValueOnce(refused(3))
+      .mockResolvedValueOnce(merged)
+    const out = await actions.deleteBranch(rctx, 'old', TIP)
+    expect(out).toEqual({ ok: true, notice: null, deleted: true })
+    expect(confirm).toHaveBeenCalledTimes(2)
+    const [first, second] = confirm.mock.calls.map((c) => c[0])
+    expect(first.title).not.toBe(second.title)
+    expect(second.listed).toEqual(['abc1000 subject 1', 'abc2000 subject 2', 'abc3000 subject 3'])
+    expect(api.deleteBranch).toHaveBeenNthCalledWith(1, { worktree: WT, name: 'old' })
+    expect(api.deleteBranch).toHaveBeenNthCalledWith(2, {
+      worktree: WT,
+      name: 'old',
+      force: true,
+      expected_hash: TIP,
+    })
+  })
+
+  it('a force reply with deleted: false is an error, not ok', async () => {
+    const { api, actions } = refHarness()
+    vi.mocked(api.deleteBranch)
+      .mockResolvedValueOnce(refused(1))
+      .mockResolvedValueOnce({ ...refused(1), refusal: 'still there' })
+    const out = await actions.deleteBranch(rctx, 'old', TIP)
+    expect(out).toMatchObject({ ok: false, reason: 'error', message: 'old was not deleted.\nstill there' })
+  })
+
+  it('a changed worktree selection before the second confirm cancels it', async () => {
+    const { api, confirm, actions } = refHarness()
+    vi.mocked(api.deleteBranch).mockResolvedValueOnce(refused(1))
+    const out = await actions.deleteBranch(rctx, 'old', TIP, () => false)
+    expect(out).toEqual({ ok: false, reason: 'cancelled' })
+    expect(confirm).toHaveBeenCalledTimes(1)
+    expect(api.deleteBranch).toHaveBeenCalledTimes(1)
+  })
+
+  it('declining the second confirm sends no force', async () => {
+    const { api, confirm, actions } = refHarness([true, false])
+    vi.mocked(api.deleteBranch).mockResolvedValueOnce(refused(1))
+    const out = await actions.deleteBranch(rctx, 'old', TIP)
+    expect(out).toEqual({ ok: false, reason: 'cancelled' })
+    expect(confirm).toHaveBeenCalledTimes(2)
+    expect(api.deleteBranch).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(api.deleteBranch).mock.calls[0][0]).not.toHaveProperty('force')
+  })
+
+  it('the second dialog states the count, even 0, and "and more" past the cap', () => {
+    const wt = { worktree: WT, branch: 'main' }
+    const zero = forceDeletePlan('x', refused(0), wt)
+    expect(zero.consequences.join(' ')).toMatch(/0 commits become unreachable/)
+    expect(zero.listed).toEqual([])
+    const one = forceDeletePlan('x', refused(1), wt)
+    expect(one.consequences.join(' ')).toMatch(/1 commit becomes unreachable/)
+    const many = forceDeletePlan('x', refused(UNMERGED_LIST_MAX, true), wt)
+    expect(many.listed).toHaveLength(UNMERGED_LIST_MAX)
+    expect(many.more).toBeGreaterThan(0)
+    expect(many.moreLabel).toBe('and more')
+    expect(many.consequences.join(' ')).toMatch(/50 or more commits/)
+    expect(many.worktree).toBe(WT)
+    expect(many.title).toContain('x')
+  })
+
+  it('every dialog names the branch and the worktree path and branch', () => {
+    const wt = { worktree: WT, branch: 'main' }
+    for (const p of [deleteBranchPlan('gone', TIP, wt), forceDeletePlan('gone', refused(1), wt)]) {
+      expect(p.title).toContain('gone')
+      expect(p.worktree).toBe(WT)
+      expect(p.branch).toBe('main')
+    }
+  })
+
+  it('an error on the first call is reported with git text, no second confirm', async () => {
+    const { api, confirm, actions } = refHarness()
+    vi.mocked(api.deleteBranch).mockRejectedValueOnce(
+      Object.assign(new Error('fatal: nope'), { code: 'conflict' }),
+    )
+    const out = await actions.deleteBranch(rctx, 'old', TIP)
+    expect(out).toEqual({
+      ok: false,
+      reason: 'error',
+      code: 'conflict',
+      message: 'fatal: nope',
+      prefix: `Could not delete branch old in ${WT}:`,
+    })
+    expect(confirm).toHaveBeenCalledTimes(1)
+  })
+
+  it('no worktree sends nothing and asks nothing', async () => {
+    const { api, confirm, actions } = refHarness()
+    expect(await actions.deleteBranch({ worktree: null, branch: 'x' }, 'old', TIP)).toEqual({
+      ok: false,
+      reason: 'no-worktree',
+    })
+    expect(confirm).not.toHaveBeenCalled()
+    expect(api.deleteBranch).not.toHaveBeenCalled()
+  })
+})
+
+describe('stash drop and pop', () => {
+  it('drop always confirms; false sends nothing', async () => {
+    const { api, confirm, actions } = refHarness(false)
+    expect(await actions.dropStash(rctx, { stash })).toEqual({
+      ok: false,
+      reason: 'cancelled',
+    })
+    expect(confirm).toHaveBeenCalledTimes(1)
+    expect(api.dropStash).not.toHaveBeenCalled()
+  })
+
+  it('drop sends worktree, index and hash after the confirm', async () => {
+    const { api, confirm, actions } = refHarness()
+    const out = await actions.dropStash({ ...rctx, repo: 'sub' }, { stash })
+    expect(out.ok).toBe(true)
+    expect(confirm.mock.calls[0][0].title).toContain('stash@{2}')
+    expect(confirm.mock.calls[0][0].worktree).toBe(WT)
+    expect(api.dropStash).toHaveBeenCalledWith({ worktree: WT, repo: 'sub', index: 2, hash: stash.hash })
+  })
+
+  it('pop reads the worktree fresh: dirty or unknown asks, clean does not', async () => {
+    for (const fresh of [true, null] as const) {
+      const { api, confirm, actions } = refHarness(false)
+      vi.mocked(api.readDirty).mockResolvedValueOnce(fresh)
+      await actions.popStash(rctx, { stash })
+      expect(api.readDirty).toHaveBeenCalledWith(WT, undefined)
+      expect(confirm).toHaveBeenCalledTimes(1)
+      expect(api.popStash).not.toHaveBeenCalled()
+    }
+    const failed = refHarness(false)
+    vi.mocked(failed.api.readDirty).mockRejectedValueOnce(new Error('offline'))
+    await failed.actions.popStash(rctx, { stash })
+    expect(failed.confirm).toHaveBeenCalledTimes(1)
+    expect(failed.api.popStash).not.toHaveBeenCalled()
+    const clean = refHarness(false)
+    const out = await clean.actions.popStash(rctx, { stash })
+    expect(out.ok).toBe(true)
+    expect(clean.confirm).not.toHaveBeenCalled()
+    expect(clean.api.popStash).toHaveBeenCalledWith({ worktree: WT, index: 2, hash: stash.hash })
+  })
+
+  it('apply never asks; a stale list (409) is the error text', async () => {
+    const { api, confirm, actions } = refHarness(false)
+    vi.mocked(api.applyStash).mockRejectedValueOnce(
+      Object.assign(new Error('The stash list changed since it was shown.'), { code: 'conflict' }),
+    )
+    const out = await actions.applyStash(rctx, { stash })
+    expect(confirm).not.toHaveBeenCalled()
+    expect(out).toMatchObject({
+      ok: false,
+      reason: 'error',
+      message: 'The stash list changed since it was shown.',
+      prefix: `Could not apply stash@{2} in ${WT}:`,
+    })
+  })
+
+  it('the dialog texts are plain strings, never markup', () => {
+    const p = dropPlan(stash, { worktree: WT, branch: 'main' })
+    expect(p.listed[0]).toBe('stash@{2}: wip <b>x</b>')
+    expect(popPlan(stash, null, { worktree: WT, branch: 'main' }).consequences[0]).toMatch(/not known/)
+  })
+})
+
+describe('switch', () => {
+  it('a plain switch never asks and sends no stash', async () => {
+    const { api, confirm, actions } = refHarness(false)
+    const out = await actions.switchBranch(rctx, 'dev', plain)
+    expect(out.ok).toBe(true)
+    expect(confirm).not.toHaveBeenCalled()
+    expect(api.switchBranch).toHaveBeenCalledWith({ worktree: WT, name: 'dev' })
+  })
+
+  it('the main checkout asks, with the linked count, path and branch; false sends nothing', async () => {
+    const { api, confirm, actions } = refHarness(false)
+    const out = await actions.switchBranch(rctx, 'dev', { isMain: true, linked: 3, detached: false })
+    expect(out).toEqual({ ok: false, reason: 'cancelled' })
+    expect(api.switchBranch).not.toHaveBeenCalled()
+    const p = confirm.mock.calls[0][0]
+    expect(p.worktree).toBe(WT)
+    expect(p.branch).toBe('feat/x')
+    expect(p.title).toContain('dev')
+    expect(p.consequences.join(' ')).toMatch(/main checkout/)
+    expect(p.consequences.join(' ')).toMatch(/3 linked worktrees/)
+    expect(p.consequences.join(' ')).toMatch(/Naru may be served/)
+  })
+
+  it('a detached HEAD asks and says the commits are only in the reflog', async () => {
+    const { api, confirm, actions } = refHarness(true)
+    await actions.switchBranch({ worktree: WT, branch: 'abc1234' }, 'dev', { ...plain, detached: true })
+    expect(confirm).toHaveBeenCalledTimes(1)
+    expect(confirm.mock.calls[0][0].consequences.join(' ')).toMatch(/reflog/)
+    expect(confirm.mock.calls[0][0].consequences.join(' ')).toMatch(/Create a branch/)
+    expect(api.switchBranch).toHaveBeenCalledWith({ worktree: WT, name: 'dev' })
+  })
+
+  it('stash is only ever sent by stashAndSwitch', async () => {
+    const { api, actions } = refHarness()
+    await actions.switchBranch(rctx, 'dev', plain)
+    await actions.stashAndSwitch({ ...rctx, repo: 'sub' }, 'dev', plain)
+    expect(api.switchBranch).toHaveBeenNthCalledWith(1, { worktree: WT, name: 'dev' })
+    expect(api.switchBranch).toHaveBeenNthCalledWith(2, {
+      worktree: WT,
+      repo: 'sub',
+      name: 'dev',
+      stash: true,
+    })
+  })
+
+  it('stash and switch in the main checkout asks too, and mentions the stash', async () => {
+    const { api, confirm, actions } = refHarness(false)
+    await actions.stashAndSwitch(rctx, 'dev', { isMain: true, linked: 1, detached: false })
+    expect(api.switchBranch).not.toHaveBeenCalled()
+    expect(confirm.mock.calls[0][0].consequences.join(' ')).toMatch(/stashed first/)
+    expect(switchPlan('x', plain, false, { worktree: WT, branch: 'b' })).toBeNull()
+  })
+
+  it('git refusing a switch is the error text, tree untouched', async () => {
+    const { api, actions } = refHarness()
+    vi.mocked(api.switchBranch).mockRejectedValueOnce(
+      Object.assign(new Error('error: Your local changes would be overwritten'), { code: 'conflict' }),
+    )
+    expect(await actions.switchBranch(rctx, 'dev', plain)).toMatchObject({
+      ok: false,
+      reason: 'error',
+      message: 'error: Your local changes would be overwritten',
+      prefix: `Could not switch to dev in ${WT}:`,
+    })
+  })
+})
+
+describe('create, rename, stash push: exact bodies', () => {
+  it('create sends only what is set', async () => {
+    const { api, confirm, actions } = refHarness()
+    await actions.createBranch(rctx, { name: 'a', info: plain })
+    await actions.createBranch(
+      { ...rctx, repo: 'sub' },
+      { name: 'b', fromCommit: 'd'.repeat(40), switch: true, info: plain },
+    )
+    await actions.createBranch(rctx, { name: 'c', fromRemote: 'origin/x', switch: false, info: plain })
+    expect(vi.mocked(api.createBranch).mock.calls.map((c) => c[0])).toEqual([
+      { worktree: WT, name: 'a' },
+      { worktree: WT, repo: 'sub', name: 'b', from_commit: 'd'.repeat(40), switch: true },
+      { worktree: WT, name: 'c', from_remote: 'origin/x' },
+    ])
+    expect(confirm).not.toHaveBeenCalled()
+  })
+
+  it('create with switch in the main checkout asks first', async () => {
+    const { api, confirm, actions } = refHarness(false)
+    const out = await actions.createBranch(rctx, {
+      name: 'n',
+      switch: true,
+      info: { isMain: true, linked: 2, detached: false },
+    })
+    expect(out).toEqual({ ok: false, reason: 'cancelled' })
+    expect(api.createBranch).not.toHaveBeenCalled()
+    expect(confirm.mock.calls[0][0].worktree).toBe(WT)
+    await actions.createBranch(rctx, { name: 'n', info: { isMain: true, linked: 2, detached: false } })
+    expect(confirm).toHaveBeenCalledTimes(1)
+    expect(api.createBranch).toHaveBeenCalledTimes(1)
+  })
+
+  it('rename, stash push bodies and the empty-stash notice', async () => {
+    const { api, actions } = refHarness()
+    vi.mocked(api.pushStash).mockResolvedValueOnce(refResult('No local changes to stash.'))
+    await actions.renameBranch(rctx, 'old', 'new/name')
+    expect(api.renameBranch).toHaveBeenCalledWith({ worktree: WT, name: 'old', new_name: 'new/name' })
+    const out = await actions.pushStash(rctx, '  my work ', true)
+    expect(out).toEqual({ ok: true, notice: 'No local changes to stash.' })
+    expect(api.pushStash).toHaveBeenCalledWith({ worktree: WT, message: 'my work', include_untracked: true })
+    await actions.pushStash(rctx, '   ', false)
+    expect(vi.mocked(api.pushStash).mock.calls[1][0]).toEqual({ worktree: WT })
+  })
+
+  it('nothing is sent without a worktree path', async () => {
+    const { api, actions } = refHarness()
+    const none = { worktree: null, branch: 'x' }
+    expect((await actions.createBranch(none, { name: 'a', info: plain })).ok).toBe(false)
+    expect((await actions.switchBranch(none, 'a', plain)).ok).toBe(false)
+    expect((await actions.renameBranch(none, 'a', 'b')).ok).toBe(false)
+    expect((await actions.pushStash(none, '', false)).ok).toBe(false)
+    expect((await actions.applyStash(none, { stash })).ok).toBe(false)
+    expect((await actions.dropStash(none, { stash })).ok).toBe(false)
+    for (const fn of Object.values(api)) expect(fn).not.toHaveBeenCalled()
+  })
+})
+
+describe('the branch and stash endpoints are confined', () => {
+  const root = join(__dirname)
+  const sources: string[] = []
+  const walk = (dir: string) => {
+    for (const name of readdirSync(dir)) {
+      const p = join(dir, name)
+      if (statSync(p).isDirectory()) walk(p)
+      else if (/\.(ts|tsx)$/.test(name) && !/\.test\.(ts|tsx)$/.test(name)) sources.push(p)
+    }
+  }
+  walk(root)
+  const withText = (needle: string) =>
+    sources
+      .filter((p) => readFileSync(p, 'utf8').includes(needle))
+      .map((p) => p.slice(root.length + 1))
+      .sort()
+  const gate = readFileSync(join(root, 'gitActions.ts'), 'utf8')
+
+  it('deleteProjectGitBranch and dropProjectGitStash: api.ts and gitActions.ts only', () => {
+    expect(withText('deleteProjectGitBranch')).toEqual(['api.ts', 'gitActions.ts'])
+    expect(withText('dropProjectGitStash')).toEqual(['api.ts', 'gitActions.ts'])
+    expect(withText('popProjectGitStash')).toEqual(['api.ts', 'gitActions.ts'])
+    expect(withText('switchProjectGitBranch')).toEqual(['api.ts', 'gitActions.ts'])
+  })
+
+  it('the route strings live only in api.ts', () => {
+    // Generated types/ files quote the route in a doc comment; they call nothing.
+    const code = (needle: string) => withText(needle).filter((p) => !p.startsWith('types/'))
+    for (const r of ['/git/branch-delete', '/git/stash-drop', '/git/stash-pop', '/git/branch-switch']) {
+      expect(code(r)).toEqual(['api.ts'])
+    }
+  })
+
+  it('projectGitRefApi is used only by gitActions.ts and useGitRefOps.ts', () => {
+    expect(withText('projectGitRefApi')).toEqual(['gitActions.ts', 'useGitRefOps.ts'])
+  })
+
+  it('the force call is one site, after a second confirm of the force plan', () => {
+    expect(gate.match(/force: true/g)).toHaveLength(1)
+    expect(gate.match(/api\.deleteBranch\(/g)).toHaveLength(2)
+    const first = gate.indexOf('await confirm(deleteBranchPlan(')
+    const firstCall = gate.indexOf('api.deleteBranch(')
+    const second = gate.indexOf('confirm(forceDeletePlan(')
+    const forceCall = gate.indexOf('force: true')
+    expect(first).toBeGreaterThan(0)
+    expect(first).toBeLessThan(firstCall)
+    expect(firstCall).toBeLessThan(second)
+    expect(second).toBeLessThan(forceCall)
+  })
+
+  it('api.dropStash( is called once, after its confirm; stash is sent by one method', () => {
+    expect(gate.match(/api\.dropStash\(/g)).toHaveLength(1)
+    expect(gate.indexOf('await confirm(dropPlan(')).toBeLessThan(gate.indexOf('api.dropStash('))
+    expect(gate.match(/body\.stash = true/g)).toHaveLength(1)
+  })
+
+  it('no other module calls the delete, drop or force api', () => {
+    const offenders = sources
+      .filter((p) => !p.endsWith('gitActions.ts'))
+      .filter((p) => /\bapi\.(deleteBranch|dropStash|popStash|switchBranch)\(/.test(readFileSync(p, 'utf8')))
+      .map((p) => p.slice(root.length + 1))
+    expect(offenders).toEqual([])
+  })
+
+  it('the Git ref components and hook render repo text as text nodes only', () => {
+    const mine = [
+      'components/GitSidePanel.tsx',
+      'components/GitFormDialog.tsx',
+      'components/GitConfirmDialog.tsx',
+      'components/GitRefDialogs.tsx',
+      'components/GitRefMessages.tsx',
+      'pages/GitView.tsx',
+    ]
+    for (const f of mine) {
+      expect(readFileSync(join(root, f), 'utf8')).not.toContain('dangerouslySetInnerHTML')
+    }
+  })
+})

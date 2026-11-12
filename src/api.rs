@@ -40,23 +40,23 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::core::{
     AgentSession, ArchiveOutcome, Artifact, ArtifactPatch, ArtifactSummary, AudioTestResult,
     CcDashboard, CcLiveSession, CcScorecard, CcUsage, ConfigServe, Error, FileTreeEntry, GitBranch,
-    GitCommit, GitCommitDetail, GitCommitFile, GitCommitResult, GitFile, GitFileDiff, GitRepo,
-    GitRepoView, GitStash, GitStatus, GitWorktree, GitWorktreeDetail, InboxItem, InboxKind,
-    LIVE_AUDIO_MAX, LIVE_BOARD_INK_STATE_MAX, LIVE_BOARD_KEEP, LIVE_INK_MAX, LibraryBuiltinAction,
-    LibraryBundle, LibraryImportResult, LibraryKind, LibraryPatch, LibraryScope,
-    LiveBoardHistoryEntry, LiveBoardHistoryPage, LiveBoardInkEntry, LiveBoardKind,
-    LiveBoardSummary, LiveContext, LiveNotebookEntry, LiveNotice, LiveOffer, LiveState, LiveStatus,
-    LiveTranscript, LiveWindow, ModelRates, NaruVersion, NextResult, Priority, ProjectAgents,
-    ProjectFileNames, ProjectFileTree, ProjectGitBranches, ProjectGitCommitInfo, ProjectGitLog,
-    ProjectGitRepos, ProjectGitStashes, ProjectGitStatus, ProjectGitView,
-    ProjectGitWorktreeDetails, ProjectPatch, ProjectVersion, ReceiptPatch, STALE_CLAIM_MINUTES,
-    Script, ScriptArg, ScriptPatch, ScriptRunEvent, ServeBoolSetting, ServeHostsSetting,
-    ServeNumberSetting, Status, Store, SystemInfo, Task, TaskNote, TaskPatch, TaskSummary,
-    WorkflowEdgeKind, WorkflowGateStatus, WorkflowNodeKind, WorkflowNodeNew, WorkflowNodePatch,
-    WorkflowPatch, WorkflowTrigger, WorkflowType, agents, attachments, audio, board, claude_trust,
-    config, files, git, guard, hooks, inbox_triage, kb, library, listen, live, memory_job,
-    model_router, notify, orbit, project_memory, receipt, runner, script_runs, scripts, speech,
-    supervisor, system, validate_live_client, version, workflow,
+    GitBranchDeleteResult, GitCommit, GitCommitDetail, GitCommitFile, GitCommitResult, GitFile,
+    GitFileDiff, GitRefResult, GitRepo, GitRepoView, GitStash, GitStatus, GitWorktree,
+    GitWorktreeDetail, InboxItem, InboxKind, LIVE_AUDIO_MAX, LIVE_BOARD_INK_STATE_MAX,
+    LIVE_BOARD_KEEP, LIVE_INK_MAX, LibraryBuiltinAction, LibraryBundle, LibraryImportResult,
+    LibraryKind, LibraryPatch, LibraryScope, LiveBoardHistoryEntry, LiveBoardHistoryPage,
+    LiveBoardInkEntry, LiveBoardKind, LiveBoardSummary, LiveContext, LiveNotebookEntry, LiveNotice,
+    LiveOffer, LiveState, LiveStatus, LiveTranscript, LiveWindow, ModelRates, NaruVersion,
+    NextResult, Priority, ProjectAgents, ProjectFileNames, ProjectFileTree, ProjectGitBranches,
+    ProjectGitCommitInfo, ProjectGitLog, ProjectGitRepos, ProjectGitStashes, ProjectGitStatus,
+    ProjectGitView, ProjectGitWorktreeDetails, ProjectPatch, ProjectVersion, ReceiptPatch,
+    STALE_CLAIM_MINUTES, Script, ScriptArg, ScriptPatch, ScriptRunEvent, ServeBoolSetting,
+    ServeHostsSetting, ServeNumberSetting, Status, Store, SystemInfo, Task, TaskNote, TaskPatch,
+    TaskSummary, WorkflowEdgeKind, WorkflowGateStatus, WorkflowNodeKind, WorkflowNodeNew,
+    WorkflowNodePatch, WorkflowPatch, WorkflowTrigger, WorkflowType, agents, attachments, audio,
+    board, claude_trust, config, files, git, guard, hooks, inbox_triage, kb, library, listen, live,
+    memory_job, model_router, notify, orbit, project_memory, receipt, runner, script_runs, scripts,
+    speech, supervisor, system, validate_live_client, version, workflow,
 };
 
 /// The Vite build output, embedded into the binary at compile time.
@@ -4433,6 +4433,39 @@ fn router(state: AppState) -> Router {
         .route(
             "/api/projects/{id}/git/commit-info",
             get(get_project_git_commit_info),
+        )
+        // Branch and stash writes (naru task 2741): agent-gated like the writes above.
+        .route(
+            "/api/projects/{id}/git/branch-create",
+            post(post_project_git_branch_create),
+        )
+        .route(
+            "/api/projects/{id}/git/branch-switch",
+            post(post_project_git_branch_switch),
+        )
+        .route(
+            "/api/projects/{id}/git/branch-rename",
+            post(post_project_git_branch_rename),
+        )
+        .route(
+            "/api/projects/{id}/git/branch-delete",
+            post(post_project_git_branch_delete),
+        )
+        .route(
+            "/api/projects/{id}/git/stash-push",
+            post(post_project_git_stash_push),
+        )
+        .route(
+            "/api/projects/{id}/git/stash-apply",
+            post(post_project_git_stash_apply),
+        )
+        .route(
+            "/api/projects/{id}/git/stash-pop",
+            post(post_project_git_stash_pop),
+        )
+        .route(
+            "/api/projects/{id}/git/stash-drop",
+            post(post_project_git_stash_drop),
         )
         // Commit history: recent log, one commit's changed files, and one
         // commit-file's diff. Same read-only/standard-guard-only posture as
@@ -10422,6 +10455,7 @@ async fn git_repos_at(state: &AppState, local_path: &str) -> Vec<GitRepo> {
         return r;
     }
     let d = local_path.to_string();
+    let epoch = state.git_epoch.load(Ordering::SeqCst);
     let repos = tokio::task::spawn_blocking(move || git::discover_repos(&d))
         .await
         .unwrap_or_default();
@@ -10429,7 +10463,9 @@ async fn git_repos_at(state: &AppState, local_path: &str) -> Vec<GitRepo> {
     if cache.len() >= 64 {
         cache.retain(|_, (at, _)| at.elapsed() < GIT_TTL);
     }
-    cache.insert(local_path.to_string(), (Instant::now(), repos.clone()));
+    if git_epoch_unchanged(state, epoch) {
+        cache.insert(local_path.to_string(), (Instant::now(), repos.clone()));
+    }
     repos
 }
 
@@ -10535,6 +10571,7 @@ async fn git_worktrees_at(state: &AppState, local_path: &str) -> Option<Vec<GitW
         Some(v) => v,
         None => {
             let d = local_path.to_string();
+            let epoch = state.git_epoch.load(Ordering::SeqCst);
             let v = tokio::task::spawn_blocking(move || git::worktrees_of(&d))
                 .await
                 .unwrap_or(None);
@@ -10542,7 +10579,9 @@ async fn git_worktrees_at(state: &AppState, local_path: &str) -> Option<Vec<GitW
             if cache.len() >= 64 {
                 cache.retain(|_, (at, _)| at.elapsed() < GIT_TTL);
             }
-            cache.insert(local_path.to_string(), (Instant::now(), v.clone()));
+            if git_epoch_unchanged(state, epoch) {
+                cache.insert(local_path.to_string(), (Instant::now(), v.clone()));
+            }
             v
         }
     }
@@ -10740,6 +10779,13 @@ fn drop_git_caches(state: &AppState) {
     state.git_wt_details_cache.lock().unwrap().clear();
     state.git_branches_cache.lock().unwrap().clear();
     state.git_log_cache.lock().unwrap().clear();
+    // Naru task 2741: branch and stash writes change what these carry (branch
+    // names in the worktree and repo lists, the stash list, a file's history
+    // along HEAD).
+    state.git_stashes_cache.lock().unwrap().clear();
+    state.git_worktrees_cache.lock().unwrap().clear();
+    state.git_repos_cache.lock().unwrap().clear();
+    state.git_file_log_cache.lock().unwrap().clear();
 }
 
 /// True when no `drop_git_caches` ran since `epoch` was read: the fill that
@@ -11061,6 +11107,354 @@ async fn post_project_git_commit(
         .into_response()),
         _ => Err(not_found(format!("not a git repo: {dir}"))),
     }
+}
+
+// ---- Branch and stash writes (naru task 2741) -----------------------------
+
+/// Common body fields of the eight routes: `worktree` is REQUIRED, `repo`
+/// optional (both as `GitWriteBody`).
+#[derive(Deserialize)]
+struct GitBranchCreateBody {
+    worktree: Option<String>,
+    repo: Option<String>,
+    name: Option<String>,
+    from_commit: Option<String>,
+    from_remote: Option<String>,
+    #[serde(rename = "switch")]
+    switch_to: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct GitBranchSwitchBody {
+    worktree: Option<String>,
+    repo: Option<String>,
+    name: Option<String>,
+    stash: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct GitBranchRenameBody {
+    worktree: Option<String>,
+    repo: Option<String>,
+    name: Option<String>,
+    new_name: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct GitBranchDeleteBody {
+    worktree: Option<String>,
+    repo: Option<String>,
+    name: Option<String>,
+    force: Option<bool>,
+    expected_hash: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct GitStashPushBody {
+    worktree: Option<String>,
+    repo: Option<String>,
+    message: Option<String>,
+    include_untracked: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct GitStashEntryBody {
+    worktree: Option<String>,
+    repo: Option<String>,
+    index: Option<u32>,
+    hash: Option<String>,
+}
+
+fn git_ref_worktree(w: Option<&str>) -> ApiResult<String> {
+    w.filter(|w| !w.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| git_write_validation("worktree is required"))
+}
+
+fn git_ref_required(v: Option<&str>, field: &str) -> ApiResult<String> {
+    v.filter(|v| !v.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| git_write_validation(format!("{field} is required")))
+}
+
+/// Project folder, repo and worktree resolution exactly as `git_write` (404
+/// for each); the worktree must be a listed one.
+async fn git_ref_dir(
+    state: &AppState,
+    id: i64,
+    worktree: &str,
+    repo: Option<&str>,
+) -> ApiResult<String> {
+    let local_path = state.store.lock().unwrap().get_project(id)?.local_path;
+    let Some(local_path) = local_path.filter(|p| std::path::Path::new(p).is_dir()) else {
+        return Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            code: "not_found",
+            message: "project has no git folder".into(),
+        });
+    };
+    let base = resolve_repo_dir(state, &local_path, repo).await?;
+    let (dir, _worktrees) = resolve_git_dir(state, &base, Some(worktree)).await?;
+    Ok(dir)
+}
+
+fn git_ref_error(e: git::RefErr) -> ApiError {
+    let (status, code, message) = match e {
+        git::RefErr::Validation(m) => (StatusCode::UNPROCESSABLE_ENTITY, "validation", m),
+        git::RefErr::NotFound(m) => (StatusCode::NOT_FOUND, "not_found", m),
+        git::RefErr::Conflict(m) => (StatusCode::CONFLICT, "conflict", m),
+    };
+    ApiError {
+        status,
+        code,
+        message,
+    }
+}
+
+/// Runs one branch or stash write off the async workers. Caches drop after
+/// every attempt that got past validation (success, a 409, a panic); a 422 or
+/// 404 never reached git, so nothing changed and nothing is dropped.
+async fn git_ref_write<T: Send + 'static>(
+    state: &AppState,
+    dir: &str,
+    f: impl FnOnce(&str) -> Result<T, git::RefErr> + Send + 'static,
+) -> ApiResult<T> {
+    let d = dir.to_string();
+    let r = tokio::task::spawn_blocking(move || f(&d))
+        .await
+        .unwrap_or_else(|_| Err(git::RefErr::Conflict("git write task panicked".into())));
+    if !matches!(
+        r,
+        Err(git::RefErr::Validation(_) | git::RefErr::NotFound(_))
+    ) {
+        drop_git_caches(state);
+    }
+    r.map_err(git_ref_error)
+}
+
+/// The worktree's fresh `GitRepoView` after a write (404 when it is gone).
+async fn git_ref_view(dir: &str) -> ApiResult<GitRepoView> {
+    let d = dir.to_string();
+    tokio::task::spawn_blocking(move || git::view_of(&d))
+        .await
+        .unwrap_or(None)
+        .ok_or_else(|| ApiError {
+            status: StatusCode::NOT_FOUND,
+            code: "not_found",
+            message: format!("not a git repo: {dir}"),
+        })
+}
+
+async fn git_ref_result(dir: &str, notice: Option<String>) -> ApiResult<Response> {
+    let view = git_ref_view(dir).await?;
+    Ok(Json(GitRefResult { view, notice }).into_response())
+}
+
+/// `POST /api/projects/{id}/git/branch-create` — `{worktree, repo?, name,
+/// from_commit?, from_remote?, switch?}`. Agent-grade gate, like `stage`.
+/// Shape (422), project/repo/worktree (404), then `git::create_branch`
+/// (name rules 422, start point 404, git failing 409).
+async fn post_project_git_branch_create(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    body: Result<Json<GitBranchCreateBody>, JsonRejection>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let Json(body) = body?;
+    let worktree = git_ref_worktree(body.worktree.as_deref())?;
+    let name = git_ref_required(body.name.as_deref(), "name")?;
+    if body.from_commit.is_some() && body.from_remote.is_some() {
+        return Err(git_write_validation(
+            "give at most one of from_commit and from_remote",
+        ));
+    }
+    if let Some(c) = body.from_commit.as_deref()
+        && !git::is_full_hash(c)
+    {
+        return Err(git_write_validation(
+            "from_commit must be a full lowercase commit hash",
+        ));
+    }
+    let dir = git_ref_dir(&state, id, &worktree, body.repo.as_deref()).await?;
+    let (from_commit, from_remote, switch) = (
+        body.from_commit,
+        body.from_remote,
+        body.switch_to == Some(true),
+    );
+    let notice = git_ref_write(&state, &dir, move |d| {
+        git::create_branch(
+            d,
+            &name,
+            from_commit.as_deref(),
+            from_remote.as_deref(),
+            switch,
+        )
+    })
+    .await?;
+    git_ref_result(&dir, notice).await
+}
+
+/// `POST /api/projects/{id}/git/branch-switch` — `{worktree, repo?, name,
+/// stash?}`; see `git::switch_branch`.
+async fn post_project_git_branch_switch(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    body: Result<Json<GitBranchSwitchBody>, JsonRejection>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let Json(body) = body?;
+    let worktree = git_ref_worktree(body.worktree.as_deref())?;
+    let name = git_ref_required(body.name.as_deref(), "name")?;
+    let dir = git_ref_dir(&state, id, &worktree, body.repo.as_deref()).await?;
+    let stash = body.stash == Some(true);
+    let notice = git_ref_write(&state, &dir, move |d| git::switch_branch(d, &name, stash)).await?;
+    git_ref_result(&dir, notice).await
+}
+
+/// `POST /api/projects/{id}/git/branch-rename` — `{worktree, repo?, name,
+/// new_name}`; see `git::rename_branch`.
+async fn post_project_git_branch_rename(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    body: Result<Json<GitBranchRenameBody>, JsonRejection>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let Json(body) = body?;
+    let worktree = git_ref_worktree(body.worktree.as_deref())?;
+    let name = git_ref_required(body.name.as_deref(), "name")?;
+    let new_name = git_ref_required(body.new_name.as_deref(), "new_name")?;
+    let dir = git_ref_dir(&state, id, &worktree, body.repo.as_deref()).await?;
+    let notice = git_ref_write(&state, &dir, move |d| {
+        git::rename_branch(d, &name, &new_name)
+    })
+    .await?;
+    git_ref_result(&dir, notice).await
+}
+
+/// `POST /api/projects/{id}/git/branch-delete` — `{worktree, repo?, name,
+/// force?, expected_hash?}`; see `git::delete_branch`. 200 both when the
+/// branch went and when git refused as "not fully merged".
+async fn post_project_git_branch_delete(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    body: Result<Json<GitBranchDeleteBody>, JsonRejection>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let Json(body) = body?;
+    let worktree = git_ref_worktree(body.worktree.as_deref())?;
+    let name = git_ref_required(body.name.as_deref(), "name")?;
+    let force = body.force == Some(true);
+    if force && !body.expected_hash.as_deref().is_some_and(git::is_full_hash) {
+        return Err(git_write_validation(
+            "expected_hash must be a full lowercase commit hash",
+        ));
+    }
+    let dir = git_ref_dir(&state, id, &worktree, body.repo.as_deref()).await?;
+    let expected = body.expected_hash;
+    let out = git_ref_write(&state, &dir, move |d| {
+        git::delete_branch(d, &name, force, expected.as_deref())
+    })
+    .await?;
+    let view = git_ref_view(&dir).await?;
+    Ok(Json(GitBranchDeleteResult {
+        deleted: out.deleted,
+        refusal: out.refusal,
+        hash: out.hash,
+        unmerged: out.unmerged,
+        unmerged_more: out.unmerged_more,
+        view,
+    })
+    .into_response())
+}
+
+/// `POST /api/projects/{id}/git/stash-push` — `{worktree, repo?, message?,
+/// include_untracked?}`; see `git::stash_push`.
+async fn post_project_git_stash_push(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    body: Result<Json<GitStashPushBody>, JsonRejection>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let Json(body) = body?;
+    let worktree = git_ref_worktree(body.worktree.as_deref())?;
+    let message = match body.message.as_deref() {
+        Some(m) => git::check_stash_message(m).map_err(git_write_validation)?,
+        None => None,
+    };
+    let dir = git_ref_dir(&state, id, &worktree, body.repo.as_deref()).await?;
+    let untracked = body.include_untracked == Some(true);
+    let notice = git_ref_write(&state, &dir, move |d| {
+        git::stash_push(d, message.as_deref(), untracked)
+    })
+    .await?;
+    git_ref_result(&dir, notice).await
+}
+
+/// Shared by `POST .../git/stash-{apply,pop,drop}`: `{worktree, repo?, index,
+/// hash}`; see `git::stash_entry_op`.
+async fn git_stash_entry(
+    state: &AppState,
+    id: i64,
+    op: git::StashOp,
+    body: GitStashEntryBody,
+) -> ApiResult<Response> {
+    let worktree = git_ref_worktree(body.worktree.as_deref())?;
+    let index = body
+        .index
+        .ok_or_else(|| git_write_validation("index is required"))?;
+    let hash = git_ref_required(body.hash.as_deref(), "hash")?;
+    let dir = git_ref_dir(state, id, &worktree, body.repo.as_deref()).await?;
+    let notice = git_ref_write(state, &dir, move |d| {
+        git::stash_entry_op(d, op, index, &hash)
+    })
+    .await?;
+    git_ref_result(&dir, notice).await
+}
+
+async fn post_project_git_stash_apply(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    body: Result<Json<GitStashEntryBody>, JsonRejection>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let Json(body) = body?;
+    git_stash_entry(&state, id, git::StashOp::Apply, body).await
+}
+
+async fn post_project_git_stash_pop(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    body: Result<Json<GitStashEntryBody>, JsonRejection>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let Json(body) = body?;
+    git_stash_entry(&state, id, git::StashOp::Pop, body).await
+}
+
+async fn post_project_git_stash_drop(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    body: Result<Json<GitStashEntryBody>, JsonRejection>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let Json(body) = body?;
+    git_stash_entry(&state, id, git::StashOp::Drop, body).await
 }
 
 /// Body of the three hunk routes (naru task 2739).
@@ -11675,6 +12069,7 @@ async fn get_project_git_file_log(
         None => {
             let d = dir.clone();
             let rel = wanted.clone();
+            let epoch = state.git_epoch.load(Ordering::SeqCst);
             let c = tokio::task::spawn_blocking(move || git::file_log_page(&d, &rel))
                 .await
                 .unwrap_or_default();
@@ -11682,7 +12077,9 @@ async fn get_project_git_file_log(
             if cache.len() >= 64 {
                 cache.retain(|_, (at, _)| at.elapsed() < GIT_TTL);
             }
-            cache.insert(key, (Instant::now(), c.clone()));
+            if git_epoch_unchanged(&state, epoch) {
+                cache.insert(key, (Instant::now(), c.clone()));
+            }
             c
         }
     };
@@ -29211,6 +29608,927 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         let i = commit_info_get(&state, id, "/x").await.unwrap();
         assert_eq!(i["info"]["branch"], main_branch.as_str());
         assert_eq!(i["info"]["head"]["hash"], main_head.as_str());
+    }
+
+    // --- Git branch and stash writes (naru task 2741) --------------------
+
+    const REF_ROUTES: [&str; 8] = [
+        "branch-create",
+        "branch-switch",
+        "branch-rename",
+        "branch-delete",
+        "stash-push",
+        "stash-apply",
+        "stash-pop",
+        "stash-drop",
+    ];
+
+    async fn ref_post_as(
+        state: &AppState,
+        id: i64,
+        route: &str,
+        body: serde_json::Value,
+        addr: SocketAddr,
+        headers: HeaderMap,
+    ) -> ApiResult<Response> {
+        let (s, c, p) = (State(state.clone()), ConnectInfo(addr), Path(id));
+        macro_rules! go {
+            ($f:ident) => {
+                $f(
+                    s,
+                    c,
+                    headers,
+                    p,
+                    Ok(Json(serde_json::from_value(body).unwrap())),
+                )
+                .await
+            };
+        }
+        match route {
+            "branch-create" => go!(post_project_git_branch_create),
+            "branch-switch" => go!(post_project_git_branch_switch),
+            "branch-rename" => go!(post_project_git_branch_rename),
+            "branch-delete" => go!(post_project_git_branch_delete),
+            "stash-push" => go!(post_project_git_stash_push),
+            "stash-apply" => go!(post_project_git_stash_apply),
+            "stash-pop" => go!(post_project_git_stash_pop),
+            "stash-drop" => go!(post_project_git_stash_drop),
+            other => panic!("no route {other}"),
+        }
+    }
+
+    async fn ref_post(
+        state: &AppState,
+        id: i64,
+        route: &str,
+        body: serde_json::Value,
+    ) -> ApiResult<serde_json::Value> {
+        let r = ref_post_as(
+            state,
+            id,
+            route,
+            body,
+            loopback(),
+            hdrs(Some("localhost:0"), None),
+        )
+        .await?;
+        Ok(json_body(r).await)
+    }
+
+    async fn ref_err(
+        state: &AppState,
+        id: i64,
+        route: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, &'static str, String) {
+        let e = ref_post(state, id, route, body.clone())
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("{route} {body} succeeded"));
+        (e.status, e.code, e.message)
+    }
+
+    /// Local branch names as the (cached) branches route reports them.
+    async fn ref_branches(state: &AppState, id: i64, worktree: Option<&str>) -> Vec<String> {
+        let uri = match worktree {
+            Some(w) => format!("/x?worktree={}", w.replace('/', "%2F")),
+            None => "/x".to_string(),
+        };
+        let q = Query::<GitViewQuery>::try_from_uri(&uri.parse().unwrap()).unwrap();
+        let v = json_body(
+            get_project_git_branches(State(state.clone()), Path(id), q)
+                .await
+                .unwrap(),
+        )
+        .await;
+        v["branches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|b| b["kind"] == "local")
+            .map(|b| b["name"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    async fn ref_stashes(state: &AppState, id: i64) -> Vec<serde_json::Value> {
+        let q = Query::<GitRepoQuery>::try_from_uri(&"/x".parse().unwrap()).unwrap();
+        json_body(
+            get_project_git_stashes(State(state.clone()), Path(id), q)
+                .await
+                .unwrap(),
+        )
+        .await["stashes"]
+            .as_array()
+            .unwrap()
+            .clone()
+    }
+
+    /// (worktree list branches, repos list branch of ".") from the cached routes.
+    async fn ref_listings(state: &AppState, id: i64) -> (Vec<Option<String>>, Option<String>) {
+        let v = json_body(
+            get_project_git(
+                State(state.clone()),
+                Path(id),
+                Query(GitViewQuery {
+                    worktree: None,
+                    repo: None,
+                }),
+            )
+            .await
+            .unwrap(),
+        )
+        .await;
+        let wts = v["worktrees"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|w| w["branch"].as_str().map(str::to_string))
+            .collect();
+        let repos = json_body(
+            get_project_git_repos(State(state.clone()), Path(id))
+                .await
+                .unwrap(),
+        )
+        .await;
+        (
+            wts,
+            repos["repos"][0]["branch"].as_str().map(str::to_string),
+        )
+    }
+
+    fn ref_branch(root: &std::path::Path) -> String {
+        gco(root, &["rev-parse", "--abbrev-ref", "HEAD"])
+    }
+
+    #[tokio::test]
+    async fn git_ref_routes_work_and_every_following_read_is_fresh() {
+        let (_db, state) = test_state();
+        let (_tmp, root, id, wt) = git_commit_fixture(&state);
+        let main = ref_branch(&root);
+        let base = gco(&root, &["rev-parse", "HEAD"]);
+        // Prime every cache a branch or stash write must invalidate.
+        assert_eq!(ref_branches(&state, id, None).await, [main.as_str()]);
+        assert!(ref_stashes(&state, id).await.is_empty());
+        assert_eq!(
+            ref_listings(&state, id).await,
+            (vec![Some(main.clone())], Some(main.clone()))
+        );
+        // Create (no switch): the cached branch list is stale-free.
+        let r = ref_post(
+            &state,
+            id,
+            "branch-create",
+            json!({"worktree": wt, "name": "feat/x"}),
+        )
+        .await
+        .unwrap();
+        assert!(r["notice"].is_null());
+        assert_eq!(r["view"]["status"]["branch"], main.as_str());
+        assert_eq!(
+            ref_branches(&state, id, None).await,
+            ["feat/x", main.as_str()]
+        );
+        // Create from a commit with switch: view, worktree list and repo list follow.
+        let r = ref_post(
+            &state,
+            id,
+            "branch-create",
+            json!({"worktree": wt, "name": "other", "from_commit": base, "switch": true}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(r["view"]["status"]["branch"], "other");
+        assert_eq!(ref_branch(&root), "other");
+        assert_eq!(
+            ref_listings(&state, id).await,
+            (vec![Some("other".into())], Some("other".into()))
+        );
+        // Rename the current branch.
+        let r = ref_post(
+            &state,
+            id,
+            "branch-rename",
+            json!({"worktree": wt, "name": "other", "new_name": "renamed"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(r["view"]["status"]["branch"], "renamed");
+        assert!(
+            ref_branches(&state, id, None)
+                .await
+                .contains(&"renamed".to_string())
+        );
+        assert!(
+            !ref_branches(&state, id, None)
+                .await
+                .contains(&"other".to_string())
+        );
+        assert_eq!(ref_listings(&state, id).await.1.as_deref(), Some("renamed"));
+        // Switch with stash: the dirty tree is stashed and the stash list is fresh.
+        std::fs::write(root.join("base.txt"), "dirty\n").unwrap();
+        // The file was written behind the server's back: drop the stale view
+        // so the next read is the dirty one the write must then invalidate.
+        state.git_view_cache.lock().unwrap().clear();
+        assert_eq!(
+            git_get_files(&state, id).await,
+            [".M base.txt"],
+            "view primed dirty"
+        );
+        let r = ref_post(
+            &state,
+            id,
+            "branch-switch",
+            json!({"worktree": wt, "name": main, "stash": true}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            r["notice"],
+            "Stashed your changes as stash@{0} before switching."
+        );
+        assert_eq!(r["view"]["status"]["branch"], main.as_str());
+        assert!(r["view"]["files"].as_array().unwrap().is_empty());
+        let st = ref_stashes(&state, id).await;
+        assert_eq!(st.len(), 1);
+        assert_eq!(
+            ref_listings(&state, id).await.1.as_deref(),
+            Some(main.as_str())
+        );
+        // Apply keeps the entry, pop removes it, drop removes it.
+        let entry = json!({"worktree": wt, "index": 0, "hash": st[0]["hash"]});
+        let r = ref_post(&state, id, "stash-apply", entry.clone())
+            .await
+            .unwrap();
+        assert_eq!(r["view"]["files"].as_array().unwrap().len(), 1);
+        assert_eq!(ref_stashes(&state, id).await.len(), 1);
+        git_in(&root, &["checkout", "-q", "--", "base.txt"]);
+        ref_post(&state, id, "stash-pop", entry.clone())
+            .await
+            .unwrap();
+        assert!(ref_stashes(&state, id).await.is_empty());
+        assert_eq!(git_get_files(&state, id).await, [".M base.txt"]);
+        // Push with a message, then drop it.
+        let r = ref_post(
+            &state,
+            id,
+            "stash-push",
+            json!({"worktree": wt, "message": "  parked  ", "include_untracked": true}),
+        )
+        .await
+        .unwrap();
+        assert!(r["notice"].is_null());
+        let st = ref_stashes(&state, id).await;
+        assert_eq!(st[0]["message"], "parked");
+        let r = ref_post(&state, id, "stash-push", json!({"worktree": wt}))
+            .await
+            .unwrap();
+        assert_eq!(r["notice"], "No local changes to stash.");
+        ref_post(
+            &state,
+            id,
+            "stash-drop",
+            json!({"worktree": wt, "index": 0, "hash": st[0]["hash"]}),
+        )
+        .await
+        .unwrap();
+        assert!(ref_stashes(&state, id).await.is_empty());
+        // Delete: merged goes at once; unmerged is a 200 refusal, then forced.
+        let r = ref_post(
+            &state,
+            id,
+            "branch-delete",
+            json!({"worktree": wt, "name": "feat/x"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(r["deleted"], true);
+        assert_eq!(r["hash"], base.as_str());
+        assert!(r["refusal"].is_null());
+        assert_eq!(r["unmerged"], json!([]));
+        assert!(
+            !ref_branches(&state, id, None)
+                .await
+                .contains(&"feat/x".to_string())
+        );
+        git_in(&root, &["switch", "-q", "renamed"]);
+        git_in(&root, &["commit", "-q", "--allow-empty", "-m", "only here"]);
+        let tip = gco(&root, &["rev-parse", "HEAD"]);
+        git_in(&root, &["switch", "-q", &main]);
+        let r = ref_post(
+            &state,
+            id,
+            "branch-delete",
+            json!({"worktree": wt, "name": "renamed"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(r["deleted"], false);
+        assert!(r["refusal"].as_str().unwrap().contains("not fully merged"));
+        assert_eq!(r["hash"], tip.as_str());
+        assert_eq!(r["unmerged"][0]["subject"], "only here");
+        assert_eq!(r["unmerged_more"], false);
+        assert!(
+            ref_branches(&state, id, None)
+                .await
+                .contains(&"renamed".to_string())
+        );
+        let r = ref_post(
+            &state,
+            id,
+            "branch-delete",
+            json!({"worktree": wt, "name": "renamed", "force": true, "expected_hash": tip}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(r["deleted"], true);
+        assert!(
+            !ref_branches(&state, id, None)
+                .await
+                .contains(&"renamed".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn git_ref_routes_validate_before_they_spawn_anything() {
+        let (_db, state) = test_state();
+        let (_tmp, root, id, wt) = git_commit_fixture(&state);
+        let main = ref_branch(&root);
+        git_in(&root, &["branch", "side"]);
+        git_in(&root, &["tag", "v1"]);
+        let before = ref_branches(&state, id, None).await;
+        let head = gco(&root, &["rev-parse", "HEAD"]);
+        let full = head.clone();
+        let cases: Vec<(&str, serde_json::Value, &str)> = vec![
+            (
+                "branch-create",
+                json!({"name": "a"}),
+                "worktree is required",
+            ),
+            (
+                "branch-create",
+                json!({"worktree": "", "name": "a"}),
+                "worktree is required",
+            ),
+            ("branch-create", json!({"worktree": wt}), "name is required"),
+            (
+                "branch-create",
+                json!({"worktree": wt, "name": ""}),
+                "name is required",
+            ),
+            (
+                "branch-create",
+                json!({"worktree": wt, "name": "-x"}),
+                "begins with '-'",
+            ),
+            (
+                "branch-create",
+                json!({"worktree": wt, "name": "@{-1}"}),
+                "not a valid branch name",
+            ),
+            (
+                "branch-create",
+                json!({"worktree": wt, "name": "a..b"}),
+                "not a valid branch name",
+            ),
+            (
+                "branch-create",
+                json!({"worktree": wt, "name": "x.lock"}),
+                "not a valid branch name",
+            ),
+            (
+                "branch-create",
+                json!({"worktree": wt, "name": "a b"}),
+                "not a valid branch name",
+            ),
+            (
+                "branch-create",
+                json!({"worktree": wt, "name": "HEAD"}),
+                "not a valid branch name",
+            ),
+            (
+                "branch-create",
+                json!({"worktree": wt, "name": "side"}),
+                "a branch named side already exists",
+            ),
+            (
+                "branch-create",
+                json!({"worktree": wt, "name": "v1"}),
+                "a tag named v1 already exists",
+            ),
+            (
+                "branch-create",
+                json!({"worktree": wt, "name": "n", "from_commit": full, "from_remote": "o/x"}),
+                "at most one",
+            ),
+            (
+                "branch-create",
+                json!({"worktree": wt, "name": "n", "from_commit": "--all"}),
+                "from_commit must be",
+            ),
+            (
+                "branch-create",
+                json!({"worktree": wt, "name": "n", "from_commit": "zzzzzzzz"}),
+                "from_commit must be",
+            ),
+            (
+                "branch-create",
+                json!({"worktree": wt, "name": "n", "from_commit": &head[..10]}),
+                "full lowercase commit hash",
+            ),
+            (
+                "branch-switch",
+                json!({"name": "side"}),
+                "worktree is required",
+            ),
+            ("branch-switch", json!({"worktree": wt}), "name is required"),
+            (
+                "branch-switch",
+                json!({"worktree": wt, "name": main}),
+                "already on",
+            ),
+            (
+                "branch-rename",
+                json!({"worktree": wt, "name": "side"}),
+                "new_name is required",
+            ),
+            (
+                "branch-rename",
+                json!({"worktree": wt, "name": "side", "new_name": "-y"}),
+                "begins with '-'",
+            ),
+            (
+                "branch-rename",
+                json!({"worktree": wt, "name": "side", "new_name": "v1"}),
+                "a tag named v1",
+            ),
+            (
+                "branch-rename",
+                json!({"worktree": wt, "name": "side", "new_name": main}),
+                "already exists",
+            ),
+            (
+                "branch-delete",
+                json!({"worktree": wt, "name": main}),
+                "is the current branch of this worktree",
+            ),
+            (
+                "branch-delete",
+                json!({"worktree": wt, "name": "side", "force": true}),
+                "expected_hash must be",
+            ),
+            (
+                "branch-delete",
+                json!({"worktree": wt, "name": "side", "force": true, "expected_hash": "abc1234"}),
+                "expected_hash must be",
+            ),
+            (
+                "branch-delete",
+                json!({"worktree": wt, "name": "side", "force": true, "expected_hash": head.to_uppercase()}),
+                "expected_hash must be",
+            ),
+            ("stash-push", json!({}), "worktree is required"),
+            (
+                "stash-push",
+                json!({"worktree": wt, "message": "a\nb"}),
+                "one line",
+            ),
+            (
+                "stash-push",
+                json!({"worktree": wt, "message": "x".repeat(201)}),
+                "200",
+            ),
+            (
+                "stash-apply",
+                json!({"worktree": wt, "hash": "h"}),
+                "index is required",
+            ),
+            (
+                "stash-pop",
+                json!({"worktree": wt, "index": 0}),
+                "hash is required",
+            ),
+            (
+                "stash-drop",
+                json!({"index": 0, "hash": "h"}),
+                "worktree is required",
+            ),
+        ];
+        for (route, body, want) in cases {
+            let (status, code, msg) = ref_err(&state, id, route, body.clone()).await;
+            assert_eq!(
+                status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{route} {body}: {msg}"
+            );
+            assert_eq!(code, "validation");
+            assert!(msg.contains(want), "{route} {body}: {msg}");
+        }
+        assert_eq!(ref_branches(&state, id, None).await, before);
+        assert_eq!(gco(&root, &["rev-parse", "HEAD"]), head);
+        // A dash-named existing branch cannot be switched, renamed or deleted here.
+        git_in(&root, &["update-ref", "refs/heads/-dash", "HEAD"]);
+        // The update was made behind the server's back: drop its 5 s cache.
+        state.git_branches_cache.lock().unwrap().clear();
+        for (route, body) in [
+            ("branch-switch", json!({"worktree": wt, "name": "-dash"})),
+            (
+                "branch-rename",
+                json!({"worktree": wt, "name": "-dash", "new_name": "ok"}),
+            ),
+            ("branch-delete", json!({"worktree": wt, "name": "-dash"})),
+        ] {
+            let (status, _, msg) = ref_err(&state, id, route, body).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+            assert!(msg.contains("rename it in the terminal"), "{msg}");
+        }
+        assert!(
+            ref_branches(&state, id, None)
+                .await
+                .contains(&"-dash".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn git_ref_routes_404_unknown_things_and_409_stale_or_failed_ones() {
+        let (_db, state) = test_state();
+        let (tmp, root, id, wt) = git_commit_fixture(&state);
+        git_in(&root, &["branch", "side"]);
+        let elsewhere = tmp.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let head = gco(&root, &["rev-parse", "HEAD"]);
+        let ghost = "0".repeat(40);
+        let not_found: Vec<(&str, serde_json::Value)> = vec![
+            (
+                "branch-create",
+                json!({"worktree": elsewhere.to_str().unwrap(), "name": "n"}),
+            ),
+            (
+                "branch-create",
+                json!({"worktree": wt, "repo": "nope", "name": "n"}),
+            ),
+            (
+                "branch-create",
+                json!({"worktree": wt, "repo": "..", "name": "n"}),
+            ),
+            (
+                "branch-create",
+                json!({"worktree": wt, "name": "n", "from_commit": ghost}),
+            ),
+            (
+                "branch-create",
+                json!({"worktree": wt, "name": "n", "from_remote": "origin/none"}),
+            ),
+            (
+                "branch-create",
+                json!({"worktree": wt, "name": "n", "from_remote": "side"}),
+            ),
+            ("branch-switch", json!({"worktree": wt, "name": "ghost"})),
+            (
+                "branch-switch",
+                json!({"worktree": wt, "name": "origin/ghost"}),
+            ),
+            (
+                "branch-rename",
+                json!({"worktree": wt, "name": "ghost", "new_name": "n"}),
+            ),
+            ("branch-delete", json!({"worktree": wt, "name": "ghost"})),
+            (
+                "stash-push",
+                json!({"worktree": elsewhere.to_str().unwrap()}),
+            ),
+            (
+                "stash-apply",
+                json!({"worktree": wt, "index": 0, "hash": head}),
+            ),
+            (
+                "stash-pop",
+                json!({"worktree": wt, "index": 3, "hash": head}),
+            ),
+            (
+                "stash-drop",
+                json!({"worktree": wt, "index": 0, "hash": head}),
+            ),
+        ];
+        for (route, body) in not_found {
+            let (status, code, msg) = ref_err(&state, id, route, body.clone()).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{route} {body}: {msg}");
+            assert_eq!(code, "not_found");
+        }
+        // 409: a stash list that changed.
+        std::fs::write(root.join("base.txt"), "one\n").unwrap();
+        ref_post(&state, id, "stash-push", json!({"worktree": wt}))
+            .await
+            .unwrap();
+        for (route, word) in [
+            ("stash-apply", "applied"),
+            ("stash-pop", "applied"),
+            ("stash-drop", "dropped"),
+        ] {
+            let (status, code, msg) = ref_err(
+                &state,
+                id,
+                route,
+                json!({"worktree": wt, "index": 0, "hash": ghost}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CONFLICT, "{route}");
+            assert_eq!(code, "conflict");
+            assert_eq!(
+                msg,
+                format!(
+                    "The stash list changed since it was shown. It was reloaded; nothing was {word}."
+                )
+            );
+        }
+        assert_eq!(ref_stashes(&state, id).await.len(), 1);
+        // 409: a delete whose branch moved; the branch survives.
+        git_in(&root, &["switch", "-q", "side"]);
+        git_in(&root, &["commit", "-q", "--allow-empty", "-m", "moved"]);
+        git_in(&root, &["switch", "-q", "-"]);
+        let (status, _, msg) = ref_err(
+            &state,
+            id,
+            "branch-delete",
+            json!({"worktree": wt, "name": "side", "force": true, "expected_hash": head}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(
+            msg,
+            "side moved since the delete was confirmed. It was reloaded; nothing was deleted."
+        );
+        assert!(
+            ref_branches(&state, id, None)
+                .await
+                .contains(&"side".to_string())
+        );
+        // 409: git itself refusing (a dirty file the switch would overwrite).
+        std::fs::write(root.join("base.txt"), "dirty\n").unwrap();
+        git_in(&root, &["switch", "-q", "side"]);
+        git_in(&root, &["commit", "-q", "-am", "side edit"]);
+        git_in(&root, &["switch", "-q", "-"]);
+        std::fs::write(root.join("base.txt"), "dirty\n").unwrap();
+        let (status, _, msg) = ref_err(
+            &state,
+            id,
+            "branch-switch",
+            json!({"worktree": wt, "name": "side"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(msg.contains("overwritten"), "{msg}");
+        assert_eq!(
+            std::fs::read_to_string(root.join("base.txt")).unwrap(),
+            "dirty\n"
+        );
+        // 409 caches: the failed attempt still dropped them (view is fresh).
+        std::fs::write(root.join("fresh.txt"), "f\n").unwrap();
+        assert!(
+            git_get_files(&state, id)
+                .await
+                .contains(&"?? fresh.txt".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn git_ref_routes_refuse_switch_and_stash_during_an_operation() {
+        let (_db, state) = test_state();
+        let (_tmp, root, id, wt) = git_commit_fixture(&state);
+        let main = ref_branch(&root);
+        git_in(&root, &["branch", "side"]);
+        git_in(&root, &["switch", "-q", "side"]);
+        std::fs::write(root.join("base.txt"), "side\n").unwrap();
+        git_in(&root, &["commit", "-q", "-am", "side"]);
+        git_in(&root, &["switch", "-q", &main]);
+        std::fs::write(root.join("base.txt"), "main\n").unwrap();
+        git_in(&root, &["commit", "-q", "-am", "main"]);
+        let _ = std::process::Command::new("git")
+            .args(["-C", root.to_str().unwrap(), "merge", "side"])
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .unwrap();
+        let head = gco(&root, &["rev-parse", "HEAD"]);
+        for (route, body) in [
+            ("branch-switch", json!({"worktree": wt, "name": "side"})),
+            (
+                "branch-create",
+                json!({"worktree": wt, "name": "n", "switch": true}),
+            ),
+            ("stash-push", json!({"worktree": wt})),
+            (
+                "stash-apply",
+                json!({"worktree": wt, "index": 0, "hash": head}),
+            ),
+            (
+                "stash-pop",
+                json!({"worktree": wt, "index": 0, "hash": head}),
+            ),
+        ] {
+            let (status, code, msg) = ref_err(&state, id, route, body).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{route}: {msg}");
+            assert_eq!(code, "validation");
+            assert!(
+                msg.starts_with("A merge is in progress in this worktree; ")
+                    && msg.ends_with("is not available. Finish or abort it in the terminal.")
+                    || msg.contains("not found"),
+                "{route}: {msg}"
+            );
+        }
+        // Creating without a switch is still allowed.
+        ref_post(
+            &state,
+            id,
+            "branch-create",
+            json!({"worktree": wt, "name": "n"}),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn git_ref_routes_need_the_agent_gate() {
+        let (_db, state) = test_state();
+        let (_tmp, root, id, wt) = git_commit_fixture(&state);
+        let head = gco(&root, &["rev-parse", "HEAD"]);
+        let lan: SocketAddr = "192.168.1.9:4000".parse().unwrap();
+        let bodies = [
+            json!({"worktree": wt, "name": "gate"}),
+            json!({"worktree": wt, "name": "gate"}),
+            json!({"worktree": wt, "name": "gate", "new_name": "gate2"}),
+            json!({"worktree": wt, "name": "gate"}),
+            json!({"worktree": wt}),
+            json!({"worktree": wt, "index": 0, "hash": head}),
+            json!({"worktree": wt, "index": 0, "hash": head}),
+            json!({"worktree": wt, "index": 0, "hash": head}),
+        ];
+        for (route, body) in REF_ROUTES.iter().zip(bodies) {
+            let cases = [
+                ("non-loopback peer", lan, hdrs(Some("localhost:0"), None)),
+                (
+                    "foreign Origin",
+                    loopback(),
+                    hdrs(Some("localhost:0"), Some("http://evil.example")),
+                ),
+                ("foreign Host", loopback(), hdrs(Some("evil.example"), None)),
+                ("no Host", loopback(), hdrs(None, None)),
+            ];
+            for (what, addr, h) in cases {
+                let e = ref_post_as(&state, id, route, body.clone(), addr, h)
+                    .await
+                    .err()
+                    .unwrap_or_else(|| panic!("{route}: {what} was let through"));
+                assert_eq!(e.status, StatusCode::FORBIDDEN, "{route}: {what}");
+            }
+        }
+        assert_eq!(ref_branches(&state, id, None).await.len(), 1);
+        assert!(ref_stashes(&state, id).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn git_ref_writes_in_a_linked_worktree_leave_the_main_checkout_alone() {
+        let (_db, state) = test_state();
+        let (tmp, root, id, main_wt) = git_commit_fixture(&state);
+        let main = ref_branch(&root);
+        let linked = tmp.path().join("linked");
+        git_in(
+            &root,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feat",
+                linked.to_str().unwrap(),
+            ],
+        );
+        git_in(&root, &["branch", "spare"]);
+        let linked_wt = git::worktrees_of(root.to_str().unwrap())
+            .unwrap()
+            .into_iter()
+            .map(|w| w.path)
+            .find(|p| *p != main_wt)
+            .unwrap();
+        // Switch in the linked worktree; the main checkout stays.
+        let r = ref_post(
+            &state,
+            id,
+            "branch-switch",
+            json!({"worktree": linked_wt, "name": "spare"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(r["view"]["status"]["branch"], "spare");
+        assert_eq!(
+            gco(&linked, &["rev-parse", "--abbrev-ref", "HEAD"]),
+            "spare"
+        );
+        assert_eq!(ref_branch(&root), main);
+        // A branch held by the other worktree can be neither switched to,
+        // renamed nor deleted from this one, and the listing says where.
+        for (route, body) in [
+            (
+                "branch-switch",
+                json!({"worktree": linked_wt, "name": main}),
+            ),
+            (
+                "branch-rename",
+                json!({"worktree": linked_wt, "name": main, "new_name": "x"}),
+            ),
+            (
+                "branch-delete",
+                json!({"worktree": linked_wt, "name": main}),
+            ),
+        ] {
+            let (status, _, msg) = ref_err(&state, id, route, body).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{route}");
+            assert!(msg.contains("is checked out in"), "{msg}");
+        }
+        // Stash in the linked worktree touches only its files.
+        std::fs::write(root.join("main-dirty.txt"), "m\n").unwrap();
+        std::fs::write(linked.join("base.txt"), "linked dirty\n").unwrap();
+        let r = ref_post(&state, id, "stash-push", json!({"worktree": linked_wt}))
+            .await
+            .unwrap();
+        assert!(r["notice"].is_null());
+        assert!(root.join("main-dirty.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(linked.join("base.txt")).unwrap(),
+            "base\n"
+        );
+        // The branch list read from each worktree marks its own HEAD.
+        let a = ref_branches(&state, id, Some(&linked_wt)).await;
+        assert!(a.contains(&"spare".to_string()) && a.contains(&main));
+        // Create-with-switch in the linked worktree.
+        ref_post(
+            &state,
+            id,
+            "branch-create",
+            json!({"worktree": linked_wt, "name": "made", "switch": true}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(gco(&linked, &["rev-parse", "--abbrev-ref", "HEAD"]), "made");
+        assert_eq!(ref_branch(&root), main);
+    }
+
+    #[tokio::test]
+    async fn git_ref_stash_routes_refuse_a_shifted_index_and_apply_by_hash() {
+        let (_db, state) = test_state();
+        let (tmp, root, id, wt) = git_commit_fixture(&state);
+        let linked = tmp.path().join("linked");
+        git_in(
+            &root,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feat",
+                linked.to_str().unwrap(),
+            ],
+        );
+        std::fs::write(root.join("base.txt"), "mine\n").unwrap();
+        ref_post(
+            &state,
+            id,
+            "stash-push",
+            json!({"worktree": wt, "message": "mine"}),
+        )
+        .await
+        .unwrap();
+        let shown = ref_stashes(&state, id).await[0].clone();
+        // A sibling worktree pushes its own stash: our entry is now index 1.
+        std::fs::write(linked.join("base.txt"), "theirs\n").unwrap();
+        git_in(&linked, &["stash", "push", "-q", "-m", "theirs"]);
+        state.git_stashes_cache.lock().unwrap().clear();
+        for route in ["stash-apply", "stash-pop", "stash-drop"] {
+            let (status, _, msg) = ref_err(
+                &state,
+                id,
+                route,
+                json!({"worktree": wt, "index": 0, "hash": shown["hash"]}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CONFLICT, "{route}");
+            assert!(msg.contains("The stash list changed"), "{msg}");
+        }
+        assert_eq!(ref_stashes(&state, id).await.len(), 2);
+        let r = ref_post(
+            &state,
+            id,
+            "stash-pop",
+            json!({"worktree": wt, "index": 1, "hash": shown["hash"]}),
+        )
+        .await
+        .unwrap();
+        assert!(r["notice"].is_null());
+        assert_eq!(
+            std::fs::read_to_string(root.join("base.txt")).unwrap(),
+            "mine\n"
+        );
+        let left = ref_stashes(&state, id).await;
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0]["message"], "theirs");
     }
 
     #[tokio::test]

@@ -1,10 +1,12 @@
-import { useEffect, useId, useRef } from 'react'
+import { useId, useRef } from 'react'
 import { createPortal } from 'react-dom'
-import type { DiscardPlan } from '../gitActions'
+import type { ConfirmPlan } from '../gitActions'
+import { useModal } from './useModal'
 
 /**
  * The modal every destructive working-tree action goes through (naru task
- * 2738). All text comes from `discardPlan` (gitActions.ts); this only lays it
+ * 2738) and every branch or stash action that loses something (task 2741).
+ * All text comes from the plan builders in gitActions.ts; this only lays it
  * out. Focus starts on Cancel and is trapped inside the dialog, Esc, the scrim
  * and Cancel all say no, and there is no "don't ask again". The backdrop
  * carries `.create-task-backdrop` so `shouldIgnoreShortcut()` stands down for
@@ -16,7 +18,7 @@ export function GitConfirmDialog({
   plan,
   onResolve,
 }: {
-  plan: DiscardPlan
+  plan: ConfirmPlan
   onResolve: (ok: boolean) => void
 }) {
   const boxRef = useRef<HTMLDivElement>(null)
@@ -24,49 +26,7 @@ export function GitConfirmDialog({
   const titleId = useId()
   const bodyId = useId()
 
-  useEffect(() => {
-    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null
-    cancelRef.current?.focus()
-    return () => {
-      // The opener may have been unmounted by the refetch; then focus stays
-      // wherever the browser puts it.
-      if (opener?.isConnected) opener.focus()
-    }
-  }, [])
-
-  useEffect(() => {
-    function onKeyDown(e: KeyboardEvent) {
-      if (e.key === 'Escape') {
-        // Marked as well as stopped, like CreateTaskModal: the live
-        // conversation's Escape stands down for one another listener claimed.
-        e.preventDefault()
-        e.stopPropagation()
-        onResolve(false)
-      } else if (e.key === 'Tab') {
-        const box = boxRef.current
-        if (!box) return
-        const items = Array.from(
-          box.querySelectorAll<HTMLElement>('button:not(:disabled), [tabindex="0"]'),
-        )
-        if (items.length === 0) return
-        const first = items[0]
-        const last = items[items.length - 1]
-        const at = document.activeElement
-        if (!box.contains(at)) {
-          e.preventDefault()
-          first.focus()
-        } else if (e.shiftKey && at === first) {
-          e.preventDefault()
-          last.focus()
-        } else if (!e.shiftKey && at === last) {
-          e.preventDefault()
-          first.focus()
-        }
-      }
-    }
-    window.addEventListener('keydown', onKeyDown, true)
-    return () => window.removeEventListener('keydown', onKeyDown, true)
-  }, [onResolve])
+  useModal({ boxRef, initial: cancelRef, onEscape: () => onResolve(false) })
 
   return createPortal(
     <div
@@ -93,22 +53,26 @@ export function GitConfirmDialog({
           <p className="git-confirm-target">
             In worktree <code>{plan.worktree}</code> on branch <code>{plan.branch}</code>
           </p>
-          <ul
-            className={`git-confirm-paths${plan.mono ? ' git-confirm-lines' : ''}`}
-            tabIndex={0}
-            aria-label={plan.listLabel ?? 'Affected paths'}
-          >
-            {plan.listed.map((p, i) => (
-              <li key={`${i}:${p}`}>{p}</li>
-            ))}
-            {plan.more > 0 && <li className="muted">and {plan.more} more</li>}
-          </ul>
+          {(plan.listed.length > 0 || plan.more > 0) && (
+            <ul
+              className={`git-confirm-paths${plan.mono ? ' git-confirm-lines' : ''}`}
+              tabIndex={0}
+              aria-label={plan.listLabel ?? 'Affected paths'}
+            >
+              {plan.listed.map((p, i) => (
+                <li key={`${i}:${p}`}>{p}</li>
+              ))}
+              {plan.more > 0 && <li className="muted">{plan.moreLabel ?? `and ${plan.more} more`}</li>}
+            </ul>
+          )}
           {plan.consequences.map((c) => (
             <p key={c} className="git-confirm-consequence">
               {c}
             </p>
           ))}
-          <p className="git-confirm-irreversible">{plan.irreversible}</p>
+          {plan.irreversible !== undefined && (
+            <p className="git-confirm-irreversible">{plan.irreversible}</p>
+          )}
         </div>
         <div className="git-confirm-buttons">
           <button

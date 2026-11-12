@@ -266,6 +266,32 @@ raw GET "/api/projects/$PROJ/git/commit"
 api 200 GET "/api/projects/$PROJ/git/commit-info"
 ok "git commit route: foreign Origin/Host 403, JSON required, worktree required 422, no folder 404, never a GET; commit-info 200"
 
+# ---- Git branch and stash routes (naru task 2741): the same gate and ladder ----
+# One body per route, WITHOUT the worktree (422) and WITH a worktree no project
+# lists (404, and nothing reaches git).
+for op in branch-create branch-switch branch-rename branch-delete stash-push stash-apply stash-pop stash-drop; do
+  case "$op" in
+    branch-create|branch-switch|branch-delete) rest='"name":"b"' ;;
+    branch-rename) rest='"name":"b","new_name":"c"' ;;
+    stash-push) rest='"message":"m"' ;;
+    *) rest='"index":0,"hash":"h"' ;;
+  esac
+  raw POST "/api/projects/$PROJ/git/$op" -H 'Origin: http://evil.example' -H 'Content-Type: application/json' \
+    -d "{\"worktree\":\"/x\",$rest}"
+  [ "$STATUS" = "403" ] || fail "git $op with a foreign Origin: expected 403, got $STATUS ($BODY)"
+  raw POST "/api/projects/$PROJ/git/$op" -H 'Host: evil.example' -H 'Content-Type: application/json' \
+    -d "{\"worktree\":\"/x\",$rest}"
+  [ "$STATUS" = "403" ] || fail "git $op with a foreign Host: expected 403, got $STATUS"
+  raw POST "/api/projects/$PROJ/git/$op" -d 'worktree=/x'
+  [ "$STATUS" = "415" ] || fail "git $op without JSON Content-Type: expected 415, got $STATUS"
+  api 422 POST "/api/projects/$PROJ/git/$op" "{$rest}"
+  [ "$(jqb .error.code)" = "validation" ] || fail "git $op without a worktree: error.code ($BODY)"
+  api 404 POST "/api/projects/$PROJ/git/$op" "{\"worktree\":\"/x\",$rest}"
+  raw GET "/api/projects/$PROJ/git/$op"
+  [ "$STATUS" = "405" ] || fail "git $op must not answer a GET, got $STATUS"
+done
+ok "git branch/stash routes: foreign Origin/Host 403, JSON required, worktree required 422, no folder 404, never a GET"
+
 # ---- Content-Type gate (cross-site form posts) ----
 
 # No Content-Type at all.

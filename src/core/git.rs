@@ -1639,28 +1639,61 @@ pub fn commit(dir: &str, message: &str, amend: bool) -> Result<(), String> {
 
 /// `git -C <dir> commit --cleanup=verbatim -F - [--amend]`, message on stdin.
 /// Hooks run normally (no `--no-verify`), nothing is allowed empty, no
-/// pathspec. The child leads its own process group: past `timeout` the group
-/// is sent TERM (git removes its lock files); if git is still running after
-/// [`COMMIT_GRACE`] the group is KILLed; if git exited in time nothing more
-/// is signalled, so a hook child that ignores TERM may linger. `Err` is git's stderr then stdout
-/// (hooks print to either), lossy UTF-8, trimmed, the last
-/// [`COMMIT_ERR_CAP`] bytes kept. Never retried; `index.lock` is never touched.
+/// pathspec. Runs through [`run_bounded`], whose doc has the timeout, output
+/// and process-group rules.
 fn commit_within(dir: &str, message: &str, amend: bool, timeout: Duration) -> Result<(), String> {
+    let mut args = vec!["commit", "--cleanup=verbatim", "-F", "-"];
+    if amend {
+        args.push("--amend");
+    }
+    run_bounded(
+        dir,
+        &args,
+        Some(message.as_bytes()),
+        &[],
+        timeout,
+        "git commit",
+    )
+}
+
+/// The one bounded, output-capturing git write (commit and the branch/stash
+/// writes of naru task 2741): `git -C <dir> <args>`, optional `stdin` fed from
+/// a thread, `GIT_TERMINAL_PROMPT=0` plus `env`, and NOT
+/// `GIT_LITERAL_PATHSPECS` (hooks inherit the environment). The child leads
+/// its own process group: past `timeout` the group is sent TERM (git removes
+/// its lock files); if git is still running after [`COMMIT_GRACE`] the group is
+/// KILLed; if git exited in time nothing more is signalled, so a hook child
+/// that ignores TERM may linger. `Err` is git's stderr then stdout (hooks and
+/// `stash pop` print to either), lossy UTF-8, trimmed, the last
+/// [`COMMIT_ERR_CAP`] bytes kept. `label` names the command in the timeout and
+/// empty-output messages. Never retried; `index.lock` is never touched.
+fn run_bounded(
+    dir: &str,
+    args: &[&str],
+    stdin: Option<&[u8]>,
+    env: &[(&str, &str)],
+    timeout: Duration,
+    label: &str,
+) -> Result<(), String> {
     use std::io::Write;
     use std::sync::{Arc, Mutex, mpsc};
     let mut cmd = Command::new("git");
-    cmd.args(["-C", dir, "commit", "--cleanup=verbatim", "-F", "-"]);
-    if amend {
-        cmd.arg("--amend");
-    }
+    cmd.args(["-C", dir]).args(args);
     cmd.env("GIT_TERMINAL_PROMPT", "0")
-        .stdin(Stdio::piped())
+        .stdin(if stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
     crate::core::proc::isolate(&mut cmd);
     let mut child = cmd.spawn().map_err(|e| format!("could not run git: {e}"))?;
-    if let Some(mut pipe) = child.stdin.take() {
-        let data = message.as_bytes().to_vec();
+    if let (Some(mut pipe), Some(data)) = (child.stdin.take(), stdin) {
+        let data = data.to_vec();
         // A thread, so a git that fills a pipe first cannot deadlock us; a
         // git that exits early just closes the pipe.
         std::thread::spawn(move || {
@@ -1766,7 +1799,7 @@ fn commit_within(dir: &str, message: &str, amend: bool, timeout: Duration) -> Re
     }
     if timed_out {
         let head = format!(
-            "git commit did not finish within {} s and was stopped. Nothing was retried.",
+            "{label} did not finish within {} s and was stopped. Nothing was retried.",
             timeout.as_secs()
         );
         return Err(if out.is_empty() {
@@ -1777,11 +1810,490 @@ fn commit_within(dir: &str, message: &str, amend: bool, timeout: Duration) -> Re
     }
     if out.is_empty() {
         return Err(match status {
-            Some(s) => format!("git commit failed ({s})"),
-            None => "git commit failed".to_string(),
+            Some(s) => format!("{label} failed ({s})"),
+            None => format!("{label} failed"),
         });
     }
     Err(out)
+}
+
+// ---- Branch and stash writes (naru task 2741) -----------------------------
+//
+// Eight writes: create, switch, rename and delete a branch; push, apply, pop
+// and drop a stash. Every existing branch name is a byte-equal member of a
+// FRESH `branches_of`, never a client string, and an existing name beginning
+// with `-` is refused, so nothing handed to git can be read as a flag. A write
+// acts only in the directory it is given (a worktree). Never a push, pull,
+// fetch, merge, rebase, reset, forced checkout or forced switch; never a retry;
+// `index.lock` is never touched.
+
+/// Why a branch or stash write did not run, or did not succeed. The API maps
+/// `Validation` to 422, `NotFound` to 404 and `Conflict` to 409; the first two
+/// mean no git write was attempted.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RefErr {
+    Validation(String),
+    NotFound(String),
+    Conflict(String),
+}
+
+fn rv(message: impl Into<String>) -> RefErr {
+    RefErr::Validation(message.into())
+}
+
+/// Environment for these writes on top of `GIT_TERMINAL_PROMPT=0`: `LC_ALL=C`
+/// pins git's wording (the "not fully merged" refusal is matched by text).
+/// `GIT_LITERAL_PATHSPECS` is deliberately NOT set: `switch` runs post-checkout
+/// hooks, which inherit the environment.
+const REF_WRITE_ENV: &[(&str, &str)] = &[("LC_ALL", "C")];
+
+/// The one place a branch or stash write spawns git: [`run_bounded`] (stdout
+/// and stderr both captured, 120 s timeout over the whole process group), so a
+/// `stash pop` conflict printed on stdout reaches the error text and a hung
+/// hook cannot hang the request. `Err` is git's stderr then stdout, trimmed.
+pub fn run_ref_write(dir: &str, args: &[&str]) -> Result<(), String> {
+    run_ref_write_within(dir, args, COMMIT_TIMEOUT)
+}
+
+fn run_ref_write_within(dir: &str, args: &[&str], timeout: Duration) -> Result<(), String> {
+    let label = format!("git {}", args.first().copied().unwrap_or(""));
+    run_bounded(dir, args, None, REF_WRITE_ENV, timeout, &label)
+}
+
+fn fresh_branches(dir: &str) -> Result<Vec<GitBranch>, RefErr> {
+    branches_of(dir).ok_or_else(|| RefErr::NotFound(format!("not a git repo: {dir}")))
+}
+
+/// The local branch row named `name`, byte-equal; 404 when absent, 422 when its
+/// name begins with `-`.
+fn local_row<'a>(rows: &'a [GitBranch], name: &str) -> Result<&'a GitBranch, RefErr> {
+    let row = rows
+        .iter()
+        .find(|b| b.kind == GitBranchKind::Local && b.name == name)
+        .ok_or_else(|| RefErr::NotFound(format!("branch not found: {name}")))?;
+    if name.starts_with('-') {
+        return Err(rv(format!(
+            "{name} begins with '-'; rename it in the terminal"
+        )));
+    }
+    Ok(row)
+}
+
+/// Where another worktree has the row checked out (`is_head` is this one).
+fn held_elsewhere(b: &GitBranch) -> Option<&str> {
+    b.worktree.as_deref().filter(|_| !b.is_head)
+}
+
+/// 422 while a merge, rebase, cherry-pick or revert is in progress in `dir`.
+fn refuse_in_operation(dir: &str, action: &str) -> Result<(), RefErr> {
+    let view = view_of(dir).ok_or_else(|| RefErr::NotFound(format!("not a git repo: {dir}")))?;
+    match view.operation {
+        Some(op) => Err(rv(format!(
+            "A {op} is in progress in this worktree; {action} is not available. Finish or abort it in the terminal."
+        ))),
+        None => Ok(()),
+    }
+}
+
+/// A name `git branch` could create: not empty, at most 255 bytes, no leading
+/// `-`, no control character, `git check-ref-format --branch` exits 0 AND
+/// prints the input back unchanged (it expands `@{-1}` and friends; an
+/// expansion is a refusal), and neither a local branch nor a tag of that name
+/// exists. Unicode and `/` are fine.
+pub fn valid_new_branch_name(dir: &str, name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("branch name is empty".into());
+    }
+    if name.len() > 255 {
+        return Err("branch name is longer than 255 bytes".into());
+    }
+    if name.starts_with('-') {
+        return Err(format!(
+            "{name} is not a valid branch name: it begins with '-'"
+        ));
+    }
+    if name == "@" || name.chars().any(char::is_control) {
+        return Err(format!("{name:?} is not a valid branch name"));
+    }
+    match probe(dir, &["check-ref-format", "--branch", name]) {
+        Some((0, out)) if out == name => {}
+        _ => return Err(format!("{name} is not a valid branch name")),
+    }
+    let rows = branches_of(dir).ok_or_else(|| format!("not a git repo: {dir}"))?;
+    if rows
+        .iter()
+        .any(|b| b.kind == GitBranchKind::Local && b.name == name)
+    {
+        return Err(format!("a branch named {name} already exists"));
+    }
+    let tag = format!("refs/tags/{name}");
+    if probe(dir, &["show-ref", "--verify", "-q", &tag]).is_some_and(|(c, _)| c == 0) {
+        return Err(format!("a tag named {name} already exists"));
+    }
+    Ok(())
+}
+
+/// `refs/stash`'s tip and the number of stash entries (shared by every
+/// worktree of the repo).
+fn stash_state(dir: &str) -> (Option<String>, usize) {
+    (
+        read_git_line(dir, &["rev-parse", "--verify", "-q", "refs/stash"]),
+        stashes_of(dir).map_or(0, |s| s.len()),
+    )
+}
+
+/// True when the stash list moved since `before` AND the newest entry is ours:
+/// its first parent is this worktree's HEAD and, with `marker`, its message
+/// carries it. A sibling worktree stashing at the same moment is not mistaken
+/// for us unless it sits on the very same HEAD commit (and, for a push without
+/// a marker, that residual window remains).
+fn own_stash_made(dir: &str, before: &(Option<String>, usize), marker: Option<&str>) -> bool {
+    let after = stash_state(dir);
+    if after == *before {
+        return false;
+    }
+    let Some(newest) = stashes_of(dir).and_then(|l| l.into_iter().next()) else {
+        return false;
+    };
+    let parent = read_git_line(
+        dir,
+        &["rev-parse", "--verify", "-q", &format!("{}^1", newest.hash)],
+    );
+    let head = head_of(dir).map(|h| h.0);
+    parent.is_some() && parent == head && marker.is_none_or(|m| newest.message.contains(m))
+}
+
+/// A failed `git stash push` can still have saved its entry (its cleanup step
+/// failed after the commit was made): say so, so the work is never invisible.
+fn saved_note(err: String, saved: bool) -> String {
+    if saved {
+        format!("{err}\nA stash entry was saved (stash@{{0}}); your changes are in it.")
+    } else {
+        err
+    }
+}
+
+/// `git branch <name> [<start>]`, or with `switch` one `git switch -c <name>
+/// [<start>]` (one call, so a refused switch creates nothing). The start is the
+/// worktree's HEAD, `from_commit` (a hash that must resolve to a commit; git
+/// gets the FULL hash), or `from_remote` (byte-equal to a remote-tracking row of
+/// a fresh listing; git gets `refs/remotes/<name>`). Neither `--track` nor
+/// `--no-track` is passed, so git's own defaults apply (tracking config only).
+pub fn create_branch(
+    dir: &str,
+    name: &str,
+    from_commit: Option<&str>,
+    from_remote: Option<&str>,
+    switch: bool,
+) -> Result<Option<String>, RefErr> {
+    if from_commit.is_some() && from_remote.is_some() {
+        return Err(rv("give at most one of from_commit and from_remote"));
+    }
+    if let Some(c) = from_commit
+        && !is_full_hash(c)
+    {
+        return Err(rv("from_commit must be a full lowercase commit hash"));
+    }
+    valid_new_branch_name(dir, name).map_err(rv)?;
+    let start = if let Some(c) = from_commit {
+        let spec = format!("{c}^{{commit}}");
+        let full = read_git_line(dir, &["rev-parse", "--verify", "-q", &spec])
+            .ok_or_else(|| RefErr::NotFound(format!("commit not found: {c}")))?;
+        Some(full)
+    } else if let Some(r) = from_remote {
+        let rows = fresh_branches(dir)?;
+        if !rows
+            .iter()
+            .any(|b| b.kind == GitBranchKind::Remote && b.name == r)
+        {
+            return Err(RefErr::NotFound(format!("remote branch not found: {r}")));
+        }
+        Some(format!("refs/remotes/{r}"))
+    } else {
+        None
+    };
+    if switch {
+        refuse_in_operation(dir, "switching branches")?;
+    }
+    let mut args = if switch {
+        vec!["switch", "-c", name]
+    } else {
+        vec!["branch", name]
+    };
+    if let Some(s) = start.as_deref() {
+        args.push(s);
+    }
+    run_ref_write(dir, &args).map_err(RefErr::Conflict)?;
+    Ok(None)
+}
+
+/// `git switch --no-guess <name>` in `dir`, never forced. With `stash`, first
+/// `git stash push --include-untracked -m "naru: before switching to <name>"`;
+/// when that really made an entry and the switch then fails, the error says so
+/// and that nothing was restored.
+pub fn switch_branch(dir: &str, name: &str, stash: bool) -> Result<Option<String>, RefErr> {
+    let rows = fresh_branches(dir)?;
+    let row = local_row(&rows, name)?;
+    if row.is_head {
+        return Err(rv(format!("already on {name}")));
+    }
+    if let Some(path) = held_elsewhere(row) {
+        return Err(rv(format!("{name} is checked out in {path}")));
+    }
+    refuse_in_operation(dir, "switching branches")?;
+    let mut stashed = false;
+    if stash {
+        let before = stash_state(dir);
+        let message = format!("naru: before switching to {name}");
+        let pushed = run_ref_write(
+            dir,
+            &["stash", "push", "--include-untracked", "-m", &message, "--"],
+        );
+        stashed = own_stash_made(dir, &before, Some(&message));
+        if let Err(e) = pushed {
+            return Err(RefErr::Conflict(saved_note(e, stashed)));
+        }
+    }
+    match run_ref_write(dir, &["switch", "--no-guess", name]) {
+        Ok(()) => Ok(stashed.then(|| "Stashed your changes as stash@{0} before switching.".into())),
+        Err(e) if stashed => Err(RefErr::Conflict(format!(
+            "Your changes were stashed (stash@{{0}}) and were NOT restored; the switch failed: {e}"
+        ))),
+        Err(e) => Err(RefErr::Conflict(e)),
+    }
+}
+
+/// `git branch -m <name> <new_name>`; refused while another worktree has
+/// `name` checked out. This worktree's own current branch may be renamed.
+pub fn rename_branch(dir: &str, name: &str, new_name: &str) -> Result<Option<String>, RefErr> {
+    let rows = fresh_branches(dir)?;
+    let row = local_row(&rows, name)?;
+    if let Some(path) = held_elsewhere(row) {
+        return Err(rv(format!("{name} is checked out in {path}")));
+    }
+    valid_new_branch_name(dir, new_name).map_err(rv)?;
+    run_ref_write(dir, &["branch", "-m", name, new_name]).map_err(RefErr::Conflict)?;
+    Ok(None)
+}
+
+/// What [`delete_branch`] found; the API adds the fresh view.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeleteOutcome {
+    pub deleted: bool,
+    pub refusal: Option<String>,
+    pub hash: String,
+    pub unmerged: Vec<GitCommit>,
+    pub unmerged_more: bool,
+}
+
+/// At most this many unmerged commits are listed on a refusal.
+const UNMERGED_CAP: usize = 50;
+
+/// True for exactly 40 or 64 lowercase hex digits.
+pub fn is_full_hash(h: &str) -> bool {
+    matches!(h.len(), 40 | 64) && h.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Commits reachable from `refs/heads/<name>` and from no other ref (nor any
+/// worktree's HEAD): `git log <branch> --not --exclude=<branch> --all`.
+fn unmerged_of(dir: &str, name: &str) -> (Vec<GitCommit>, bool) {
+    let full = format!("refs/heads/{name}");
+    let extra = [
+        full.clone(),
+        "--not".to_string(),
+        format!("--exclude={full}"),
+        "--all".to_string(),
+    ];
+    let mut commits = run_log(dir, None, &extra, UNMERGED_CAP + 1, true);
+    let more = commits.len() > UNMERGED_CAP;
+    commits.truncate(UNMERGED_CAP);
+    (commits, more)
+}
+
+/// Deletes the local branch `name`. Without `force`: `git branch -d`; when git
+/// refuses as "not fully merged" that is NOT an error: the outcome carries its
+/// text, the tip hash and the commits only this branch holds. With `force`:
+/// `expected_hash` (a full hash) must equal the branch's current tip, else
+/// 409 and nothing is deleted; then `git branch -D`. A branch checked out in
+/// any worktree is refused.
+pub fn delete_branch(
+    dir: &str,
+    name: &str,
+    force: bool,
+    expected_hash: Option<&str>,
+) -> Result<DeleteOutcome, RefErr> {
+    if force && !expected_hash.is_some_and(is_full_hash) {
+        return Err(rv("expected_hash must be a full lowercase commit hash"));
+    }
+    let rows = fresh_branches(dir)?;
+    let row = local_row(&rows, name)?;
+    if row.is_head {
+        return Err(rv(format!("{name} is the current branch of this worktree")));
+    }
+    if let Some(path) = held_elsewhere(row) {
+        return Err(rv(format!("{name} is checked out in {path}")));
+    }
+    let tip = read_git_line(
+        dir,
+        &["rev-parse", "--verify", "-q", &format!("refs/heads/{name}")],
+    )
+    .unwrap_or_else(|| row.hash.clone());
+    let deleted = |hash: String| DeleteOutcome {
+        deleted: true,
+        refusal: None,
+        hash,
+        unmerged: Vec::new(),
+        unmerged_more: false,
+    };
+    if force {
+        if expected_hash != Some(tip.as_str()) {
+            return Err(RefErr::Conflict(format!(
+                "{name} moved since the delete was confirmed. It was reloaded; nothing was deleted."
+            )));
+        }
+        run_ref_write(dir, &["branch", "-D", name]).map_err(RefErr::Conflict)?;
+        return Ok(deleted(tip));
+    }
+    match run_ref_write(dir, &["branch", "-d", name]) {
+        Ok(()) => Ok(deleted(tip)),
+        Err(e) if e.contains("not fully merged") => {
+            let (unmerged, unmerged_more) = unmerged_of(dir, name);
+            Ok(DeleteOutcome {
+                deleted: false,
+                refusal: Some(e),
+                hash: tip,
+                unmerged,
+                unmerged_more,
+            })
+        }
+        Err(e) => Err(RefErr::Conflict(e)),
+    }
+}
+
+/// A stash message the UI may send: trimmed, blank = none, one line of at most
+/// 200 bytes without control characters.
+pub fn check_stash_message(raw: &str) -> Result<Option<String>, String> {
+    let t = raw.trim();
+    if t.is_empty() {
+        return Ok(None);
+    }
+    if t.chars().any(char::is_control) {
+        return Err("stash message must be one line without control characters".into());
+    }
+    if t.len() > 200 {
+        return Err("stash message is longer than 200 bytes".into());
+    }
+    Ok(Some(t.to_string()))
+}
+
+/// `git stash push [--include-untracked] [-m <message>] --`. `Some(notice)`
+/// when git had nothing to stash (no new entry). `message` came through
+/// [`check_stash_message`].
+pub fn stash_push(
+    dir: &str,
+    message: Option<&str>,
+    include_untracked: bool,
+) -> Result<Option<String>, RefErr> {
+    refuse_in_operation(dir, "stashing")?;
+    let before = stash_state(dir);
+    let mut args = vec!["stash", "push"];
+    if include_untracked {
+        args.push("--include-untracked");
+    }
+    if let Some(m) = message {
+        args.extend(["-m", m]);
+    }
+    args.push("--");
+    if let Err(e) = run_ref_write(dir, &args) {
+        let saved = own_stash_made(dir, &before, None);
+        return Err(RefErr::Conflict(saved_note(e, saved)));
+    }
+    Ok((!own_stash_made(dir, &before, None)).then(|| "No local changes to stash.".into()))
+}
+
+/// Which stash command [`stash_entry_op`] runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StashOp {
+    Apply,
+    Pop,
+    Drop,
+}
+
+/// Current `stash@{N}` name of the entry whose commit is `hash`, re-listed now.
+fn stash_name_of(dir: &str, hash: &str) -> Option<String> {
+    stashes_of(dir)?
+        .into_iter()
+        .find(|s| s.hash == hash)
+        .map(|s| s.name)
+}
+
+/// `git stash apply|pop|drop` of the entry shown as `index` with `hash`. A
+/// fresh list must hold that entry (404) with that hash (else 409, nothing
+/// run). Git is then handed the stash COMMIT hash, never a position, because
+/// the list is shared by every worktree and a sibling's push shifts indexes:
+/// apply is `git stash apply <hash>`; pop is that apply and, only on success,
+/// a re-list and a drop of the entry now carrying that hash (gone = Ok with a
+/// notice, nothing else dropped; a failing drop is a notice too, the apply
+/// stands); drop re-lists right before the spawn and maps the hash to its
+/// current index (gone = 409 "nothing was dropped"). Between that last re-list
+/// and the spawn there remains a window of one process start. Apply and pop act
+/// on `dir`'s worktree, without `--index`, and are refused while an operation
+/// is in progress; drop is allowed. A conflicting apply/pop is the 409 carrying
+/// git's text (it prints on stdout); the stash is kept.
+pub fn stash_entry_op(
+    dir: &str,
+    op: StashOp,
+    index: u32,
+    hash: &str,
+) -> Result<Option<String>, RefErr> {
+    let (done, action) = match op {
+        StashOp::Apply => ("applied", "applying a stash"),
+        StashOp::Pop => ("applied", "popping a stash"),
+        StashOp::Drop => ("dropped", ""),
+    };
+    if op != StashOp::Drop {
+        refuse_in_operation(dir, action)?;
+    }
+    let stashes =
+        stashes_of(dir).ok_or_else(|| RefErr::NotFound(format!("not a git repo: {dir}")))?;
+    let entry = stashes
+        .iter()
+        .find(|s| s.index == index)
+        .ok_or_else(|| RefErr::NotFound(format!("stash not found: stash@{{{index}}}")))?;
+    if entry.hash != hash {
+        return Err(RefErr::Conflict(format!(
+            "The stash list changed since it was shown. It was reloaded; nothing was {done}."
+        )));
+    }
+    let drop_by_hash = |dir: &str| -> Option<Result<(), String>> {
+        let name = stash_name_of(dir, hash)?;
+        Some(run_ref_write(dir, &["stash", "drop", &name]))
+    };
+    match op {
+        StashOp::Apply => run_ref_write(dir, &["stash", "apply", hash])
+            .map(|()| None)
+            .map_err(RefErr::Conflict),
+        StashOp::Pop => {
+            run_ref_write(dir, &["stash", "apply", hash]).map_err(RefErr::Conflict)?;
+            Ok(match drop_by_hash(dir) {
+                Some(Ok(())) => None,
+                Some(Err(e)) => Some(format!(
+                    "The stash was applied but could not be dropped, so it was kept: {e}"
+                )),
+                None => Some(
+                    "The stash was applied. It was no longer in the list, so nothing was dropped."
+                        .into(),
+                ),
+            })
+        }
+        StashOp::Drop => match drop_by_hash(dir) {
+            Some(r) => r.map(|()| None).map_err(RefErr::Conflict),
+            None => Err(RefErr::Conflict(
+                "The stash list changed since it was shown. It was reloaded; nothing was dropped."
+                    .into(),
+            )),
+        },
+    }
 }
 
 /// `git <args>` read-only in `dir`: exit code and raw stdout. Optional locks
@@ -2405,7 +2917,7 @@ fn classify_ref(full: &str) -> GitRef {
 /// hardcoding one hash algorithm; our own `commit_log_of` always hands back
 /// full 40-char hashes, so in practice callers built against this contract
 /// never send anything shorter.
-fn is_valid_commit_id(sha: &str) -> bool {
+pub fn is_valid_commit_id(sha: &str) -> bool {
     let len = sha.len();
     (7..=64).contains(&len) && sha.bytes().all(|b| b.is_ascii_hexdigit())
 }
@@ -6053,5 +6565,855 @@ mod commit_tests {
             g(&l, &["rev-parse", "HEAD"])
         );
         assert_ne!(main.head.unwrap().hash, feat.head.unwrap().hash);
+    }
+}
+
+#[cfg(test)]
+mod ref_tests {
+    use super::*;
+    use std::path::Path;
+
+    fn gb(dir: &Path, args: &[&str]) -> Vec<u8> {
+        let out = Command::new("git")
+            .args(["-C", dir.to_str().unwrap()])
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        out.stdout
+    }
+
+    fn g(dir: &Path, args: &[&str]) -> String {
+        String::from_utf8(gb(dir, args)).unwrap().trim().to_string()
+    }
+
+    fn s(d: &Path) -> &str {
+        d.to_str().unwrap()
+    }
+
+    /// A repo on `main` with identity, no signing, its own hooks dir and one
+    /// commit holding `a.txt`.
+    fn repo() -> tempfile::TempDir {
+        let tmp = bare();
+        let d = tmp.path();
+        std::fs::write(d.join("a.txt"), "a\n").unwrap();
+        g(d, &["add", "a.txt"]);
+        g(d, &["commit", "-q", "-m", "base"]);
+        tmp
+    }
+
+    fn bare() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        g(d, &["init", "-q", "-b", "main"]);
+        g(d, &["config", "user.name", "Tester"]);
+        g(d, &["config", "user.email", "t@example.com"]);
+        g(d, &["config", "commit.gpgsign", "false"]);
+        let hooks = d.join(".git/hooks");
+        g(d, &["config", "core.hooksPath", hooks.to_str().unwrap()]);
+        tmp
+    }
+
+    /// `repo()` plus a linked worktree on a new branch `other`.
+    fn with_linked() -> (tempfile::TempDir, tempfile::TempDir) {
+        let main = repo();
+        let linked = tempfile::tempdir().unwrap();
+        let path = linked.path().join("wt");
+        g(
+            main.path(),
+            &["worktree", "add", "-q", "-b", "other", s(&path)],
+        );
+        (main, linked)
+    }
+
+    fn lp(l: &tempfile::TempDir) -> std::path::PathBuf {
+        l.path().join("wt")
+    }
+
+    fn commit(d: &Path, file: &str, text: &str, msg: &str) -> String {
+        std::fs::write(d.join(file), text).unwrap();
+        g(d, &["add", file]);
+        g(d, &["commit", "-q", "-m", msg]);
+        g(d, &["rev-parse", "HEAD"])
+    }
+
+    fn branch_names(d: &Path) -> Vec<String> {
+        branches_of(s(d))
+            .unwrap()
+            .into_iter()
+            .filter(|b| b.kind == GitBranchKind::Local)
+            .map(|b| b.name)
+            .collect()
+    }
+
+    fn current(d: &Path) -> String {
+        g(d, &["symbolic-ref", "--short", "HEAD"])
+    }
+
+    fn stash_count(d: &Path) -> usize {
+        stashes_of(s(d)).unwrap().len()
+    }
+
+    fn msg_of(e: RefErr) -> String {
+        match e {
+            RefErr::Validation(m) | RefErr::NotFound(m) | RefErr::Conflict(m) => m,
+        }
+    }
+
+    fn validation(r: Result<impl std::fmt::Debug, RefErr>) -> String {
+        match r {
+            Err(RefErr::Validation(m)) => m,
+            other => panic!("expected Validation, got {other:?}"),
+        }
+    }
+
+    fn conflict(r: Result<impl std::fmt::Debug, RefErr>) -> String {
+        match r {
+            Err(RefErr::Conflict(m)) => m,
+            other => panic!("expected Conflict, got {other:?}"),
+        }
+    }
+
+    fn hook(d: &Path, name: &str, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = d.join(".git/hooks");
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join(name);
+        std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    fn new_branch_names_are_validated_before_git_creates_anything() {
+        let (main, _linked) = with_linked();
+        let d = main.path();
+        g(d, &["tag", "v1"]);
+        let bad: &[(&str, &str)] = &[
+            ("", "empty"),
+            ("-x", "begins with '-'"),
+            ("--force", "begins with '-'"),
+            ("@{-1}", "not a valid branch name"),
+            ("a..b", "not a valid branch name"),
+            ("x.lock", "not a valid branch name"),
+            ("a b", "not a valid branch name"),
+            ("HEAD", "not a valid branch name"),
+            ("@", "not a valid branch name"),
+            ("a\nb", "not a valid branch name"),
+            ("main", "a branch named main already exists"),
+            ("other", "a branch named other already exists"),
+            ("v1", "a tag named v1 already exists"),
+        ];
+        for (name, want) in bad {
+            let e = valid_new_branch_name(s(d), name).unwrap_err();
+            assert!(e.contains(want), "{name:?}: {e}");
+        }
+        assert!(
+            valid_new_branch_name(s(d), &"x".repeat(256))
+                .unwrap_err()
+                .contains("255")
+        );
+        for ok in ["feat/x", "héllo-日本", "a-b_c.d", "release/1.0"] {
+            valid_new_branch_name(s(d), ok).unwrap_or_else(|e| panic!("{ok}: {e}"));
+        }
+        // `@{-1}` expands once there is a previous branch: still a refusal.
+        g(d, &["switch", "-q", "-c", "prev"]);
+        g(d, &["switch", "-q", "main"]);
+        assert_eq!(g(d, &["check-ref-format", "--branch", "@{-1}"]), "prev");
+        assert!(valid_new_branch_name(s(d), "@{-1}").is_err());
+        assert!(valid_new_branch_name(s(d), "tmp").is_ok());
+        assert!(!branch_names(d).contains(&"tmp".to_string()));
+    }
+
+    #[test]
+    fn create_branch_from_head_commit_remote_and_with_switch() {
+        let (main, linked) = with_linked();
+        let d = main.path();
+        let w = lp(&linked);
+        let first = g(d, &["rev-parse", "HEAD"]);
+        let second = commit(d, "b.txt", "b\n", "second");
+        // From HEAD of the worktree it is asked in, not of the main checkout.
+        assert_eq!(create_branch(s(&w), "from-wt", None, None, false), Ok(None));
+        assert_eq!(g(d, &["rev-parse", "from-wt"]), first);
+        assert_eq!(current(&w), "other");
+        assert_eq!(
+            create_branch(s(d), "from-head", None, None, false),
+            Ok(None)
+        );
+        assert_eq!(g(d, &["rev-parse", "from-head"]), second);
+        // From a commit: the full hash resolves, an abbreviation is expanded.
+        assert_eq!(
+            create_branch(s(d), "from-commit", Some(&first), None, false),
+            Ok(None)
+        );
+        assert_eq!(g(d, &["rev-parse", "from-commit"]), first);
+        // Only a FULL hash: an abbreviation could be shadowed by a ref name.
+        assert!(
+            validation(create_branch(s(d), "abbr", Some(&first[..10]), None, false))
+                .contains("full lowercase commit hash")
+        );
+        g(d, &["tag", &first[..7]]);
+        validation(create_branch(s(d), "abbr", Some(&first[..7]), None, false));
+        assert!(matches!(
+            create_branch(s(d), "nope", Some(&"0".repeat(40)), None, false),
+            Err(RefErr::NotFound(_))
+        ));
+        validation(create_branch(s(d), "bad", Some("--oops"), None, false));
+        validation(create_branch(s(d), "bad2", Some(&first), Some("x"), false));
+        // From a remote-tracking branch.
+        g(d, &["update-ref", "refs/remotes/origin/feat", &first]);
+        g(
+            d,
+            &["remote", "add", "origin", "https://example.invalid/r.git"],
+        );
+        assert_eq!(
+            create_branch(s(d), "from-remote", None, Some("origin/feat"), false),
+            Ok(None)
+        );
+        assert_eq!(g(d, &["rev-parse", "from-remote"]), first);
+        assert!(matches!(
+            create_branch(s(d), "r2", None, Some("origin/missing"), false),
+            Err(RefErr::NotFound(_))
+        ));
+        // A LOCAL branch name is not a remote row.
+        assert!(matches!(
+            create_branch(s(d), "r3", None, Some("main"), false),
+            Err(RefErr::NotFound(_))
+        ));
+        // With switch: one call, the worktree moves, the main checkout does not.
+        assert_eq!(
+            create_branch(s(&w), "sw", Some(&second), None, true),
+            Ok(None)
+        );
+        assert_eq!(current(&w), "sw");
+        assert_eq!(current(d), "main");
+        assert_eq!(g(&w, &["rev-parse", "HEAD"]), second);
+        // A refused switch (dirty conflicting tree) creates nothing.
+        std::fs::write(w.join("b.txt"), "dirty\n").unwrap();
+        conflict(create_branch(s(&w), "refused", Some(&first), None, true));
+        assert!(!branch_names(d).contains(&"refused".to_string()));
+        assert_eq!(current(&w), "sw");
+        // An existing name is a validation error, not a git failure.
+        assert!(
+            validation(create_branch(s(d), "main", None, None, false)).contains("already exists")
+        );
+    }
+
+    #[test]
+    fn create_branch_on_a_detached_head_and_an_unborn_one() {
+        let main = repo();
+        let d = main.path();
+        let head = g(d, &["rev-parse", "HEAD"]);
+        g(d, &["checkout", "-q", "--detach"]);
+        assert_eq!(create_branch(s(d), "here", None, None, false), Ok(None));
+        assert_eq!(g(d, &["rev-parse", "here"]), head);
+        assert_eq!(create_branch(s(d), "here2", None, None, true), Ok(None));
+        assert_eq!(current(d), "here2");
+        let empty = bare();
+        let e = conflict(create_branch(s(empty.path()), "x", None, None, false));
+        assert!(!e.is_empty());
+        assert!(branch_names(empty.path()).is_empty());
+    }
+
+    #[test]
+    fn switch_clean_dirty_refused_stash_and_held_by_another_worktree() {
+        let (main, linked) = with_linked();
+        let d = main.path();
+        let w = lp(&linked);
+        g(d, &["branch", "feat"]);
+        g(d, &["branch", "side"]);
+        // Clean switch moves only this worktree.
+        assert_eq!(switch_branch(s(d), "feat", false), Ok(None));
+        assert_eq!(current(d), "feat");
+        assert_eq!(current(&w), "other");
+        assert!(validation(switch_branch(s(d), "feat", false)).contains("already on feat"));
+        assert!(validation(switch_branch(s(d), "other", false)).contains("is checked out in"));
+        assert!(matches!(
+            switch_branch(s(d), "ghost", false),
+            Err(RefErr::NotFound(_))
+        ));
+        // A remote row never matches (no DWIM guess).
+        g(d, &["update-ref", "refs/remotes/origin/guess", "HEAD"]);
+        assert!(matches!(
+            switch_branch(s(d), "guess", false),
+            Err(RefErr::NotFound(_))
+        ));
+        assert!(matches!(
+            switch_branch(s(d), "origin/guess", false),
+            Err(RefErr::NotFound(_))
+        ));
+        // Diverge `side` so a dirty a.txt conflicts.
+        g(d, &["switch", "-q", "side"]);
+        commit(d, "a.txt", "side\n", "side change");
+        g(d, &["switch", "-q", "feat"]);
+        std::fs::write(d.join("a.txt"), "dirty\n").unwrap();
+        std::fs::write(d.join("new.txt"), "untracked\n").unwrap();
+        let e = conflict(switch_branch(s(d), "side", false));
+        assert!(e.contains("would be overwritten"), "{e}");
+        assert_eq!(current(d), "feat");
+        assert_eq!(std::fs::read_to_string(d.join("a.txt")).unwrap(), "dirty\n");
+        assert_eq!(
+            std::fs::read_to_string(d.join("new.txt")).unwrap(),
+            "untracked\n"
+        );
+        assert_eq!(stash_count(d), 0);
+        // Stash-and-switch: the work goes to stash@{0}, the notice says so.
+        let notice = switch_branch(s(d), "side", true).unwrap();
+        assert_eq!(
+            notice.as_deref(),
+            Some("Stashed your changes as stash@{0} before switching.")
+        );
+        assert_eq!(current(d), "side");
+        assert_eq!(stash_count(d), 1);
+        let st = &stashes_of(s(d)).unwrap()[0];
+        assert!(
+            st.message.contains("naru: before switching to side"),
+            "{}",
+            st.message
+        );
+        assert!(!d.join("new.txt").exists());
+        // Nothing to stash = a plain switch, no notice, no new entry.
+        assert_eq!(switch_branch(s(d), "feat", true), Ok(None));
+        assert_eq!(stash_count(d), 1);
+        // A stash that was made and then a switch that fails: says so.
+        g(d, &["switch", "-q", "side"]);
+        std::fs::write(d.join("a.txt"), "dirty again\n").unwrap();
+        // A failing post-checkout hook makes `git switch` exit non-zero.
+        hook(d, "post-checkout", "echo hook-said-no >&2\nexit 1");
+        let e = conflict(switch_branch(s(d), "feat", true));
+        assert!(
+            e.starts_with(
+                "Your changes were stashed (stash@{0}) and were NOT restored; the switch failed:"
+            ),
+            "{e}"
+        );
+        assert!(e.contains("hook-said-no"), "{e}");
+        assert_eq!(stash_count(d), 2);
+    }
+
+    #[test]
+    fn switch_refuses_an_existing_dash_name_and_an_operation_in_progress() {
+        let main = repo();
+        let d = main.path();
+        g(d, &["update-ref", "refs/heads/-x", "HEAD"]);
+        let e = validation(switch_branch(s(d), "-x", false));
+        assert!(e.contains("rename it in the terminal"), "{e}");
+        validation(rename_branch(s(d), "-x", "y"));
+        validation(delete_branch(s(d), "-x", false, None));
+        assert!(branch_names(d).contains(&"-x".to_string()));
+        // A merge conflict is an operation in progress.
+        g(d, &["branch", "side"]);
+        g(d, &["switch", "-q", "side"]);
+        commit(d, "a.txt", "side\n", "side");
+        g(d, &["switch", "-q", "main"]);
+        commit(d, "a.txt", "main\n", "main");
+        let _ = Command::new("git")
+            .args(["-C", s(d), "merge", "side"])
+            .output()
+            .unwrap();
+        assert_eq!(view_of(s(d)).unwrap().operation.as_deref(), Some("merge"));
+        let e = validation(switch_branch(s(d), "side", false));
+        assert!(
+            e.starts_with(
+                "A merge is in progress in this worktree; switching branches is not available."
+            ),
+            "{e}"
+        );
+        validation(create_branch(s(d), "n", None, None, true));
+        validation(stash_push(s(d), None, false));
+        // Creating without a switch, and a drop, are still allowed.
+        assert_eq!(create_branch(s(d), "n2", None, None, false), Ok(None));
+    }
+
+    #[test]
+    fn rename_branch_cases() {
+        let (main, linked) = with_linked();
+        let d = main.path();
+        g(d, &["branch", "old"]);
+        assert_eq!(rename_branch(s(d), "old", "new/name"), Ok(None));
+        assert!(branch_names(d).contains(&"new/name".to_string()));
+        assert!(!branch_names(d).contains(&"old".to_string()));
+        // The selected worktree's own current branch may be renamed.
+        assert_eq!(rename_branch(s(d), "main", "trunk"), Ok(None));
+        assert_eq!(current(d), "trunk");
+        // Another worktree's branch may not.
+        assert!(validation(rename_branch(s(d), "other", "x")).contains("is checked out in"));
+        assert_eq!(current(&lp(&linked)), "other");
+        assert!(validation(rename_branch(s(d), "trunk", "new/name")).contains("already exists"));
+        validation(rename_branch(s(d), "trunk", "-y"));
+        validation(rename_branch(s(d), "trunk", "a..b"));
+        assert!(matches!(
+            rename_branch(s(d), "ghost", "z"),
+            Err(RefErr::NotFound(_))
+        ));
+        assert_eq!(current(d), "trunk");
+    }
+
+    #[test]
+    fn delete_merged_unmerged_force_and_checked_out_branches() {
+        let (main, linked) = with_linked();
+        let d = main.path();
+        g(d, &["branch", "merged"]);
+        let out = delete_branch(s(d), "merged", false, None).unwrap();
+        assert!(out.deleted && out.refusal.is_none() && out.unmerged.is_empty());
+        assert_eq!(out.hash, g(d, &["rev-parse", "main"]));
+        assert!(!branch_names(d).contains(&"merged".to_string()));
+        // Checked out here / elsewhere.
+        assert!(
+            validation(delete_branch(s(d), "main", false, None))
+                .contains("main is the current branch of this worktree")
+        );
+        assert!(
+            validation(delete_branch(s(d), "other", true, Some(&"0".repeat(40))))
+                .contains("is checked out in")
+        );
+        assert!(matches!(
+            delete_branch(s(d), "ghost", false, None),
+            Err(RefErr::NotFound(_))
+        ));
+        // Unmerged: refused with the text, tip and commits; nothing deleted.
+        g(d, &["switch", "-q", "-c", "work"]);
+        let c1 = commit(d, "w1.txt", "1\n", "work one");
+        let c2 = commit(d, "w2.txt", "2\n", "work two");
+        g(d, &["switch", "-q", "main"]);
+        let out = delete_branch(s(d), "work", false, None).unwrap();
+        assert!(!out.deleted);
+        assert!(out.refusal.as_deref().unwrap().contains("not fully merged"));
+        assert_eq!(out.hash, c2);
+        let hashes: Vec<&str> = out.unmerged.iter().map(|c| c.hash.as_str()).collect();
+        assert_eq!(hashes, [c2.as_str(), c1.as_str()]);
+        assert!(!out.unmerged_more);
+        assert!(branch_names(d).contains(&"work".to_string()));
+        // Force needs the shown tip; a moved branch is a 409 that deletes nothing.
+        validation(delete_branch(s(d), "work", true, None));
+        validation(delete_branch(s(d), "work", true, Some("ABC")));
+        let moved = conflict(delete_branch(s(d), "work", true, Some(&c1)));
+        assert!(
+            moved.contains(
+                "moved since the delete was confirmed. It was reloaded; nothing was deleted."
+            ),
+            "{moved}"
+        );
+        assert!(branch_names(d).contains(&"work".to_string()));
+        let out = delete_branch(s(d), "work", true, Some(&c2)).unwrap();
+        assert!(out.deleted && out.refusal.is_none() && out.unmerged.is_empty());
+        assert_eq!(out.hash, c2);
+        assert!(!branch_names(d).contains(&"work".to_string()));
+        drop(linked);
+    }
+
+    #[test]
+    fn unmerged_commits_are_those_on_no_other_ref() {
+        let (main, linked) = with_linked();
+        let d = main.path();
+        let w = lp(&linked);
+        g(d, &["switch", "-q", "-c", "topic"]);
+        let only = commit(d, "only.txt", "1\n", "only on topic");
+        let on_branch = commit(d, "ob.txt", "1\n", "also on a branch");
+        g(d, &["branch", "keeper", "HEAD"]);
+        let on_tag = commit(d, "ot.txt", "1\n", "also on a tag");
+        g(d, &["tag", "t-keep", "HEAD"]);
+        let detached = commit(d, "od.txt", "1\n", "also another worktree's HEAD");
+        g(&w, &["checkout", "-q", "--detach", &detached]);
+        let top = commit(d, "top.txt", "1\n", "only on topic too");
+        g(d, &["switch", "-q", "main"]);
+        let out = delete_branch(s(d), "topic", false, None).unwrap();
+        assert!(!out.deleted);
+        let got: Vec<&str> = out.unmerged.iter().map(|c| c.hash.as_str()).collect();
+        // `top` is only on topic; `detached` is held by the linked worktree's
+        // detached HEAD (so `top` is the one commit past it), `on_tag` by the
+        // tag, `on_branch` by `keeper`, and `only` is below `on_branch`.
+        assert_eq!(
+            got,
+            [top.as_str()],
+            "{got:?} only={only} ob={on_branch} ot={on_tag}"
+        );
+        // Free the detached commit: it and the tag-only commits drop out/in.
+        g(&w, &["checkout", "-q", "other"]);
+        g(d, &["tag", "-d", "t-keep"]);
+        let out = delete_branch(s(d), "topic", false, None).unwrap();
+        let got: Vec<&str> = out.unmerged.iter().map(|c| c.hash.as_str()).collect();
+        assert_eq!(got, [top.as_str(), detached.as_str(), on_tag.as_str()]);
+    }
+
+    #[test]
+    fn unmerged_list_is_capped_at_fifty_with_more() {
+        let main = repo();
+        let d = main.path();
+        g(d, &["switch", "-q", "-c", "big"]);
+        for i in 0..52 {
+            g(
+                d,
+                &["commit", "-q", "--allow-empty", "-m", &format!("c{i}")],
+            );
+        }
+        g(d, &["switch", "-q", "main"]);
+        let out = delete_branch(s(d), "big", false, None).unwrap();
+        assert!(!out.deleted);
+        assert_eq!(out.unmerged.len(), 50);
+        assert!(out.unmerged_more);
+    }
+
+    #[test]
+    fn stash_push_with_and_without_untracked_message_and_nothing_to_stash() {
+        let main = repo();
+        let d = main.path();
+        assert_eq!(
+            stash_push(s(d), None, false).unwrap().as_deref(),
+            Some("No local changes to stash.")
+        );
+        assert_eq!(stash_count(d), 0);
+        std::fs::write(d.join("a.txt"), "changed\n").unwrap();
+        std::fs::write(d.join("u.txt"), "untracked\n").unwrap();
+        assert_eq!(stash_push(s(d), Some("-my msg"), false), Ok(None));
+        assert_eq!(stash_count(d), 1);
+        assert_eq!(std::fs::read_to_string(d.join("a.txt")).unwrap(), "a\n");
+        assert!(d.join("u.txt").exists(), "untracked stays without -u");
+        let st = &stashes_of(s(d)).unwrap()[0];
+        assert_eq!(st.message, "-my msg");
+        // Only an untracked file: nothing to stash without -u, an entry with it.
+        assert_eq!(
+            stash_push(s(d), None, false).unwrap().as_deref(),
+            Some("No local changes to stash.")
+        );
+        assert_eq!(stash_push(s(d), None, true), Ok(None));
+        assert_eq!(stash_count(d), 2);
+        assert!(!d.join("u.txt").exists());
+        // The message rules.
+        assert_eq!(check_stash_message("  hi  \n"), Ok(Some("hi".into())));
+        assert_eq!(check_stash_message(" \n\t"), Ok(None));
+        assert!(check_stash_message("a\nb").is_err());
+        assert!(check_stash_message("a\u{7}b").is_err());
+        assert!(check_stash_message(&"x".repeat(201)).is_err());
+        assert!(check_stash_message(&"x".repeat(200)).is_ok());
+        // Unborn HEAD: git refuses, nothing recorded.
+        let empty = bare();
+        std::fs::write(empty.path().join("f"), "x").unwrap();
+        conflict(stash_push(s(empty.path()), None, true));
+    }
+
+    #[test]
+    fn stash_apply_pop_and_drop_check_the_entry_and_act_in_this_worktree() {
+        let (main, linked) = with_linked();
+        let d = main.path();
+        let w = lp(&linked);
+        std::fs::write(d.join("a.txt"), "one\n").unwrap();
+        stash_push(s(d), Some("first"), false).unwrap();
+        std::fs::write(d.join("a.txt"), "two\n").unwrap();
+        stash_push(s(d), Some("second"), false).unwrap();
+        let list = stashes_of(s(d)).unwrap();
+        assert_eq!(list.len(), 2);
+        // The list is shared; apply acts on the worktree it is given.
+        assert_eq!(
+            stashes_of(s(&w))
+                .unwrap()
+                .iter()
+                .map(|x| &x.hash)
+                .collect::<Vec<_>>(),
+            list.iter().map(|x| &x.hash).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            stash_entry_op(s(&w), StashOp::Apply, 1, &list[1].hash),
+            Ok(None)
+        );
+        assert_eq!(std::fs::read_to_string(w.join("a.txt")).unwrap(), "one\n");
+        assert_eq!(std::fs::read_to_string(d.join("a.txt")).unwrap(), "a\n");
+        assert_eq!(stash_count(d), 2, "apply keeps the entry");
+        // A stale hash or a missing index runs nothing.
+        let e = conflict(stash_entry_op(s(d), StashOp::Drop, 0, &list[1].hash));
+        assert_eq!(
+            e,
+            "The stash list changed since it was shown. It was reloaded; nothing was dropped."
+        );
+        let e = conflict(stash_entry_op(
+            s(d),
+            StashOp::Pop,
+            0,
+            "0".repeat(40).as_str(),
+        ));
+        assert!(e.ends_with("nothing was applied."), "{e}");
+        assert!(matches!(
+            stash_entry_op(s(d), StashOp::Drop, 5, &list[0].hash),
+            Err(RefErr::NotFound(_))
+        ));
+        assert_eq!(stash_count(d), 2);
+        // Pop applies and removes; drop removes.
+        g(&w, &["checkout", "-q", "--", "a.txt"]);
+        assert_eq!(
+            stash_entry_op(s(d), StashOp::Pop, 0, &list[0].hash),
+            Ok(None)
+        );
+        assert_eq!(std::fs::read_to_string(d.join("a.txt")).unwrap(), "two\n");
+        assert_eq!(stash_count(d), 1);
+        assert_eq!(
+            stash_entry_op(s(d), StashOp::Drop, 0, &list[1].hash),
+            Ok(None)
+        );
+        assert_eq!(stash_count(d), 0);
+        // Without --index: a staged change comes back unstaged.
+        std::fs::write(d.join("a.txt"), "staged\n").unwrap();
+        g(d, &["add", "a.txt"]);
+        stash_push(s(d), None, false).unwrap();
+        let h = stashes_of(s(d)).unwrap()[0].hash.clone();
+        assert_eq!(stash_entry_op(s(d), StashOp::Pop, 0, &h), Ok(None));
+        assert_eq!(g(d, &["diff", "--cached", "--name-only"]), "");
+        assert_eq!(g(d, &["diff", "--name-only"]), "a.txt");
+    }
+
+    #[test]
+    fn a_conflicting_pop_keeps_the_stash_and_reports_gits_text() {
+        let main = repo();
+        let d = main.path();
+        std::fs::write(d.join("a.txt"), "stashed\n").unwrap();
+        stash_push(s(d), None, false).unwrap();
+        commit(d, "a.txt", "committed\n", "diverge");
+        let h = stashes_of(s(d)).unwrap()[0].hash.clone();
+        let e = conflict(stash_entry_op(s(d), StashOp::Pop, 0, &h));
+        // git prints the conflict on STDOUT; it must be in the error.
+        assert!(e.contains("CONFLICT"), "{e}");
+        assert!(e.contains("a.txt"), "{e}");
+        assert_eq!(stash_count(d), 1, "the stash is kept");
+        let view = view_of(s(d)).unwrap();
+        let f = view.files.iter().find(|f| f.path == "a.txt").unwrap();
+        assert!(is_conflicted(f), "{f:?}");
+        // The same through apply.
+        g(d, &["checkout", "-q", "HEAD", "--", "a.txt"]);
+        let e = conflict(stash_entry_op(s(d), StashOp::Apply, 0, &h));
+        assert!(e.contains("CONFLICT"), "{e}");
+        assert_eq!(stash_count(d), 1);
+    }
+
+    #[test]
+    fn apply_and_pop_are_refused_during_an_operation_but_drop_is_not() {
+        let main = repo();
+        let d = main.path();
+        std::fs::write(d.join("a.txt"), "stashed\n").unwrap();
+        stash_push(s(d), None, false).unwrap();
+        let h = stashes_of(s(d)).unwrap()[0].hash.clone();
+        g(d, &["branch", "side"]);
+        g(d, &["switch", "-q", "side"]);
+        commit(d, "a.txt", "side\n", "side");
+        g(d, &["switch", "-q", "main"]);
+        commit(d, "a.txt", "main\n", "main");
+        let _ = Command::new("git")
+            .args(["-C", s(d), "merge", "side"])
+            .output()
+            .unwrap();
+        let e = validation(stash_entry_op(s(d), StashOp::Apply, 0, &h));
+        assert!(e.contains("A merge is in progress in this worktree; applying a stash is not available. Finish or abort it in the terminal."), "{e}");
+        validation(stash_entry_op(s(d), StashOp::Pop, 0, &h));
+        assert_eq!(stash_count(d), 1);
+        assert_eq!(stash_entry_op(s(d), StashOp::Drop, 0, &h), Ok(None));
+        assert_eq!(stash_count(d), 0);
+    }
+
+    #[test]
+    fn a_held_index_lock_stays_and_the_write_fails() {
+        let main = repo();
+        let d = main.path();
+        g(d, &["branch", "feat"]);
+        std::fs::write(d.join("a.txt"), "dirty\n").unwrap();
+        let lock = d.join(".git/index.lock");
+        std::fs::write(&lock, "held").unwrap();
+        let e = conflict(stash_push(s(d), None, false));
+        assert!(e.contains("index.lock"), "{e}");
+        conflict(switch_branch(s(d), "feat", false));
+        assert!(lock.exists(), "the lock is never removed");
+        assert_eq!(std::fs::read_to_string(&lock).unwrap(), "held");
+        assert_eq!(std::fs::read_to_string(d.join("a.txt")).unwrap(), "dirty\n");
+    }
+
+    #[test]
+    fn saved_note_is_appended_only_when_an_entry_was_saved() {
+        assert_eq!(saved_note("boom".into(), false), "boom");
+        assert_eq!(
+            saved_note("boom".into(), true),
+            "boom\nA stash entry was saved (stash@{0}); your changes are in it."
+        );
+    }
+
+    #[test]
+    fn a_siblings_stash_is_not_mistaken_for_ours() {
+        let (main, linked) = with_linked();
+        let d = main.path();
+        let w = lp(&linked);
+        // Our push finds nothing to stash while the sibling (another HEAD)
+        // stashed in between: simulate by stashing there first, then ours.
+        commit(&w, "w.txt", "w\n", "linked moves");
+        std::fs::write(w.join("w.txt"), "dirty\n").unwrap();
+        let before = stash_state(s(d));
+        g(&w, &["stash", "push", "-q"]);
+        assert!(
+            !own_stash_made(s(d), &before, None),
+            "sibling's entry on another HEAD"
+        );
+        // A real push of ours is recognised, and the marker is honoured.
+        let before = stash_state(s(d));
+        std::fs::write(d.join("a.txt"), "mine\n").unwrap();
+        g(
+            d,
+            &["stash", "push", "-q", "-m", "naru: before switching to x"],
+        );
+        assert!(own_stash_made(s(d), &before, None));
+        assert!(own_stash_made(s(d), &before, Some("before switching to x")));
+        assert!(!own_stash_made(s(d), &before, Some("something else")));
+    }
+
+    #[test]
+    fn stash_ops_address_the_entry_by_hash_not_by_position() {
+        let (main, linked) = with_linked();
+        let d = main.path();
+        let w = lp(&linked);
+        std::fs::write(d.join("a.txt"), "first\n").unwrap();
+        stash_push(s(d), Some("first"), false).unwrap();
+        let shown = stashes_of(s(d)).unwrap()[0].clone();
+        assert_eq!(shown.index, 0);
+        // A sibling worktree stashes: indexes shift under the shown list.
+        commit(&w, "w.txt", "w\n", "linked moves");
+        std::fs::write(w.join("w.txt"), "sibling\n").unwrap();
+        g(&w, &["stash", "push", "-q", "-m", "sibling"]);
+        let now = stashes_of(s(d)).unwrap();
+        assert_eq!(
+            (now[0].message.as_str(), now[1].hash.as_str()),
+            ("sibling", shown.hash.as_str())
+        );
+        // The stale index with the right hash is refused; nothing runs.
+        for op in [StashOp::Apply, StashOp::Pop, StashOp::Drop] {
+            conflict(stash_entry_op(s(d), op, 0, &shown.hash));
+        }
+        assert_eq!(stash_count(d), 2);
+        assert_eq!(g(d, &["status", "--porcelain"]), "");
+        // With the current index the by-hash apply applies OUR content.
+        assert_eq!(
+            stash_entry_op(s(d), StashOp::Apply, 1, &shown.hash),
+            Ok(None)
+        );
+        assert_eq!(std::fs::read_to_string(d.join("a.txt")).unwrap(), "first\n");
+        g(d, &["checkout", "-q", "--", "a.txt"]);
+        // Pop drops exactly the popped entry, leaving the sibling's.
+        assert_eq!(stash_entry_op(s(d), StashOp::Pop, 1, &shown.hash), Ok(None));
+        let left = stashes_of(s(d)).unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].message, "sibling");
+        // Drop of an entry that is gone is a 409; the sibling's stays.
+        let gone = conflict(stash_entry_op(s(d), StashOp::Drop, 0, &shown.hash));
+        assert!(gone.ends_with("nothing was dropped."), "{gone}");
+        assert_eq!(stash_count(d), 1);
+    }
+
+    #[test]
+    fn a_hung_post_checkout_hook_is_stopped_at_the_timeout() {
+        let main = repo();
+        let d = main.path();
+        g(d, &["branch", "feat"]);
+        hook(d, "post-checkout", "echo hook-output >&2\nsleep 30");
+        let start = Instant::now();
+        let e = run_ref_write_within(
+            s(d),
+            &["switch", "--no-guess", "feat"],
+            Duration::from_secs(1),
+        )
+        .unwrap_err();
+        assert!(start.elapsed() < Duration::from_secs(15));
+        assert!(
+            e.starts_with(
+                "git switch did not finish within 1 s and was stopped. Nothing was retried."
+            ),
+            "{e}"
+        );
+        assert!(e.contains("hook-output"), "{e}");
+    }
+
+    #[test]
+    fn run_ref_write_returns_stderr_then_stdout_and_never_prompts() {
+        let main = repo();
+        let d = main.path();
+        let e = run_ref_write(s(d), &["switch", "--no-guess", "nosuch"]).unwrap_err();
+        assert!(e.contains("nosuch"), "{e}");
+        // LC_ALL=C: git's wording is the English one the matcher expects.
+        g(d, &["switch", "-q", "-c", "u"]);
+        commit(d, "u.txt", "u\n", "u");
+        g(d, &["switch", "-q", "main"]);
+        let e = run_ref_write(s(d), &["branch", "-d", "u"]).unwrap_err();
+        assert!(e.contains("not fully merged"), "{e}");
+        let _ = msg_of(RefErr::Conflict(e));
+    }
+
+    #[test]
+    fn no_git_argv_in_production_code_pushes_pulls_fetches_or_rewrites() {
+        let verb =
+            regex::Regex::new(r#"\[\s*(?:"-C",\s*[A-Za-z_.&]+,\s*)?"([a-z][a-z-]*)""#).unwrap();
+        let sources = [
+            ("src/core/git.rs", include_str!("git.rs")),
+            ("src/api.rs", include_str!("../api.rs")),
+        ];
+        let forbidden = [
+            "push",
+            "pull",
+            "fetch",
+            "merge",
+            "rebase",
+            "reset",
+            "clone",
+            "checkout",
+            "cherry-pick",
+            "revert",
+            "am",
+            "gc",
+            "prune",
+            "restore-all",
+        ];
+        let mut seen: Vec<String> = Vec::new();
+        let mut remote_touching_git_commands = 0;
+        for (name, text) in sources {
+            // Production code only: everything before the first test module.
+            let prod = text.split("#[cfg(test)]").next().unwrap();
+            for cap in verb.captures_iter(prod) {
+                let v = cap[1].to_string();
+                assert!(
+                    !forbidden.contains(&v.as_str()),
+                    "{name} builds a git argv starting with {v:?}"
+                );
+                if v == "remote" {
+                    remote_touching_git_commands += 1;
+                }
+                seen.push(v);
+            }
+            for flag in [
+                "\"--discard-changes\"",
+                "\"--force\"",
+                "\"--force-with-lease\"",
+            ] {
+                assert!(!prod.contains(flag), "{name} passes {flag}");
+            }
+            // `-f` is only ever clean's / rm's own flag, never switch's or checkout's.
+            for line in prod.lines().filter(|l| l.contains("\"-f\"")) {
+                assert!(
+                    line.contains("\"clean\"") || line.contains("\"rm\""),
+                    "{name}: {line}"
+                );
+            }
+        }
+        // Honest, not vacuous: the scan saw the verbs we know are there.
+        for known in [
+            "stash",
+            "switch",
+            "branch",
+            "status",
+            "for-each-ref",
+            "commit",
+            "log",
+        ] {
+            assert!(seen.iter().any(|v| v == known), "scan never saw {known:?}");
+        }
+        // The one `git remote` is the read-only listing in `remotes_of`; the
+        // remote-writing forms (`remote add|remove|set-url`) need more argv.
+        assert_eq!(remote_touching_git_commands, 1);
+        let prod = include_str!("git.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(prod.contains(".args([\"-C\", dir, \"remote\"])"));
     }
 }

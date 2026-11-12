@@ -1704,6 +1704,34 @@ pub struct GitCommitResult {
     pub view: GitRepoView,
 }
 
+/// Success of a branch or stash write (naru task 2741): the worktree's fresh
+/// view, and a one-line `notice` when the call did less or more than asked
+/// (nothing to stash; changes stashed before a switch); None otherwise.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct GitRefResult {
+    pub view: GitRepoView,
+    pub notice: Option<String>,
+}
+
+/// `POST /api/projects/{id}/git/branch-delete` answer (200 both when the
+/// branch went and when git refused as "not fully merged").
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct GitBranchDeleteResult {
+    pub deleted: bool,
+    /// Git's own text when it refused as "not fully merged"; None otherwise.
+    pub refusal: Option<String>,
+    /// The branch tip's full hash: what `expected_hash` must echo to force.
+    pub hash: String,
+    /// On a refusal: up to 50 commits reachable from the branch and from no
+    /// other ref (newest first); empty when deleted.
+    pub unmerged: Vec<GitCommit>,
+    /// More than 50 such commits exist.
+    pub unmerged_more: bool,
+    pub view: GitRepoView,
+}
+
 /// One git repo discovered under a project's `local_path` (see
 /// `core::git::discover_repos`), for the git tab's repo picker.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]

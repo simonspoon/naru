@@ -183,6 +183,9 @@ export function GitWorkingTree({
   query,
   toolbarStart,
   refetch,
+  busy,
+  setBusy,
+  externalRev,
   onSelectedPath,
   onOpenCommit,
   backRef,
@@ -202,6 +205,13 @@ export function GitWorkingTree({
   /** The filter box, placed at the start of the toolbar. */
   toolbarStart: ReactNode
   refetch: () => Promise<void>
+  /** The tab's one write flag, shared with the side panel's branch and stash
+   * actions (naru task 2741): while either writes, the other's controls are off. */
+  busy: boolean
+  setBusy: (b: boolean) => void
+  /** Bumped by the tab when a branch or stash action settled: the open diff and
+   * the commit box read again, so a switch shows the new branch at once. */
+  externalRev: number
   /** The path whose diff is open, for the live focus. */
   onSelectedPath: (path: string | null) => void
   /** A commit's short sha was clicked: open it in History. */
@@ -219,14 +229,14 @@ export function GitWorkingTree({
     untracked: false,
   })
   const [sel, setSel] = useState<Selection | null>(null)
-  const [busy, setBusy] = useState(false)
   const [alert, setAlert] = useState<{ prefix: string; message: string } | null>(null)
   const [pending, setPending] = useState<{
     plan: DiscardPlan
     resolve: (ok: boolean) => void
   } | null>(null)
   // Bumped when a write settles, so the open diff is read again.
-  const [rev, setRev] = useState(0)
+  const [ownRev, setRev] = useState(0)
+  const rev = ownRev + externalRev
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const [keepFocus, setKeepFocus] = useState(false)
   const pendingRef = useRef(pending)

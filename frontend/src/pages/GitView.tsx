@@ -18,8 +18,14 @@ import { useFetch } from '../useFetch'
 import { DiffView } from '../components/DiffView'
 import { CommitList } from '../components/CommitGraph'
 import { GitSidePanel } from '../components/GitSidePanel'
+import { GitRefDialogs } from '../components/GitRefDialogs'
+import { GitRefMessages } from '../components/GitRefMessages'
 import { GitWorkingTree } from '../components/GitWorkingTree'
 import { useGitSide } from '../useGitSide'
+import { useGitRefOps } from '../useGitRefOps'
+import type { GitRefOps } from '../useGitRefOps'
+import { refCtxOf, refLabel, writeOffReason } from '../gitRefs'
+import type { RefCtx } from '../gitRefs'
 import { activeWorktreePath } from '../gitPanel'
 import type { BranchScope } from '../gitPanel'
 import { statTotals, subjectOrPlaceholder, totalsLabel } from '../gitHistory'
@@ -176,6 +182,31 @@ function CopyButton({ text }: { text: string }) {
   )
 }
 
+/** "Create branch here" beside the sha (naru task 2741): a new branch at this
+ * commit, in the selected worktree. Off like every write control (`aria-disabled`
+ * and the reason); the form it opens is owned by the tab, so it works with the
+ * side panel closed. */
+function CreateBranchHere({ sha, ctx, ops }: { sha: string; ctx: RefCtx; ops: GitRefOps }) {
+  const reason = writeOffReason(ctx, ops.busy || ops.dialogOpen)
+  const label = refLabel('branch-here', sha.slice(0, 7), ctx)
+  const name = reason === null ? label : `${label}. ${reason}`
+  return (
+    <button
+      type="button"
+      className="git-copy git-commit-branch"
+      data-commit-branch=""
+      aria-label={name}
+      title={name}
+      aria-disabled={reason !== null ? 'true' : undefined}
+      onClick={() => {
+        if (reason === null) ops.openCreate({ kind: 'commit', sha })
+      }}
+    >
+      Create branch here
+    </button>
+  )
+}
+
 const fmtDate = (iso: string) =>
   Number.isNaN(Date.parse(iso)) ? iso : new Date(iso).toLocaleString()
 
@@ -194,6 +225,8 @@ function CommitDetail({
   onSelectParent,
   onBack,
   focusFilesRef,
+  refCtx,
+  refOps,
 }: {
   projectId: number
   repo: string | undefined
@@ -204,6 +237,9 @@ function CommitDetail({
   onBack: () => void
   /** Set when Enter opened this commit: focus the first file once the list loads. */
   focusFilesRef: MutableRefObject<boolean>
+  /** Where a branch action acts, and the tab's one owner of those actions. */
+  refCtx: RefCtx
+  refOps: GitRefOps
 }) {
   const { data: detail, error: detailError } = useFetch(
     () => getProjectGitCommit(projectId, commit.hash, repo),
@@ -259,6 +295,7 @@ function CommitDetail({
       <p className="git-detail-sha">
         <code className="git-sha-full">{commit.hash}</code>
         <CopyButton text={commit.hash} />
+        <CreateBranchHere sha={commit.hash} ctx={refCtx} ops={refOps} />
       </p>
       <p className="git-detail-parents">
         {commit.parents.length === 0 ? (
@@ -571,6 +608,9 @@ function HistoryPane({
   openRequest,
   onRequestConsumed,
   backRef,
+  refreshNonce,
+  refCtx,
+  refOps,
 }: {
   projectId: number
   worktree: string | null
@@ -585,6 +625,10 @@ function HistoryPane({
   onRequestConsumed: () => void
   /** Where the tab's key handler finds this pane's "back a level". */
   backRef: MutableRefObject<((from: HTMLElement) => boolean) | null>
+  /** Bumped when a branch or stash action settled: the log is read again. */
+  refreshNonce: number
+  refCtx: RefCtx
+  refOps: GitRefOps
 }) {
   const [all, setAll] = useState(false)
   const phone = usePhoneTier()
@@ -618,6 +662,17 @@ function HistoryPane({
     applied,
     branchScope,
   )
+  // A branch or stash action settled: read the log again (not on mount).
+  const reloadRef = useRef(reload)
+  useEffect(() => {
+    reloadRef.current = reload
+  })
+  const firstNonce = useRef(refreshNonce)
+  useEffect(() => {
+    if (firstNonce.current === refreshNonce) return
+    firstNonce.current = refreshNonce
+    reloadRef.current()
+  }, [refreshNonce])
   const rootRef = useRef<HTMLDivElement>(null)
   // Enter opened a commit: its detail focuses its first file once loaded.
   const focusFilesRef = useRef(false)
@@ -906,6 +961,8 @@ function HistoryPane({
                   setSelectedCommitPath(null)
                 }}
                 focusFilesRef={focusFilesRef}
+                refCtx={refCtx}
+                refOps={refOps}
               />
               {selectedCommitPath !== null && (
                 <button
@@ -986,7 +1043,8 @@ function HistoryPane({
  * path from this same repo's own worktree list) — History included, since a
  * worktree's HEAD is its own and so is the history behind it (mesa task 805).
  * Rendered in place
- * inside ProjectTasksPage's frame. Read-only; refetches on
+ * inside ProjectTasksPage's frame. Writes (stage, commit, branch and stash
+ * actions) go through the gates in `gitActions.ts`; refetches on
  * window focus (no poll — git state changes from terminal work outside the
  * app, and the server caches the status call for 5s anyway).
  */
@@ -1039,6 +1097,16 @@ function GitRepoPane({
     setLastView(null)
   }
   const onRequestConsumed = useCallback(() => setOpenRequest(null), [])
+  // The tab's one write flag, shared by the working tree's writes, the commit
+  // box and the side panel's branch and stash actions (naru task 2741), so two
+  // writes never overlap; `writeRev` re-reads the diff, the commit box and the
+  // History log after a branch or stash action settled.
+  const [busy, setBusy] = useState(false)
+  const [writeRev, setWriteRev] = useState(0)
+  const panelRefetch = useRef<(() => Promise<void>) | null>(null)
+  const registerPanelRefetch = useCallback((fn: (() => Promise<void>) | null) => {
+    panelRefetch.current = fn
+  }, [])
   const { shellRef, inline: sideInline, open: sideOpen, toggle: toggleSide, closeDrawer } = useGitSide()
   const contentRef = useRef<HTMLDivElement>(null)
   const refsButtonRef = useRef<HTMLButtonElement>(null)
@@ -1130,7 +1198,11 @@ function GitRepoPane({
         const list = t.closest('[data-git-list]')
         if (!list) return
         const items = Array.from(list.querySelectorAll<HTMLElement>('[data-git-item]'))
-        const at = items.indexOf(t.closest<HTMLElement>('[data-git-item]') as HTMLElement)
+        // From a row's action button the row is its wrapper's `[data-git-item]`.
+        const here =
+          t.closest<HTMLElement>('[data-git-row]')?.querySelector<HTMLElement>('[data-git-item]') ??
+          t.closest<HTMLElement>('[data-git-item]')
+        const at = items.indexOf(here as HTMLElement)
         const next = items[stepIndex(at, items.length, dir)]
         if (next) {
           next.focus()
@@ -1176,6 +1248,30 @@ function GitRepoPane({
   }
 
   const view = data ?? lastView
+  const refCtx = refCtxOf({
+    worktrees: view?.worktrees ?? null,
+    selected: selectedWorktree,
+    status: view?.repo?.status ?? { branch: '', dirty: 0, ahead: 0, behind: 0 },
+    operation: view?.repo?.operation ?? null,
+    fresh: data !== null && data.repo !== null,
+  })
+  const refOps = useGitRefOps({
+    projectId,
+    repo,
+    ctx: refCtx,
+    busy,
+    setBusy,
+    // Everything is re-read after EVERY attempt: the tab view, the panel's
+    // lists and worktree details, and (through `writeRev`) the diff, the commit
+    // box and the History log.
+    onChanged: async () => {
+      await Promise.all([refetch(), panelRefetch.current?.()])
+      setWriteRev((n) => n + 1)
+    },
+    // A History scope on a renamed or deleted branch would read a ref that is gone.
+    onBranchGone: (name) =>
+      setBranchScope((sc) => (sc !== null && sc.kind === 'local' && sc.name === name ? null : sc)),
+  })
   if (error && !view) return <p className="error">{error}</p>
   if (!view) return <p className="muted">Loading…</p>
 
@@ -1240,6 +1336,9 @@ function GitRepoPane({
           worktrees={view.worktrees}
           selectedWorktree={selectedWorktree}
           scope={branchScope}
+          ctx={refCtx}
+          ops={refOps}
+          registerRefetch={registerPanelRefetch}
           onPickWorktree={(path) => {
             // Only an actual change resets the selection and the branch scope.
             if (path !== activeWorktreePath(view.worktrees ?? [], selectedWorktree)) {
@@ -1321,6 +1420,8 @@ function GitRepoPane({
         </div>
       </div>
 
+      {!sideOpen && <GitRefMessages ops={refOps} />}
+
       {mode === 'history' ? (
         <HistoryPane
           projectId={projectId}
@@ -1332,6 +1433,9 @@ function GitRepoPane({
           openRequest={openRequest}
           onRequestConsumed={onRequestConsumed}
           backRef={historyBack}
+          refreshNonce={writeRev}
+          refCtx={refCtx}
+          refOps={refOps}
         />
       ) : !fresh ? (
         error ? <p className="error">{error}</p> : <p className="muted">Loading…</p>
@@ -1358,6 +1462,9 @@ function GitRepoPane({
             ) : null
           }
           refetch={refetch}
+          busy={busy}
+          setBusy={setBusy}
+          externalRev={writeRev}
           onSelectedPath={setSelectedPath}
           onOpenCommit={(sha) => {
             setMode('history')
@@ -1368,6 +1475,7 @@ function GitRepoPane({
       )}
       </div>
       </div>
+      <GitRefDialogs projectId={projectId} repo={repo} ctx={refCtx} ops={refOps} />
     </div>
   )
 }

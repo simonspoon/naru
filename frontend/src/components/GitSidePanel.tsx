@@ -36,7 +36,23 @@ import {
   worktreeTitle,
 } from '../gitPanel'
 import type { BranchGroup, BranchScope, SectionId } from '../gitPanel'
+import {
+  branchTargetLine,
+  deleteReason,
+  isUnborn,
+  newBranchReason,
+  refLabel,
+  renameReason,
+  stashApplyReason,
+  stashPushReason,
+  stashTargetLine,
+  switchReason,
+  writeOffReason,
+} from '../gitRefs'
+import type { RefCtx } from '../gitRefs'
 import { shouldIgnoreShortcut } from '../keyboardScope'
+import type { GitRefOps } from '../useGitRefOps'
+import { GitRefMessages } from './GitRefMessages'
 import { useFetch } from '../useFetch'
 import type { GitBranch } from '../types/GitBranch'
 import type { GitStash } from '../types/GitStash'
@@ -83,12 +99,59 @@ function Failed({ onRetry }: { onRetry: () => void }) {
   )
 }
 
+/** One write control of a row or a header (naru task 2741). Off = `aria-disabled`
+ * (never `disabled`, which drops focus and the tooltip) and a reason; the press
+ * is ignored. The same text is the aria-label and the title, and always names
+ * the target. */
+function ActBtn({
+  act,
+  glyph,
+  text,
+  label,
+  reason,
+  inflight,
+  className,
+  onPress,
+}: {
+  act: string
+  glyph: string
+  text: string
+  label: string
+  reason: string | null
+  inflight?: boolean
+  className?: string
+  onPress: () => void
+}) {
+  const name = reason === null ? label : `${label}. ${reason}`
+  return (
+    <button
+      type="button"
+      className={`git-wt-act git-side-act${className ? ` ${className}` : ''}`}
+      data-side-act={act}
+      aria-label={name}
+      title={name}
+      aria-disabled={reason !== null ? 'true' : undefined}
+      onClick={() => {
+        if (reason === null) onPress()
+      }}
+    >
+      <span className="git-side-act-glyph" aria-hidden="true">
+        {inflight ? '…' : glyph}
+      </span>
+      <span className="git-side-act-text" aria-hidden="true">
+        {text}
+      </span>
+    </button>
+  )
+}
+
 function Section({
   id,
   title,
   count,
   open,
   onToggle,
+  actions,
   children,
 }: {
   id: SectionId
@@ -96,6 +159,7 @@ function Section({
   count: number | null
   open: boolean
   onToggle: () => void
+  actions?: ReactNode
   children: ReactNode
 }) {
   return (
@@ -114,8 +178,7 @@ function Section({
           <span className="git-side-title">{title}</span>
           {count !== null && <span className="git-side-count">{count}</span>}
         </button>
-        {/* Reserved for the actions of task 8/8; nothing renders here yet. */}
-        <span className="git-side-actions" />
+        <span className="git-side-actions">{actions}</span>
       </div>
       {open && (
         <div id={`git-side-body-${id}`} className="git-side-body">
@@ -127,12 +190,14 @@ function Section({
 }
 
 /**
- * The Git tab's read-only refs panel (naru task 2737, docs/git-tab.md "Side
- * panel"): worktrees, branches and stashes in one scroller. All the rules
- * (ordering, grouping, filtering, capping, texts) live in `gitPanel.ts`; every
- * repo string is rendered as a text node. Picking a worktree selects it for the
- * whole tab, a branch scopes History to it, a stash opens its commit. Nothing
- * here ever changes the repo.
+ * The Git tab's refs panel (naru task 2737, docs/git-tab.md "Side panel"):
+ * worktrees, branches and stashes in one scroller. All the rules (ordering,
+ * grouping, filtering, capping, texts) live in `gitPanel.ts`; every repo string
+ * is rendered as a text node. Picking a worktree selects it for the whole tab,
+ * a branch scopes History to it, a stash opens its commit. Branches and stashes
+ * also carry write controls (task 2741, "Branch and stash writes"): the rules
+ * are in `gitRefs.ts`, the gate in `gitActions.ts`, the state in `ops`
+ * (`useGitRefOps`, owned by the tab); nothing here calls the api itself.
  */
 export function GitSidePanel({
   projectId,
@@ -144,6 +209,9 @@ export function GitSidePanel({
   onPickBranch,
   onPickStash,
   hidden,
+  ctx,
+  ops,
+  registerRefetch,
 }: {
   projectId: number
   repo: string | undefined
@@ -156,6 +224,12 @@ export function GitSidePanel({
   onPickStash: (s: GitStash) => void
   /** Inline and closed: stays mounted (no refetch, state kept) but not shown. */
   hidden: boolean
+  /** Where the writes act (the selected worktree, as loaded). */
+  ctx: RefCtx
+  ops: GitRefOps
+  /** Hands the tab a function that re-reads the panel's three lists (null on
+   * unmount); the tab calls it after every write. Must be stable. */
+  registerRefetch: (fn: (() => Promise<void>) | null) => void
 }) {
   const repoKey = `${projectId}-${repo ?? ''}`
   const details = useFetch(
@@ -179,6 +253,43 @@ export function GitSidePanel({
   }
   const branchData =
     branches.data ?? (lastBranches?.repoKey === repoKey ? lastBranches.data : null)
+
+  const refetchAll = async () => {
+    await Promise.all([details.refetch(), branches.refetch(), stashes.refetch()])
+  }
+  const refetchAllRef = useRef(refetchAll)
+  useEffect(() => {
+    refetchAllRef.current = refetchAll
+  })
+  useEffect(() => {
+    registerRefetch(() => refetchAllRef.current())
+    return () => registerRefetch(null)
+  }, [registerRefetch])
+
+  const asideRef = useRef<HTMLElement>(null)
+  // After a write settles, a focused control that went away with its row
+  // leaves focus on the body: put it on the section header instead.
+  const focusBack = useRef<SectionId | null>(null)
+  const settled = !ops.busy && !ops.dialogOpen
+  useEffect(() => {
+    const section = focusBack.current
+    if (!settled || section === null) return
+    focusBack.current = null
+    const t = setTimeout(() => {
+      const a = document.activeElement
+      if (a && a !== document.body) return
+      asideRef.current
+        ?.querySelector<HTMLElement>(`.git-side-head[aria-controls="git-side-body-${section}"]`)
+        ?.focus()
+    }, 0)
+    return () => clearTimeout(t)
+  }, [settled])
+  const [pressed, setPressed] = useState<string | null>(null)
+  const press = (section: SectionId, key: string, go: () => void | Promise<void>) => {
+    focusBack.current = section
+    setPressed(key)
+    void Promise.resolve(go()).finally(() => setPressed(null))
+  }
 
   const [sections, setSections] = useState(() => {
     try {
@@ -227,6 +338,9 @@ export function GitSidePanel({
   }
 
   const now = new Date()
+  const unborn = isUnborn(branchData?.branches ?? null, ctx)
+  // Why every write control is off right now (busy, a dialog, no worktree), else null.
+  const off = writeOffReason(ctx, ops.busy || ops.dialogOpen)
   const ordered = useMemo(() => orderWorktrees(worktrees ?? []), [worktrees])
   const active = activeWorktreePath(worktrees ?? [], selectedWorktree)
   const dmap = useMemo(() => detailsByPath(details.data?.details ?? null), [details.data])
@@ -325,43 +439,103 @@ export function GitSidePanel({
     const track = branchTrackText(b)
     const subs = [b.upstream && !track.gone ? b.upstream : null, b.subject, relativeTime(b.date, now)]
     const selected = scope !== null && sameScope(scope, { name: b.name, kind: b.kind })
+    const rowKey = `${b.kind}:${b.name}`
+    const isLocal = b.kind === 'local'
+    const rSwitch = off ?? switchReason(ctx, b)
+    const rRename = off ?? renameReason(b)
+    const rDelete = off ?? deleteReason(b)
+    // The reasons that belong to the row itself, for the touch layout's line.
+    const why = isLocal
+      ? [...new Set([switchReason(ctx, b), renameReason(b), deleteReason(b)].filter((x) => x !== null))]
+      : []
     return (
-      <button
-        key={`${b.kind}:${b.name}`}
-        type="button"
-        className={`git-side-row${selected ? ' selected' : ''}`}
-        data-git-item=""
-        data-branch={b.name}
-        aria-current={selected ? 'true' : undefined}
-        title={branchTitle(b)}
-        onClick={() => onPickBranch(b)}
-      >
-        <span className="git-side-line">
-          <span className="git-side-name">{label}</span>
-          {bd.current && <Badge kind="head">current</Badge>}
-          {bd.inWorktree !== null && (
-            <Badge kind="other" title={`Checked out in ${bd.inWorktree}`}>
-              in worktree
-            </Badge>
-          )}
-          {bd.merged && (
-            <Badge kind="other" title="Fully merged into the selected worktree's HEAD">
-              merged
-            </Badge>
-          )}
-          <span className="git-side-row-menu" />
-        </span>
-        <span className="git-side-sub">
-          <span className="git-side-sub-text">
-            {track.gone && <span className="muted">gone</span>}
-            {track.ahead && <span className="git-ahead">{track.ahead}</span>}
-            {track.behind && <span className="git-behind">{track.behind}</span>}
-            {(track.gone || track.ahead || track.behind) && ' '}
-            {subs.filter((x) => x).join(' · ')}
+      <div key={rowKey} className="git-side-rowwrap" data-git-row="" data-nacts={isLocal ? 3 : 1}>
+        <button
+          type="button"
+          className={`git-side-row${selected ? ' selected' : ''}`}
+          data-git-item=""
+          data-branch={b.name}
+          aria-current={selected ? 'true' : undefined}
+          title={branchTitle(b)}
+          onClick={() => onPickBranch(b)}
+        >
+          <span className="git-side-line">
+            <span className="git-side-name">{label}</span>
+            {bd.current && <Badge kind="head">current</Badge>}
+            {bd.inWorktree !== null && (
+              <Badge kind="other" title={`Checked out in ${bd.inWorktree}`}>
+                in worktree
+              </Badge>
+            )}
+            {bd.merged && (
+              <Badge kind="other" title="Fully merged into the selected worktree's HEAD">
+                merged
+              </Badge>
+            )}
+            <span className="git-side-row-menu" />
           </span>
-          <span className="git-side-row-menu" />
+          <span className="git-side-sub">
+            <span className="git-side-sub-text">
+              {track.gone && <span className="muted">gone</span>}
+              {track.ahead && <span className="git-ahead">{track.ahead}</span>}
+              {track.behind && <span className="git-behind">{track.behind}</span>}
+              {(track.gone || track.ahead || track.behind) && ' '}
+              {subs.filter((x) => x).join(' · ')}
+            </span>
+            <span className="git-side-row-menu" />
+          </span>
+        </button>
+        <span className="git-side-row-acts" data-side-acts="">
+          {isLocal ? (
+            <>
+              <ActBtn
+                act="switch"
+                glyph="→"
+                text="Switch"
+                label={refLabel('switch', b.name, ctx)}
+                reason={rSwitch}
+                inflight={pressed === `switch:${b.name}`}
+                onPress={() => press('branches', `switch:${b.name}`, () => ops.switchTo(b))}
+              />
+              <ActBtn
+                act="rename"
+                glyph="✎"
+                text="Rename"
+                label={refLabel('rename', b.name, ctx)}
+                reason={rRename}
+                onPress={() => press('branches', `rename:${b.name}`, () => ops.openRename(b))}
+              />
+              <ActBtn
+                act="delete"
+                glyph="✕"
+                text="Delete"
+                label={refLabel('delete', b.name, ctx)}
+                reason={rDelete}
+                inflight={pressed === `delete:${b.name}`}
+                onPress={() => press('branches', `delete:${b.name}`, () => ops.deleteBranch(b))}
+              />
+            </>
+          ) : (
+            <ActBtn
+              act="branch-from-remote"
+              glyph="+"
+              text="Create branch"
+              label={refLabel('branch-from-remote', b.name, ctx)}
+              reason={off}
+              onPress={() =>
+                press('branches', `remote:${b.name}`, () =>
+                  ops.openCreate({ kind: 'remote', name: b.name }),
+                )
+              }
+            />
+          )}
         </span>
-      </button>
+        {why.length > 0 && (
+          <p className="git-side-why muted" data-side-why="">
+            {why.join(' · ')}
+          </p>
+        )}
+      </div>
     )
   }
 
@@ -418,12 +592,16 @@ export function GitSidePanel({
   return (
     <aside
       id="git-side"
+      ref={asideRef}
       className="git-side"
       role="region"
       aria-label="Refs"
       hidden={hidden}
+      aria-busy={ops.busy}
+      data-side-busy={ops.busy ? '' : undefined}
       onKeyDown={onKeyDown}
     >
+      <div className="git-side-scroll">
       <Section
         id="worktrees"
         title="Worktrees"
@@ -447,7 +625,34 @@ export function GitSidePanel({
         count={branchCount}
         open={sections.branches}
         onToggle={() => toggleSection('branches')}
+        actions={
+          <ActBtn
+            act="new-branch"
+            glyph="+"
+            text="New branch"
+            label={refLabel('new-branch', '', ctx)}
+            reason={off ?? newBranchReason(unborn)}
+            onPress={() => press('branches', 'new', () => ops.openCreate({ kind: 'head' }))}
+          />
+        }
       >
+        <p className="git-side-target muted" data-side-target="branches" title={branchTargetLine(ctx)}>
+          {branchTargetLine(ctx)}
+        </p>
+        {ctx.detached && (
+          <div className="git-side-detached" data-side-detached="">
+            <span>HEAD is detached at {ctx.branch}</span>
+            <ActBtn
+              act="branch-here"
+              glyph="+"
+              text="Create branch here"
+              label={refLabel('branch-here', ctx.branch, ctx)}
+              reason={off}
+              className="git-side-act-wide"
+              onPress={() => press('branches', 'here', () => ops.openCreate({ kind: 'head' }))}
+            />
+          </div>
+        )}
         {branchData === null && branches.error === null && <SkelRows />}
         {branchData === null && branches.error !== null && (
           <Failed onRetry={() => void branches.refetch()} />
@@ -495,7 +700,20 @@ export function GitSidePanel({
         count={stashList === null ? null : stashList.length}
         open={sections.stashes}
         onToggle={() => toggleSection('stashes')}
+        actions={
+          <ActBtn
+            act="stash"
+            glyph="+"
+            text="Stash"
+            label={refLabel('stash', '', ctx)}
+            reason={off ?? stashPushReason(ctx, unborn)}
+            onPress={() => press('stashes', 'stash', () => ops.openStash())}
+          />
+        }
       >
+        <p className="git-side-target muted" data-side-target="stashes" title={stashTargetLine(ctx)}>
+          {stashTargetLine(ctx)}
+        </p>
         {stashes.data === null && stashes.error === null && <SkelRows />}
         {stashes.data === null && stashes.error !== null && (
           <Failed onRetry={() => void stashes.refetch()} />
@@ -507,27 +725,68 @@ export function GitSidePanel({
           <div className="git-side-list" data-git-list="stashes">
             {stashList.map((s) => {
               const m = stashMessage(s)
+              const rApply = off ?? stashApplyReason(ctx)
               return (
-                <button
+                <div
                   key={s.hash + s.index}
-                  type="button"
-                  className="git-side-row"
-                  data-git-item=""
-                  title={stashTitle(s)}
-                  onClick={() => onPickStash(s)}
+                  className="git-side-rowwrap"
+                  data-git-row=""
+                  data-nacts={3}
                 >
-                  <span className="git-side-line">
-                    <span className={`git-side-name${m.empty ? ' muted' : ''}`}>{m.text}</span>
-                    <span className="git-side-mono muted">{s.name}</span>
-                    <span className="git-side-row-menu" />
-                  </span>
-                  <span className="git-side-sub">
-                    <span className="git-side-sub-text" title={exactTime(s.date)}>
-                      {stashSub(s, now)}
+                  <button
+                    type="button"
+                    className="git-side-row"
+                    data-git-item=""
+                    title={stashTitle(s)}
+                    onClick={() => onPickStash(s)}
+                  >
+                    <span className="git-side-line">
+                      <span className={`git-side-name${m.empty ? ' muted' : ''}`}>{m.text}</span>
+                      <span className="git-side-mono muted">{s.name}</span>
+                      <span className="git-side-row-menu" />
                     </span>
-                    <span className="git-side-row-menu" />
+                    <span className="git-side-sub">
+                      <span className="git-side-sub-text" title={exactTime(s.date)}>
+                        {stashSub(s, now)}
+                      </span>
+                      <span className="git-side-row-menu" />
+                    </span>
+                  </button>
+                  <span className="git-side-row-acts" data-side-acts="">
+                    <ActBtn
+                      act="apply"
+                      glyph="↧"
+                      text="Apply"
+                      label={refLabel('apply', s.name, ctx)}
+                      reason={rApply}
+                      inflight={pressed === `apply:${s.hash}`}
+                      onPress={() => press('stashes', `apply:${s.hash}`, () => ops.apply(s))}
+                    />
+                    <ActBtn
+                      act="pop"
+                      glyph="⤒"
+                      text="Pop"
+                      label={refLabel('pop', s.name, ctx)}
+                      reason={rApply}
+                      inflight={pressed === `pop:${s.hash}`}
+                      onPress={() => press('stashes', `pop:${s.hash}`, () => ops.pop(s))}
+                    />
+                    <ActBtn
+                      act="drop"
+                      glyph="✕"
+                      text="Drop"
+                      label={refLabel('drop', s.name, ctx)}
+                      reason={off}
+                      inflight={pressed === `drop:${s.hash}`}
+                      onPress={() => press('stashes', `drop:${s.hash}`, () => ops.drop(s))}
+                    />
                   </span>
-                </button>
+                  {stashApplyReason(ctx) !== null && (
+                    <p className="git-side-why muted" data-side-why="">
+                      {stashApplyReason(ctx)}
+                    </p>
+                  )}
+                </div>
               )
             })}
           </div>
@@ -535,6 +794,9 @@ export function GitSidePanel({
       </Section>
 
       <p className="git-side-foot muted">Ahead/behind is as of the last fetch. Naru never fetches.</p>
+      </div>
+      {/* Outside the scroller: it is never clipped, scrolled away or shrunk. */}
+      <GitRefMessages ops={ops} />
     </aside>
   )
 }

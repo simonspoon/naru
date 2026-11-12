@@ -64,6 +64,8 @@ import type { GitCommitFile } from './types/GitCommitFile'
 import type { GitFileDiff } from './types/GitFileDiff'
 import type { GitRepoView } from './types/GitRepoView'
 import type { GitCommitResult } from './types/GitCommitResult'
+import type { GitRefResult } from './types/GitRefResult'
+import type { GitBranchDeleteResult } from './types/GitBranchDeleteResult'
 import type { ProjectGitCommitInfo } from './types/ProjectGitCommitInfo'
 import type { InboxItem } from './types/InboxItem'
 import type { InboxKind } from './types/InboxKind'
@@ -617,6 +619,88 @@ export interface GitCommitBody {
  * a test pins that this is its only caller. */
 export function commitProjectGit(id: number, body: GitCommitBody): Promise<GitCommitResult> {
   return request(`/api/projects/${id}/git/commit`, jsonInit('POST', body))
+}
+
+/** Bodies of the branch and stash write routes (naru task 2741). `worktree` is
+ * the explicit path of the selected worktree and is never omitted; `repo` only
+ * when the tab has one. Optional keys are left out unless set. */
+interface GitRefBase {
+  worktree: string
+  repo?: string
+}
+export interface GitBranchCreateBody extends GitRefBase {
+  name: string
+  /** A sha (History's selected commit). */
+  from_commit?: string
+  /** A remote branch row's `name`: "create local branch from this". */
+  from_remote?: string
+  switch?: true
+}
+export interface GitBranchSwitchBody extends GitRefBase {
+  name: string
+  /** Stash everything (untracked too) first; only the explicit "Stash and switch". */
+  stash?: true
+}
+export interface GitBranchRenameBody extends GitRefBase {
+  name: string
+  new_name: string
+}
+export interface GitBranchDeleteBody extends GitRefBase {
+  name: string
+  /** Only after the person confirmed the unmerged commits; needs `expected_hash`. */
+  force?: true
+  expected_hash?: string
+}
+export interface GitStashPushBody extends GitRefBase {
+  message?: string
+  include_untracked?: true
+}
+/** `index` and `hash` come from the `GitStash` row the person saw. */
+export interface GitStashEntryBody extends GitRefBase {
+  index: number
+  hash: string
+}
+
+export function createProjectGitBranch(id: number, body: GitBranchCreateBody): Promise<GitRefResult> {
+  return request(`/api/projects/${id}/git/branch-create`, jsonInit('POST', body))
+}
+
+/** Never forces. Call it only through `createGitRefActions` (gitActions.ts). */
+export function switchProjectGitBranch(id: number, body: GitBranchSwitchBody): Promise<GitRefResult> {
+  return request(`/api/projects/${id}/git/branch-switch`, jsonInit('POST', body))
+}
+
+export function renameProjectGitBranch(id: number, body: GitBranchRenameBody): Promise<GitRefResult> {
+  return request(`/api/projects/${id}/git/branch-rename`, jsonInit('POST', body))
+}
+
+/** DESTRUCTIVE: delete a local branch, and with `force` even an unmerged one.
+ * Call it only through `createGitRefActions` (gitActions.ts), which asks the
+ * person first (twice before a force); a test pins that this is its only caller. */
+export function deleteProjectGitBranch(
+  id: number,
+  body: GitBranchDeleteBody,
+): Promise<GitBranchDeleteResult> {
+  return request(`/api/projects/${id}/git/branch-delete`, jsonInit('POST', body))
+}
+
+export function pushProjectGitStash(id: number, body: GitStashPushBody): Promise<GitRefResult> {
+  return request(`/api/projects/${id}/git/stash-push`, jsonInit('POST', body))
+}
+
+export function applyProjectGitStash(id: number, body: GitStashEntryBody): Promise<GitRefResult> {
+  return request(`/api/projects/${id}/git/stash-apply`, jsonInit('POST', body))
+}
+
+/** Applies, then removes the entry. Call it only through `createGitRefActions`. */
+export function popProjectGitStash(id: number, body: GitStashEntryBody): Promise<GitRefResult> {
+  return request(`/api/projects/${id}/git/stash-pop`, jsonInit('POST', body))
+}
+
+/** DESTRUCTIVE: remove a stash entry. Call it only through
+ * `createGitRefActions` (gitActions.ts), which asks the person first. */
+export function dropProjectGitStash(id: number, body: GitStashEntryBody): Promise<GitRefResult> {
+  return request(`/api/projects/${id}/git/stash-drop`, jsonInit('POST', body))
 }
 
 /** Recent commit log for the project's local_path repo, or for one of its

@@ -15545,15 +15545,25 @@ button.git-tree-row .git-file-label {
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
-  overflow-y: auto;
-  overflow-x: hidden;
-  overscroll-behavior: contain;
+  overflow: hidden;
   background: var(--surface);
   border: 1px solid var(--hairline);
   border-radius: var(--r-md);
   height: var(--tab-viewport-height);
   min-height: var(--tab-viewport-min);
   font-size: 0.85rem;
+}
+
+/* The lists scroll in here; the messages block (naru task 2741) is a sibling
+   below it, so it keeps its own height instead of being flex-shrunk away. */
+.git-side-scroll {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
 }
 
 .git-side[hidden] {
@@ -16607,5 +16617,299 @@ button.git-wt-bulk {
     flex: none;
     height: 30rem;
     min-height: 0;
+  }
+}
+
+/* ---- Branch and stash actions in the Git side panel (GitSidePanel.tsx,
+   GitFormDialog.tsx, naru task 2741, docs/git-tab.md "Branch and stash
+   actions"). Theme tokens only. The row's own button is untouched; its actions
+   are a sibling inside `.git-side-rowwrap`, so nothing is nested. ---- */
+.git-side-rowwrap {
+  position: relative;
+}
+
+/* Touch, and any narrow width: always there, in flow as a third line, glyph
+   plus text. */
+.git-side-row-acts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0 0.6rem 0.4rem;
+}
+
+.git-side-act {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.git-side-act[aria-disabled='true'] {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.git-side-why {
+  margin: 0;
+  padding: 0 0.6rem 0.4rem;
+  font-size: 0.72rem;
+  overflow-wrap: anywhere;
+}
+
+/* Pointer devices: compact glyphs at the right of the row's first line,
+   hidden until hover, keyboard focus or the selected row (the `.git-wt-actions`
+   pattern). The reason of a disabled one is its tooltip. */
+@media (hover: hover) and (pointer: fine) {
+  .git-side-row-acts {
+    position: absolute;
+    top: 0.35rem;
+    right: 0.4rem;
+    flex-wrap: nowrap;
+    gap: 0.2rem;
+    padding: 0;
+    min-height: 1.35rem;
+    visibility: hidden;
+  }
+
+  .git-side-rowwrap:hover .git-side-row-acts,
+  .git-side-rowwrap:focus-within .git-side-row-acts,
+  .git-side-rowwrap:has(.git-side-row.selected) .git-side-row-acts {
+    visibility: visible;
+  }
+
+  .git-side-act-text,
+  .git-side-why {
+    display: none;
+  }
+
+  .git-side-act {
+    min-width: 1.6rem;
+    justify-content: center;
+  }
+
+  /* The name ellipsises before the actions, not under them. */
+  .git-side-rowwrap .git-side-row-menu {
+    width: 5.6rem;
+  }
+
+  .git-side-rowwrap[data-nacts='1'] .git-side-row-menu {
+    width: 1.9rem;
+  }
+}
+
+/* Header actions: glyph only on every device. */
+.git-side-actions .git-side-act-text {
+  display: none;
+}
+
+.git-side-actions .git-side-act {
+  min-width: 1.6rem;
+  justify-content: center;
+}
+
+.git-side-target {
+  margin: 0.15rem 0.6rem 0.3rem;
+  font-size: 0.74rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.git-side-detached {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0.2rem 0.6rem 0.35rem;
+  padding: 0.35rem 0.5rem;
+  font-size: 0.8rem;
+  color: var(--amber);
+  border: 1px solid rgba(var(--amber-rgb), 0.5);
+  border-radius: var(--r-sm);
+  background: rgba(var(--amber-rgb), 0.08);
+}
+
+.git-side-detached .git-side-act .git-side-act-text {
+  display: inline;
+}
+
+/* Status line, error alert and notice: a non-scrolling part of the panel
+   under its scroller, capped and scrolling inside. */
+.git-side-msgs {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  max-height: 40vh;
+  overflow-y: auto;
+  padding: 0.4rem 0.5rem;
+  background: var(--panel);
+  border-top: 1px solid var(--hairline);
+}
+
+.git-side-status {
+  margin: 0;
+  font-size: 0.8rem;
+}
+
+.git-side-alert,
+.git-side-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  padding: 0.4rem 0.6rem;
+  font-size: 0.82rem;
+  border-radius: var(--r-sm);
+}
+
+.git-side-alert {
+  border: 1px solid rgba(var(--red-rgb), 0.5);
+  background: rgba(var(--red-rgb), 0.08);
+}
+
+.git-side-notice {
+  border: 1px solid rgba(var(--green-rgb), 0.5);
+  background: rgba(var(--green-rgb), 0.08);
+}
+
+.git-side-notice-text {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.git-side-alert button.git-wt-alert-close,
+.git-side-notice button.git-wt-alert-close {
+  flex: none;
+  padding: 0 0.5rem;
+}
+
+button.git-side-stashswitch {
+  margin-top: 0.4rem;
+}
+
+button.git-side-stashswitch[aria-disabled='true'] {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* The status / alert / notice block above the content when the panel is a
+   closed drawer. */
+.git-content > .git-side-msgs {
+  max-height: 30vh;
+  margin-bottom: 0.5rem;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-sm);
+}
+
+/* The form dialogs: the confirm's shell, with the neutral border instead of
+   the red edge of a destructive one. */
+.git-confirm.git-form {
+  border-color: var(--border);
+  box-shadow: 0 0 32px rgba(var(--bg-rgb), 0.5);
+}
+
+.git-form-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin: 0 0 0.5rem;
+  font-size: 0.85rem;
+}
+
+.git-form-input {
+  width: 100%;
+  box-sizing: border-box;
+  font-family: var(--font-mono);
+}
+
+.git-form-note {
+  margin: 0 0 0.5rem;
+  font-size: 0.8rem;
+}
+
+.git-form-error {
+  margin: 0 0 0.5rem;
+  font-size: 0.8rem;
+  color: var(--red);
+}
+
+.git-form-check {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0 0 0.4rem;
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+
+.git-form-check.disabled {
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+.git-form-fail {
+  margin: 0 0 0.6rem;
+  padding: 0.4rem 0.6rem;
+  font-size: 0.85rem;
+  border: 1px solid rgba(var(--red-rgb), 0.5);
+  border-radius: var(--r-sm);
+  background: rgba(var(--red-rgb), 0.08);
+}
+
+.git-form-fail .git-wt-alert-msg {
+  max-height: 30vh;
+  overflow: auto;
+}
+
+@media (max-width: 600px) {
+  .git-side-row-acts {
+    position: static;
+    flex-wrap: wrap;
+    gap: 0.25rem;
+    padding: 0 0.6rem 0.4rem;
+    visibility: visible;
+  }
+
+  .git-side-act-text {
+    display: inline;
+  }
+
+  .git-side-why {
+    display: block;
+  }
+
+  .git-side-rowwrap .git-side-row-menu {
+    width: auto;
+  }
+
+  .git-side-actions .git-side-act-text {
+    display: none;
+  }
+
+  button.git-side-act,
+  button.git-side-stashswitch,
+  .git-side-alert button.git-wt-alert-close,
+  .git-side-notice button.git-wt-alert-close,
+  button.git-commit-branch {
+    min-height: 44px;
+  }
+
+  button.git-side-act {
+    min-width: 44px;
+  }
+
+  .git-form-input {
+    min-height: 44px;
+    font-size: 16px;
+  }
+
+  .git-form-check {
+    min-height: 44px;
+  }
+
+  .git-form-check input {
+    width: 1.4rem;
+    height: 1.4rem;
   }
 }
