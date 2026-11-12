@@ -93,9 +93,13 @@ export function GitConfirmDialog({
           <p className="git-confirm-target">
             In worktree <code>{plan.worktree}</code> on branch <code>{plan.branch}</code>
           </p>
-          <ul className="git-confirm-paths" tabIndex={0} aria-label="Affected paths">
-            {plan.listed.map((p) => (
-              <li key={p}>{p}</li>
+          <ul
+            className={`git-confirm-paths${plan.mono ? ' git-confirm-lines' : ''}`}
+            tabIndex={0}
+            aria-label={plan.listLabel ?? 'Affected paths'}
+          >
+            {plan.listed.map((p, i) => (
+              <li key={`${i}:${p}`}>{p}</li>
             ))}
             {plan.more > 0 && <li className="muted">and {plan.more} more</li>}
           </ul>

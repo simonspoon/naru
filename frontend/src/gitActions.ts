@@ -4,14 +4,26 @@
 // discard goes through `confirm(plan)` first; `api.discard` is called nowhere
 // else, and `gitActions.test.ts` pins both that and the single reference to
 // `discardProjectGit` and the discard route string. No React, no DOM.
-import { discardProjectGit, stageProjectGit, unstageProjectGit } from './api'
-import type { GitWriteBody } from './api'
+import {
+  discardProjectGit,
+  discardProjectGitHunks,
+  stageProjectGit,
+  stageProjectGitHunks,
+  unstageProjectGit,
+  unstageProjectGitHunks,
+} from './api'
+import type { GitHunkBody, GitWriteBody } from './api'
+import { picksSubject } from './gitHunks'
+import type { HunkPick } from './gitHunks'
 import { shortFolder } from './gitPanel'
 import type { BulkTarget } from './gitWorktree'
 import type { GitRepoView } from './types/GitRepoView'
 
 /** Paths the discard dialog lists before "and N more". */
 export const PLAN_LIST_MAX = 10
+
+/** Lines the hunk-discard dialog lists before "and N more". */
+export const HUNK_LIST_MAX = 200
 
 export const plural = (n: number, word: string): string => `${n} ${word}${n === 1 ? '' : 's'}`
 
@@ -40,6 +52,34 @@ export type DiscardPlan = {
   consequences: string[]
   confirmLabel: string
   irreversible: string
+  /** The list's accessible name; default "Affected paths". */
+  listLabel?: string
+  /** The list holds lines of text (whitespace kept), not paths. */
+  mono?: boolean
+}
+
+/** The dialog of a hunk discard: THE LINES TO BE LOST, as text. */
+export function discardHunkPlan(
+  path: string,
+  lost: string[],
+  worktree: string,
+  branch: string,
+): DiscardPlan {
+  return {
+    title: 'Discard this hunk?',
+    worktree,
+    branch,
+    paths: [path],
+    listed: lost.slice(0, HUNK_LIST_MAX),
+    more: Math.max(0, lost.length - HUNK_LIST_MAX),
+    consequences: [
+      'The added lines are removed from the working file and the removed lines are restored. Staged changes are kept.',
+    ],
+    confirmLabel: 'Discard hunk',
+    irreversible: 'This cannot be undone.',
+    listLabel: `Lines to be lost in ${path}`,
+    mono: true,
+  }
 }
 
 /** The whole text of the destructive dialog, from what is about to be lost. */
@@ -132,6 +172,16 @@ export function failurePrefix(verb: Verb, target: BulkTarget, worktree: string):
   return `Could not ${doing} ${what} in ${worktree}:`
 }
 
+/** "Could not stage hunk 2 of src/a.ts in /path/to/worktree:" */
+export function hunkFailurePrefix(
+  verb: 'stage' | 'unstage' | 'discard',
+  path: string,
+  picks: HunkPick[],
+  worktree: string,
+): string {
+  return `Could not ${verb} ${picksSubject(path, picks)} in ${worktree}:`
+}
+
 // ---- the write gate ----
 
 /** The text of the error alert: what was attempted, then git's own message
@@ -154,6 +204,9 @@ export interface GitWriteApi {
   stage(body: GitWriteBody): Promise<GitRepoView>
   unstage(body: GitWriteBody): Promise<GitRepoView>
   discard(body: GitWriteBody): Promise<GitRepoView>
+  stageHunks(body: GitHunkBody): Promise<GitRepoView>
+  unstageHunks(body: GitHunkBody): Promise<GitRepoView>
+  discardHunks(body: GitHunkBody): Promise<GitRepoView>
 }
 
 /** The real routes of one project. The component gets its api only from
@@ -164,12 +217,18 @@ export function projectGitApi(projectId: number): GitWriteApi {
     stage: (b) => stageProjectGit(projectId, b),
     unstage: (b) => unstageProjectGit(projectId, b),
     discard: (b) => discardProjectGit(projectId, b),
+    stageHunks: (b) => stageProjectGitHunks(projectId, b),
+    unstageHunks: (b) => unstageProjectGitHunks(projectId, b),
+    discardHunks: (b) => discardProjectGitHunks(projectId, b),
   }
 }
 
 /** The worktree a write acts in, as the view on screen was loaded for it.
  * `worktree: null` = unresolved: nothing is sent. */
 export type WriteCtx = { worktree: string | null; branch: string; repo?: string }
+
+/** One file's hunks or lines, from the diff whose `digest` is given. */
+export type HunkTarget = { path: string; digest: string; hunks: HunkPick[] }
 
 export type WriteOutcome =
   | { ok: true; view: GitRepoView }
@@ -224,6 +283,28 @@ export function createGitActions(deps: {
     }
   }
 
+  async function sendHunks(
+    verb: 'stage' | 'unstage' | 'discard',
+    ctx: WriteCtx,
+    t: HunkTarget,
+    call: (body: GitHunkBody) => Promise<GitRepoView>,
+  ): Promise<WriteOutcome> {
+    if (ctx.worktree === null) return { ok: false, reason: 'no-worktree' }
+    if (t.hunks.length === 0) return { ok: false, reason: 'empty' }
+    const body: GitHunkBody = { worktree: ctx.worktree, path: t.path, digest: t.digest, hunks: t.hunks }
+    if (ctx.repo !== undefined) body.repo = ctx.repo
+    try {
+      return { ok: true, view: await call(body) }
+    } catch (e) {
+      return {
+        ok: false,
+        reason: 'error',
+        ...describeError(e),
+        prefix: hunkFailurePrefix(verb, t.path, t.hunks, ctx.worktree),
+      }
+    }
+  }
+
   const empty = (t: BulkTarget) => 'paths' in t && t.paths.length === 0
 
   return {
@@ -244,6 +325,18 @@ export function createGitActions(deps: {
       if (!(await confirm(plan))) return { ok: false, reason: 'cancelled' }
       const verb: Verb = items.every((i) => i.untracked) ? 'delete' : 'discard'
       return send(verb, ctx, { paths: plan.paths }, (b) => api.discard(b))
+    },
+    stageHunks: (ctx: WriteCtx, t: HunkTarget): Promise<WriteOutcome> =>
+      sendHunks('stage', ctx, t, (b) => api.stageHunks(b)),
+    unstageHunks: (ctx: WriteCtx, t: HunkTarget): Promise<WriteOutcome> =>
+      sendHunks('unstage', ctx, t, (b) => api.unstageHunks(b)),
+    /** Like `discard`: asks first, with the lines to be lost (`lost`). */
+    async discardHunks(ctx: WriteCtx, t: HunkTarget, lost: string[]): Promise<WriteOutcome> {
+      if (ctx.worktree === null) return { ok: false, reason: 'no-worktree' }
+      if (t.hunks.length === 0) return { ok: false, reason: 'empty' }
+      const plan = discardHunkPlan(t.path, lost, ctx.worktree, ctx.branch)
+      if (!(await confirm(plan))) return { ok: false, reason: 'cancelled' }
+      return sendHunks('discard', ctx, t, (b) => api.discardHunks(b))
     },
   }
 }

@@ -558,6 +558,34 @@ export function discardProjectGit(id: number, body: GitWriteBody): Promise<GitRe
   return request(`/api/projects/${id}/git/discard`, jsonInit('POST', body))
 }
 
+/** Body of the hunk / line write routes (naru task 2739). `digest` is the
+ * `GitFileDiff.digest` the client rendered from; each `hunks` entry is a hunk's
+ * 0-based index, whole when `lines` is absent, else the 0-based body-line
+ * indices inside it. */
+export interface GitHunkBody {
+  worktree: string
+  repo?: string
+  path: string
+  digest: string
+  hunks: { index: number; lines?: number[] }[]
+}
+
+/** Stage hunks or lines of the unstaged diff; answers the worktree's fresh view. */
+export function stageProjectGitHunks(id: number, body: GitHunkBody): Promise<GitRepoView> {
+  return request(`/api/projects/${id}/git/stage-hunks`, jsonInit('POST', body))
+}
+
+/** Unstage hunks or lines of the staged diff; answers the worktree's fresh view. */
+export function unstageProjectGitHunks(id: number, body: GitHunkBody): Promise<GitRepoView> {
+  return request(`/api/projects/${id}/git/unstage-hunks`, jsonInit('POST', body))
+}
+
+/** DESTRUCTIVE: drop hunks or lines from the working file. Call it only through
+ * `createGitActions` (gitActions.ts), which asks the person first. */
+export function discardProjectGitHunks(id: number, body: GitHunkBody): Promise<GitRepoView> {
+  return request(`/api/projects/${id}/git/discard-hunks`, jsonInit('POST', body))
+}
+
 /** Recent commit log for the project's local_path repo, or for one of its
  * worktrees when `worktree` selects one (same selector as getProjectGit — a
  * worktree has its own HEAD, so its log is its own branch's). Empty states are

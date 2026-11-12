@@ -5019,6 +5019,82 @@ body.live-panel-ratio-resizing {
   color: var(--green);
 }
 
+/* Hunk and line staging (naru task 2739; only with the opt-in `staging` prop).
+   The hunk header row becomes a wrapping flex row: its text, then the buttons,
+   which drop under the text when the pane is narrow. */
+.diff-view-grid > .diff-view-hunk-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem 0.5rem;
+}
+
+.diff-view-hunk-text {
+  flex: 1 1 12rem;
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.diff-view-hunk-actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
+
+/* A line number that selects its line; the selection tints the gutter and the
+   line, from the theme's accent, so it reads on every theme. */
+.diff-view-no.diff-view-pickable {
+  cursor: pointer;
+}
+
+.diff-view-no.diff-view-pickable:hover {
+  color: var(--text-h);
+}
+
+.diff-view-no.diff-view-pickable:focus-visible {
+  outline: 2px solid var(--cyan);
+  outline-offset: -2px;
+}
+
+.diff-view-no.diff-view-picked {
+  color: var(--text-h);
+  box-shadow: inset 3px 0 0 var(--cyan);
+  background: rgba(var(--cyan-rgb), 0.28);
+}
+
+.diff-view-text.diff-view-picked {
+  background-image: linear-gradient(rgba(var(--cyan-rgb), 0.16), rgba(var(--cyan-rgb), 0.16));
+}
+
+.diff-view-lines-bar {
+  flex-basis: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.2rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface-raised);
+}
+
+.diff-view-lines-count {
+  margin-right: auto;
+  font-weight: 600;
+}
+
+.diff-view-hunk-note {
+  flex-basis: 100%;
+}
+
+@media (max-width: 600px) {
+  .diff-view-hunk-actions button,
+  .diff-view-lines-bar button {
+    min-height: 44px;
+  }
+}
+
 /* "No newline at end of file" and a changed line ending: notes about a
    line, set apart from its text. */
 .diff-view-eol {
@@ -16182,6 +16258,11 @@ button.git-wt-alert-close {
   border: 1px solid var(--hairline);
   border-radius: var(--r-sm);
   background: var(--surface);
+}
+
+/* A hunk discard lists lines of code: keep their whitespace. */
+.git-confirm-lines li {
+  white-space: pre-wrap;
 }
 
 .git-confirm-consequence {

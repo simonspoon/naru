@@ -3,6 +3,7 @@ import type { CSSProperties, MutableRefObject, ReactNode } from 'react'
 import { getProjectGitDiff } from '../api'
 import { useFetch } from '../useFetch'
 import { DiffView } from './DiffView'
+import type { DiffStaging } from './DiffView'
 import { GitConfirmDialog } from './GitConfirmDialog'
 import {
   alertText,
@@ -12,6 +13,8 @@ import {
   projectGitApi,
 } from '../gitActions'
 import type { DiscardItem, DiscardPlan, Verb, WriteCtx, WriteOutcome } from '../gitActions'
+import { hunkLostLines, wholeHunk } from '../gitHunks'
+import type { HunkPick } from '../gitHunks'
 import {
   SECTION_ORDER,
   SECTION_TITLES,
@@ -42,9 +45,30 @@ const OPERATIONS: Record<string, string> = {
   bisect: 'Bisect',
 }
 
+/** One hunk or line write the diff pane asks for (naru task 2739). */
+type HunkWrite = {
+  verb: 'stage' | 'unstage' | 'discard'
+  digest: string
+  picks: HunkPick[]
+  /** The lines a discard loses, for its dialog. */
+  lost?: string[]
+}
+
+/** What `GitWorkingTree` gives the diff pane to enable hunk and line staging. */
+type HunkOps = {
+  staged: boolean
+  busy: boolean
+  label: DiffStaging['label']
+  onWrite: (w: HunkWrite) => void
+  registerClear: DiffStaging['registerClear']
+}
+
 /** The selected working-tree file's unified diff, scoped to `worktree` when a
  * non-default one is selected. `staged` picks the side: true = index vs HEAD,
- * false = working tree vs index, undefined = plain (a conflict's markers). */
+ * false = working tree vs index, undefined = plain (a conflict's markers).
+ * A bump of `rev` (a write settled) re-reads the diff IN PLACE: the previous
+ * diff of the same file and side stays mounted, so the scroll position
+ * survives; another file still shows "Loading…". */
 function DiffPane({
   projectId,
   path,
@@ -52,6 +76,7 @@ function DiffPane({
   repo,
   staged,
   rev,
+  hunkOps,
 }: {
   projectId: number
   path: string
@@ -59,14 +84,49 @@ function DiffPane({
   repo: string | undefined
   staged: boolean | undefined
   rev: number
+  hunkOps: HunkOps | undefined
 }) {
-  const { data, error } = useFetch(
+  const { data, error, refetch } = useFetch(
     () => getProjectGitDiff(projectId, path, worktree ?? undefined, repo, staged),
-    `git-diff-${projectId}-${repo ?? ''}-${worktree ?? ''}-${String(staged)}-${rev}-${path}`,
+    `git-diff-${projectId}-${repo ?? ''}-${worktree ?? ''}-${String(staged)}-${path}`,
   )
+  const [loadedRev, setLoadedRev] = useState(rev)
+  const firstRev = useRef(true)
+  useEffect(() => {
+    if (firstRev.current) {
+      firstRev.current = false
+      return
+    }
+    void refetch().then(() => setLoadedRev(rev))
+  }, [rev, refetch])
   if (error) return <p className="error">{error}</p>
   if (!data) return <p className="muted">Loading…</p>
-  return <DiffView key={`${worktree ?? ''} ${String(staged)} ${path}`} diff={data.diff} path={path} />
+  const staging: DiffStaging | undefined = hunkOps && {
+    staged: hunkOps.staged,
+    digest: data.digest,
+    // The digest belongs to the diff on screen: no write until it is reloaded.
+    disabled: hunkOps.busy || loadedRev !== rev,
+    label: hunkOps.label,
+    onHunk: (verb, hunk, model) =>
+      data.digest !== null &&
+      hunkOps.onWrite({
+        verb,
+        digest: data.digest,
+        picks: wholeHunk(hunk),
+        lost: verb === 'discard' ? hunkLostLines(model, hunk) : undefined,
+      }),
+    onLines: (verb, picks) =>
+      data.digest !== null && hunkOps.onWrite({ verb, digest: data.digest, picks }),
+    registerClear: hunkOps.registerClear,
+  }
+  return (
+    <DiffView
+      key={`${worktree ?? ''} ${String(staged)} ${path}`}
+      diff={data.diff}
+      path={path}
+      staging={staging}
+    />
+  )
 }
 
 function readStored(key: string): string | null {
@@ -158,6 +218,8 @@ export function GitWorkingTree({
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const [keepFocus, setKeepFocus] = useState(false)
   const pendingRef = useRef(pending)
+  // Esc in the diff clears a line selection first; the diff fills this in.
+  const clearLines = useRef<(() => boolean) | null>(null)
 
   const split = useMemo(() => splitSections(repoView.files), [repoView.files])
   const filterActive = query.trim() !== ''
@@ -268,6 +330,7 @@ export function GitWorkingTree({
 
   useEffect(() => {
     backRef.current = () => {
+      if (clearLines.current?.()) return true
       if (sel === null) return false
       const row = scrollRef.current?.querySelector<HTMLElement>(
         `[data-wt-section="${sel.section}"][data-path="${CSS.escape(sel.primary)}"]`,
@@ -292,6 +355,17 @@ export function GitWorkingTree({
   const unstage = (es: Entry[]) =>
     run(() => actions.unstage(ctx, { paths: es.map((e) => e.file.path) }))
   const discard = (es: Entry[]) => run(() => actions.discard(ctx, es.map(toItem)))
+
+  const registerClear = useCallback((fn: (() => boolean) | null) => {
+    clearLines.current = fn
+  }, [])
+  const hunkWrite = (w: HunkWrite) => {
+    if (primaryPath === null) return
+    const t = { path: primaryPath, digest: w.digest, hunks: w.picks }
+    if (w.verb === 'stage') return void run(() => actions.stageHunks(ctx, t))
+    if (w.verb === 'unstage') return void run(() => actions.unstageHunks(ctx, t))
+    return void run(() => actions.discardHunks(ctx, t, w.lost ?? []))
+  }
 
   const subjectOf = (es: Entry[]) => (es.length === 1 ? es[0].file.path : plural(es.length, 'file'))
 
@@ -540,6 +614,18 @@ export function GitWorkingTree({
       ? undefined
       : false
 
+  // Hunk and line controls: a tracked file's diff of one side, in a known worktree.
+  const hunkOps: HunkOps | undefined =
+    worktreePath === null || staged === undefined || primary?.section === 'untracked'
+      ? undefined
+      : {
+          staged,
+          busy: writeOff,
+          label: (verb, subject) => controlLabel(verb, subject, worktreePath, branch),
+          onWrite: hunkWrite,
+          registerClear,
+        }
+
   return (
     // The size container of the working tree: `@container` rules in App.css
     // stack the list over the diff when this (not the viewport) is narrow.
@@ -636,6 +722,7 @@ export function GitWorkingTree({
               repo={repo}
               staged={staged}
               rev={rev}
+              hunkOps={hunkOps}
             />
           )}
         </div>

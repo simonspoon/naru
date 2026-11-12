@@ -7,7 +7,9 @@ import {
   createGitActions,
   alertText,
   describeError,
+  discardHunkPlan,
   discardPlan,
+  hunkFailurePrefix,
   failurePrefix,
 } from './gitActions'
 import type { DiscardItem, DiscardPlan, GitWriteApi } from './gitActions'
@@ -39,6 +41,9 @@ function harness(answer: boolean | (() => Promise<boolean>) = true) {
     stage: vi.fn(async () => view),
     unstage: vi.fn(async () => view),
     discard: vi.fn(async () => view),
+    stageHunks: vi.fn(async () => view),
+    unstageHunks: vi.fn(async () => view),
+    discardHunks: vi.fn(async () => view),
   }
   const confirm = vi.fn(async (plan: DiscardPlan) => {
     void plan
@@ -221,6 +226,102 @@ describe('the confirm gate (destructive_ops_without_confirm = 0)', () => {
   })
 })
 
+describe('hunk and line writes', () => {
+  const target = { path: 'src/a.ts', digest: 'd1', hunks: [{ index: 1 }] }
+  const lost = ['-old', '+new']
+
+  it('discardHunks: a false answer never reaches the api', async () => {
+    const { api, confirm, actions } = harness(false)
+    expect(await actions.discardHunks(ctx, target, lost)).toEqual({ ok: false, reason: 'cancelled' })
+    expect(confirm).toHaveBeenCalledTimes(1)
+    expect(api.discardHunks).not.toHaveBeenCalled()
+  })
+
+  it('discardHunks: true sends once with exactly the planned body, after showing the lines', async () => {
+    const { api, confirm, actions } = harness(true)
+    const picks = { ...target, hunks: [{ index: 0, lines: [1, 2] }] }
+    const out = await actions.discardHunks({ ...ctx, repo: 'sub' }, picks, lost)
+    expect(out).toEqual({ ok: true, view })
+    expect(confirm.mock.calls[0][0].listed).toEqual(lost)
+    expect(api.discardHunks).toHaveBeenCalledTimes(1)
+    expect(api.discardHunks).toHaveBeenCalledWith({
+      worktree: WT,
+      repo: 'sub',
+      path: 'src/a.ts',
+      digest: 'd1',
+      hunks: [{ index: 0, lines: [1, 2] }],
+    })
+  })
+
+  it('stage and unstage never ask', async () => {
+    const { api, confirm, actions } = harness(false)
+    await actions.stageHunks(ctx, target)
+    await actions.unstageHunks(ctx, target)
+    expect(confirm).not.toHaveBeenCalled()
+    const body = { worktree: WT, path: 'src/a.ts', digest: 'd1', hunks: [{ index: 1 }] }
+    expect(api.stageHunks).toHaveBeenCalledWith(body)
+    expect(api.unstageHunks).toHaveBeenCalledWith(body)
+    expect(api.discardHunks).not.toHaveBeenCalled()
+  })
+
+  it('sends nothing without a worktree or without hunks', async () => {
+    const { api, confirm, actions } = harness(true)
+    const none = { worktree: null, branch: 'b' }
+    expect(await actions.stageHunks(none, target)).toEqual({ ok: false, reason: 'no-worktree' })
+    expect(await actions.unstageHunks(none, target)).toEqual({ ok: false, reason: 'no-worktree' })
+    expect(await actions.discardHunks(none, target, lost)).toEqual({ ok: false, reason: 'no-worktree' })
+    expect(await actions.stageHunks(ctx, { ...target, hunks: [] })).toEqual({ ok: false, reason: 'empty' })
+    expect(await actions.discardHunks(ctx, { ...target, hunks: [] }, lost)).toEqual({
+      ok: false,
+      reason: 'empty',
+    })
+    expect(confirm).not.toHaveBeenCalled()
+    expect(api.stageHunks).not.toHaveBeenCalled()
+    expect(api.unstageHunks).not.toHaveBeenCalled()
+    expect(api.discardHunks).not.toHaveBeenCalled()
+  })
+
+  it('a failure keeps the server message and names what was attempted; no retry', async () => {
+    const { api, actions } = harness(true)
+    const msg = 'The diff changed since it was shown. It was reloaded; nothing was applied.'
+    vi.mocked(api.stageHunks).mockRejectedValueOnce(Object.assign(new Error(msg), { code: 'conflict' }))
+    const out = await actions.stageHunks(ctx, target)
+    expect(out).toEqual({
+      ok: false,
+      reason: 'error',
+      code: 'conflict',
+      message: msg,
+      prefix: `Could not stage hunk 2 of src/a.ts in ${WT}:`,
+    })
+    expect(api.stageHunks).toHaveBeenCalledTimes(1)
+  })
+
+  it('the dialog says what is lost and caps the list at 200', () => {
+    const many = Array.from({ length: 250 }, (_, i) => `+l${i}`)
+    const p = discardHunkPlan('src/a.ts', many, WT, 'feat/x')
+    expect(p.title).toBe('Discard this hunk?')
+    expect(p.confirmLabel).toBe('Discard hunk')
+    expect(p.consequences).toEqual([
+      'The added lines are removed from the working file and the removed lines are restored. Staged changes are kept.',
+    ])
+    expect(p.irreversible).toBe('This cannot be undone.')
+    expect(p.listed).toHaveLength(200)
+    expect(p.more).toBe(50)
+    expect(p.mono).toBe(true)
+    expect(p.worktree).toBe(WT)
+    expect(p.branch).toBe('feat/x')
+  })
+
+  it('failure prefixes and labels', () => {
+    expect(hunkFailurePrefix('discard', 'a.ts', [{ index: 0, lines: [1, 2, 3] }], WT)).toBe(
+      `Could not discard 3 selected lines of a.ts in ${WT}:`,
+    )
+    expect(controlLabel('stage', 'hunk 2 of src/a.ts', WT, 'feat/x')).toBe(
+      'Stage hunk 2 of src/a.ts in …/code/app-wt (feat/x)',
+    )
+  })
+})
+
 describe('the discard endpoint has one caller', () => {
   const root = join(__dirname)
   const sources: string[] = []
@@ -244,6 +345,16 @@ describe('the discard endpoint has one caller', () => {
 
   it('the /git/discard route string lives only in api.ts', () => {
     expect(withText('/git/discard')).toEqual(['api.ts'])
+  })
+
+  it('discardProjectGitHunks and its route string are just as confined', () => {
+    expect(withText('discardProjectGitHunks')).toEqual(['api.ts', 'gitActions.ts'])
+    expect(withText('/git/discard-hunks')).toEqual(['api.ts'])
+    const src = readFileSync(join(root, 'gitActions.ts'), 'utf8')
+    expect(src.match(/api\.discardHunks\(/g)).toHaveLength(1)
+    expect(src.indexOf('await confirm(plan)', src.indexOf('async discardHunks'))).toBeLessThan(
+      src.indexOf('api.discardHunks('),
+    )
   })
 
   it('api.discard( is called once, inside gitActions.ts, after the confirm', () => {

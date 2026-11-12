@@ -11,9 +11,10 @@ store only to read `local_path`. No CLI (an agent in a terminal uses `git`
 directly). **Reads** (every GET) sit behind the standard middleware guard only
 — they execute nothing. Since naru task 2738 the tab also **writes**: the
 three POST routes `git/stage`, `git/unstage` and `git/discard` ("Write
-operations" below) change the repo, so they carry the agent-grade
-`require_agent_access` gate on top of the standard guard. No other route here
-writes.
+operations" below), and since naru task 2739 the three `git/stage-hunks`,
+`git/unstage-hunks` and `git/discard-hunks` ("Hunk and line staging" below),
+change the repo, so they carry the agent-grade `require_agent_access` gate on
+top of the standard guard. No other route here writes.
 
 - **Several repos under one folder** (mesa task 1509).
   `GET /api/projects/{id}/git/repos` → `ProjectGitRepos { path, repos:
@@ -405,6 +406,113 @@ Tests: `src/core/git.rs` (real temp repos: every op born and unborn, rename,
 awkward names, merge conflict, `index.lock`, 5,000 files) and `src/api.rs`
 (`git_write_*`, `git_diff_staged_*`); `scripts/api-check.sh` asserts the gate
 and validation halves of the three routes.
+
+## Hunk and line staging (naru task 2739)
+
+Stage, unstage or discard part of one file's diff: a hunk, or single lines
+inside it. The routes sit beside the whole-file ones and reuse their helpers
+(`git::run_write`, `drop_git_caches`, `git::pick_entry`, `git::check_write`).
+
+**Routes.** `POST /api/projects/{id}/git/stage-hunks`, `.../unstage-hunks`,
+`.../discard-hunks`. Same gate as the whole-file writes (`require_agent_access`
+first, JSON Content-Type, never a GET). JSON body:
+
+```
+{ "worktree": "<path>",            // REQUIRED, non-empty, as for git/stage
+  "repo":     "<path>" | absent,
+  "path":     "<file>",            // REQUIRED; byte-equal to a path of a FRESH view_of
+  "digest":   "<string>",          // REQUIRED; GitFileDiff.digest the client rendered from
+  "hunks": [ { "index": 0, "lines": [3, 4] | absent } ] }   // REQUIRED, non-empty
+```
+
+`index` is the 0-based ordinal of the `@@` hunk, each at most once. `lines`
+absent is the whole hunk; present it is a non-empty list of 0-based body-line
+indices inside that hunk. Body lines are the lines after the `@@` header that
+start with ` `, `+` or `-`; `\ No newline at end of file` lines are not
+counted. Every listed line must be a `+` or `-` line. Stage and discard pick
+from the unstaged diff (`GET git/diff?staged=false`), unstage from the staged
+one (`staged=true`).
+
+**Digest and eligibility.** `GitFileDiff.digest` (`#[serde(default)]`,
+`string | null`) is set only when the diff was read with `staged=true|false`
+and the file can take hunk operations: tracked, not conflicted, not a
+submodule, not a rename (`orig_path` null), and its raw diff is within
+`DIFF_CAP`, is one file, has at least one hunk, whose header holds none of
+`new file mode`, `deleted file mode`, `rename from`, `copy from`,
+`Binary files`, `GIT binary patch`, and whose lines all parse with counts that
+match their `@@` headers (`git::hunk_digest`). Everywhere else, including the
+commit diff, it is null. The client shows hunk and line controls iff it is not
+null. The digest is the raw diff's byte length and a `DefaultHasher` hash
+(`"{len:x}-{hash:016x}"`; no hashing crate is a dependency). It is a staleness
+check, not a security boundary.
+
+**Canonical diff.** The `staged=true|false` diff of a tracked file is read with
+`--unified=3 --no-ext-diff --no-textconv --no-color --src-prefix=a/ --dst-prefix=b/`, so
+the text is exactly what a patch can be built from whatever the user's config
+says. Textconv and external-diff output is therefore no longer shown on those
+two sides, and a user's `diff.context` does not apply there: the context is
+pinned at three lines, because `git apply` anchors a hunk with no context to
+the end (or start) of the file wherever its lines match, which with
+`diff.context=0` could stage a different, identical line. The conflicted,
+untracked and `staged`-absent diffs are unchanged.
+
+**Order of checks.** Body shape (422) -> project, repo, worktree (404) -> a
+FRESH `view_of`, the path in it (404; unstage uses the entry with something
+staged) -> per-file rules (422: conflicted "... has conflicts; resolve it in
+the terminal", untracked, submodule, rename, "nothing staged" / "nothing
+unstaged" / "nothing to discard") -> the raw diff of that side is eligible
+(422) -> the digest (409) -> the patch (422) -> `git apply` (409) -> 200.
+
+**The patch** (`git::build_partial_patch`, pure, built from bytes: CR and
+non-UTF-8 survive). Its header is only the `diff --git`, `---` and `+++`
+lines, so a mode change is never staged by a hunk operation. Forward (stage): a
+selected `+`/`-` stays, an unselected `-` becomes context, an unselected `+` is
+dropped. Reverse (unstage, discard): an unselected `+` becomes context, an
+unselected `-` is dropped. Because the added lines of a changed block follow
+its removed lines in the diff, staging only `-b` and `+B` of `-b -c +B +C`
+leaves `a, c, B` in the index (git's own `add -p` does the same). Every `@@`
+count is recomputed from the lines kept and the changing side's start is
+shifted by the lines the earlier emitted hunks added or removed. A line without
+a trailing newline must stay the last line of its side, so half of a removed
+and added pair around it is refused ("select its removed and added lines
+together"); the pair together is fine. A picked hunk left with no change line
+is refused.
+
+**What runs.** One `git apply` with the patch on stdin through
+`git::run_write` (`git::apply_hunks`): stage `apply --cached --whitespace=nowarn
+-`, unstage `apply --cached --reverse --whitespace=nowarn -`, discard `apply
+--reverse --whitespace=nowarn -` (working tree). Argv only, never a shell;
+never retried; `index.lock` is never touched.
+
+**Failure and stale.** A digest that is not the current diff's is 409
+`conflict` with exactly `The diff changed since it was shown. It was reloaded;
+nothing was applied.`; the caches are dropped, nothing that writes is spawned.
+`git apply` failing (a held `index.lock`, a patch git refuses) is 409 with
+git's own stderr. `drop_git_caches` runs after
+every attempt; success is 200 with the fresh `GitRepoView`.
+
+**Not offered.** Untracked, new, deleted, renamed, copied, binary, submodule,
+conflicted and truncated (over-cap) files have no hunk operations: whole-file
+stage, unstage and discard remain.
+
+Tests: `src/core/git.rs` (pure builder on literal diffs; real temp repos
+asserting the exact `git diff --cached` and `git diff` after each operation)
+and `src/api.rs` (`git_hunk_*`, `git_diff_digest_*`); `scripts/api-check.sh`
+asserts the gate and validation halves of the three routes.
+
+### Client
+
+Hunk and line staging lives in the working-tree diff pane only (`GitWorkingTree`'s `DiffPane` -> `DiffView` with the opt-in `staging` prop); the History commit diff and the Files tab render exactly as before. Every rule is pure in `frontend/src/gitHunks.ts` (covered by `gitHunks.test.ts`); the components only lay it out.
+
+- **When controls exist**: the diff's `digest` is non-null AND the worktree path is known AND the file is not untracked or conflicted. Otherwise there are no hunk or line controls and whole-file staging in the list is unchanged. For a tracked file whose `digest` is null but whose diff has hunks (new, deleted, renamed, binary-with-text, truncated, submodule) the sticky header carries one muted note (`[data-hunk-note]`): "Hunk and line staging is not available for this file; stage the whole file from the list."
+- **Hunk buttons** on each hunk header row (`[data-hunk-index="N"]`, N the contract's 0-based index): on the Changes (unstaged) diff "Stage hunk" and "Discard hunk" (danger); on the Staged diff "Unstage hunk" (`[data-hunk-action="stage|unstage|discard"]`). On a narrow pane they wrap under the hunk header text. Every control's title and aria-label names the worktree ("Stage hunk 2 of src/a.ts in …/folder (branch)", "Stage 3 selected lines of src/a.ts in …/folder (branch)"), and every one is disabled while a write is in flight and while the shown diff is being reloaded.
+- **Line selection**: only changed lines ('+' and '-') are selectable, through their line-number gutter cell (`[data-line-pick="<hunk>:<idx>"]`, `role="button"`, `aria-pressed`, `aria-label` "Select added line 42" / "Select removed line 17", `tabIndex=-1`; Space or Enter toggles one that has focus). Click toggles one line; Shift-click adds the range from the last clicked line (diff order, across hunks, changed lines only); press and drag down or up the gutter selects (or, when the pressed line was already selected, deselects) the range dragged over. In Split mode a changed row's left number selects its removed line and its right number its added line, independently; in Inline mode the number on the line's own side does. A selected line tints its gutter cell (an accent bar) and its text cell, from theme tokens only. The selection belongs to one file, side and diff text: it resets when any of them changes. One set of handlers sits on the grid (event delegation on `data-line-pick`), not one per cell.
+- **Selection bar**: while lines can be picked the sticky header always shows `[data-lines-bar]` (with `data-lines-count`; a bar that appeared on the first pick would shift the lines under a drag): "Click or drag line numbers to select lines" with its buttons disabled at 0, else "N lines selected", "Stage selected lines" (Changes side) or "Unstage selected lines" (Staged side) (`[data-lines-action="stage|unstage"]`) and "Clear" (`[data-lines-action="clear"]`). Esc inside the diff clears a line selection first; the next Esc is the tab's existing back-to-the-row (`GitWorkingTree`'s `backRef` asks the diff to clear before it does anything else). Listed in the "?" keys.
+- **Phone / touch**: the hunk buttons wrap under the header text and are 44px high; a tap on a line number toggles that line. There is no drag-select on touch (the pane scrolls under a finger) and no Shift-range; the bar's Stage / Unstage / Clear are the same 44px buttons. Drag-select is mouse (and pen) only.
+- **Discard hunk** goes through the same gate as a file discard (`createGitActions.discardHunks`): it awaits `confirm(plan)` and calls the route only on true. The dialog shows "Discard this hunk?", the worktree's full path and branch, the lines to be lost (each '+' / '-' line of the hunk as text, monospace, scrollable, up to 200 then "and N more"), "The added lines are removed from the working file and the removed lines are restored. Staged changes are kept.", "This cannot be undone." and the danger button "Discard hunk". Stage and unstage never ask. Line-level discard does not exist. `gitActions.test.ts` pins that `discardProjectGitHunks` appears only in `api.ts` and `gitActions.ts`, and the `/git/discard-hunks` string only in `api.ts`.
+- **After a write** (success or error) the pane reuses the file list's `run()`: the view is re-read, git's own message is shown verbatim in the alert (`Could not stage hunk 2 of src/a.ts in <worktree>:` ...), and a 409 stale reply shows its own sentence ("The diff changed since it was shown. It was reloaded; nothing was applied."). The diff is re-read in place: `DiffPane` keeps showing the previous diff of the same file, side and worktree while the new one loads, so `DiffView` stays mounted and the pane's scroll position survives; a different file still shows "Loading…". If the file leaves its section (everything staged) the existing selection-follow applies.
+- **Untrusted text**: diff text, paths and git's messages reach the page as text nodes only; classes come from the model.
+- **Test hooks**: `[data-hunk-index]`, `[data-hunk-action]`, `[data-line-pick]` (+ `aria-pressed`), `[data-lines-bar]`, `[data-lines-action]`, `[data-hunk-note]`; the confirm dialog keeps its `data-git-confirm` hooks.
 
 ## Diff view (naru task 2734)
 

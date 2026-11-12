@@ -140,6 +140,7 @@ export const GIT_KEYS: [string, string][] = [
   ['/', 'Search'],
   ['[  ]', 'Previous / next changed file'],
   ['Click  ⌘/Ctrl-click  Shift-click', 'Working tree: select one file, toggle one, or extend a range within a section'],
+  ['Esc', 'In a working-tree diff with selected lines: clear the selection first'],
   ['?', 'Show or hide these keys'],
   ['Refs panel: / Esc', 'In the Refs panel: / filters branches, Esc returns to the content (closes the drawer)'],
   ['Refs panel: Enter', 'Pick the focused worktree, branch or stash (a branch scopes History, a stash opens)'],

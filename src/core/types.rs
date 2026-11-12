@@ -1693,6 +1693,14 @@ pub struct GitFileDiff {
     /// underlying git call failed — quiet, never an error). Binary files
     /// carry git's own "Binary files ... differ" line.
     pub diff: String,
+    /// Naru task 2739. Set only when the diff was read for one side
+    /// (`staged=true|false`) of a file that can take hunk and line
+    /// operations: tracked, not conflicted, not a submodule, not a rename, the
+    /// whole diff within the size cap, one file, at least one hunk, and not a
+    /// new, deleted, copied or binary file. It is a staleness token the hunk
+    /// routes check; the client shows hunk controls iff it is not null.
+    #[serde(default)]
+    pub digest: Option<String>,
 }
 
 /// One entry from `git log` (see `core::git::commit_log_of`). Author

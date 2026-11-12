@@ -847,6 +847,12 @@ fn run_diff(dir: &str, args: &[&str], ok_codes: &[i32]) -> Option<String> {
 /// [`run_diff`] with `GIT_LITERAL_PATHSPECS=1` when `literal`, so `*` and
 /// `:(magic)` in a file name are plain characters.
 fn run_diff_with(dir: &str, args: &[&str], ok_codes: &[i32], literal: bool) -> Option<String> {
+    run_diff_bytes(dir, args, ok_codes, literal).map(|b| capped(&b))
+}
+
+/// [`run_diff_with`] before the lossy, capped text: git's stdout bytes as is,
+/// for a patch that must be built from bytes.
+fn run_diff_bytes(dir: &str, args: &[&str], ok_codes: &[i32], literal: bool) -> Option<Vec<u8>> {
     let mut cmd = Command::new("git");
     cmd.args(["-C", dir]).args(args).stdin(Stdio::null());
     if literal {
@@ -856,7 +862,7 @@ fn run_diff_with(dir: &str, args: &[&str], ok_codes: &[i32], literal: bool) -> O
     if !ok_codes.contains(&out.status.code()?) {
         return None;
     }
-    Some(capped(&out.stdout))
+    Some(out.stdout)
 }
 
 /// The diff for one listed file when the caller picks a side (naru task
@@ -871,6 +877,12 @@ fn run_diff_with(dir: &str, args: &[&str], ok_codes: &[i32], literal: bool) -> O
 /// - `staged: true`: `git diff --cached` (works on an unborn HEAD); a staged
 ///   rename passes both paths with `-M` so it renders as a rename.
 /// - `staged: false`: `git diff`, index against working tree.
+///
+/// The last two (naru task 2739) are read in a canonical form, whatever the
+/// user's config: no external diff, no textconv, no colour, `a/` and `b/`
+/// prefixes, three context lines. That text is what a hunk patch is built
+/// from; the context is pinned because `git apply` anchors a hunk that has
+/// none to the end (or start) of the file, wherever the lines match.
 pub fn diff_of_file(
     dir: &str,
     file: &GitFile,
@@ -892,17 +904,56 @@ pub fn diff_of_file(
             true,
         );
     }
+    diff_bytes_of_file(dir, file, staged).map(|b| capped(&b))
+}
+
+/// The canonical side diff of a tracked, non-conflicted file as raw bytes
+/// (see [`diff_of_file`]): the input of [`hunk_digest`] and
+/// [`build_partial_patch`].
+pub fn diff_bytes_of_file(dir: &str, file: &GitFile, staged: bool) -> Option<Vec<u8>> {
+    const CANON: [&str; 7] = [
+        "diff",
+        "--unified=3",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-color",
+        "--src-prefix=a/",
+        "--dst-prefix=b/",
+    ];
+    let path = file.path.as_str();
+    let mut args = CANON.to_vec();
     if !staged {
-        return run_diff_with(dir, &["diff", "--", path], &[0], true);
+        args.extend(["--", path]);
+    } else if let Some(orig) = file.orig_path.as_deref() {
+        args.extend(["--cached", "-M", "--", orig, path]);
+    } else {
+        args.extend(["--cached", "--", path]);
     }
-    match file.orig_path.as_deref() {
-        Some(orig) => run_diff_with(
-            dir,
-            &["diff", "--cached", "-M", "--", orig, path],
-            &[0],
-            true,
-        ),
-        None => run_diff_with(dir, &["diff", "--cached", "--", path], &[0], true),
+    run_diff_bytes(dir, &args, &[0], true)
+}
+
+/// Whether a listed file can offer hunk and line operations at all: tracked,
+/// not conflicted, not a submodule, not a rename. The diff text itself must
+/// still pass [`hunk_digest`].
+pub fn hunk_eligible_file(f: &GitFile) -> bool {
+    !is_conflicted(f) && f.status != "??" && !f.submodule && f.orig_path.is_none()
+}
+
+/// [`diff_of_file`] plus the file's [`hunk_digest`] (naru task 2739): `Some`
+/// only for a picked side (`staged` set) of a [`hunk_eligible_file`] whose raw
+/// diff is eligible; the digest is of the raw bytes, not the capped text.
+pub fn diff_and_digest(
+    dir: &str,
+    file: &GitFile,
+    wanted: &str,
+    staged: Option<bool>,
+) -> Option<(String, Option<String>)> {
+    match staged {
+        Some(side) if hunk_eligible_file(file) => {
+            let raw = diff_bytes_of_file(dir, file, side)?;
+            Some((capped(&raw), hunk_digest(&raw)))
+        }
+        _ => diff_of_file(dir, file, wanted, staged).map(|d| (d, None)),
     }
 }
 
@@ -916,6 +967,312 @@ fn capped(bytes: &[u8]) -> String {
         s.push_str("\n[diff truncated]");
     }
     s
+}
+
+// --- Hunk and line patches (naru task 2739) ----------------------------
+//
+// Pure, byte-exact: a single-file diff (the canonical side diff of
+// `diff_bytes_of_file`) is parsed into its header and hunks, and a patch of
+// only the picked hunks or lines is written back for `git apply`. Line bytes
+// (CR, invalid UTF-8) are never touched.
+
+/// One picked hunk: its 0-based ordinal in the diff, and either the whole
+/// hunk (`lines: None`) or the 0-based body-line indices inside it (context
+/// and `\ No newline` lines count only as described on [`build_partial_patch`]).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct HunkPick {
+    pub index: usize,
+    #[serde(default)]
+    pub lines: Option<Vec<usize>>,
+}
+
+/// One hunk body line: its kind byte (` `, `+`, `-`), its bytes including the
+/// kind byte and the line ending, and the `\ No newline at end of file` line
+/// that followed it, if any.
+struct DiffLine {
+    kind: u8,
+    bytes: Vec<u8>,
+    marker: Option<Vec<u8>>,
+}
+
+struct DiffHunk {
+    old_start: i64,
+    old_len: i64,
+    new_start: i64,
+    new_len: i64,
+    /// Everything after the second `@@` (section text and the line ending).
+    tail: Vec<u8>,
+    lines: Vec<DiffLine>,
+}
+
+struct ParsedDiff {
+    /// The `diff --git`, `---` and `+++` lines, verbatim.
+    header: Vec<u8>,
+    hunks: Vec<DiffHunk>,
+}
+
+/// `@@ -a[,b] +c[,d] @@tail`; a missing count is 1.
+fn parse_hunk_header(line: &[u8]) -> Option<DiffHunk> {
+    let rest = line.strip_prefix(b"@@ ")?;
+    let at = rest.windows(3).position(|w| w == b" @@")?;
+    let spec = std::str::from_utf8(&rest[..at]).ok()?;
+    let (old, new) = spec.split_once(' ')?;
+    let range = |s: &str, sign: char| -> Option<(i64, i64)> {
+        let s = s.strip_prefix(sign)?;
+        match s.split_once(',') {
+            Some((a, b)) => Some((a.parse().ok()?, b.parse().ok()?)),
+            None => Some((s.parse().ok()?, 1)),
+        }
+    };
+    let (old_start, old_len) = range(old, '-')?;
+    let (new_start, new_len) = range(new, '+')?;
+    Some(DiffHunk {
+        old_start,
+        old_len,
+        new_start,
+        new_len,
+        tail: rest[at + 3..].to_vec(),
+        lines: Vec::new(),
+    })
+}
+
+/// Header lines that make a file ineligible for hunk operations: it is
+/// created, deleted, renamed, copied or binary.
+const INELIGIBLE_HEADERS: [&[u8]; 6] = [
+    b"new file mode",
+    b"deleted file mode",
+    b"rename from",
+    b"copy from",
+    b"Binary files",
+    b"GIT binary patch",
+];
+
+fn parse_diff(diff: &[u8]) -> Result<ParsedDiff, String> {
+    let bad = |why: &str| format!("this diff cannot be staged by hunk: {why}");
+    let lines: Vec<&[u8]> = diff.split_inclusive(|b| *b == b'\n').collect();
+    if lines.last().is_some_and(|l| !l.ends_with(b"\n")) {
+        return Err(bad("it is cut short"));
+    }
+    if !lines.first().is_some_and(|l| l.starts_with(b"diff --git ")) {
+        return Err(bad("it is not a single-file diff"));
+    }
+    let mut header = lines[0].to_vec();
+    let (mut have_old, mut have_new) = (false, false);
+    let mut hunks: Vec<DiffHunk> = Vec::new();
+    for line in &lines[1..] {
+        if let Some(h) = hunks.last_mut() {
+            if line.starts_with(b"@@ ") {
+                hunks.push(parse_hunk_header(line).ok_or_else(|| bad("a hunk header"))?);
+                continue;
+            }
+            match line[0] {
+                b' ' | b'+' | b'-' => h.lines.push(DiffLine {
+                    kind: line[0],
+                    bytes: line.to_vec(),
+                    marker: None,
+                }),
+                b'\\' => match h.lines.last_mut() {
+                    Some(l) if l.marker.is_none() => l.marker = Some(line.to_vec()),
+                    _ => return Err(bad("a stray \"No newline\" line")),
+                },
+                _ => return Err(bad("an unexpected line")),
+            }
+            continue;
+        }
+        if line.starts_with(b"@@ ") {
+            hunks.push(parse_hunk_header(line).ok_or_else(|| bad("a hunk header"))?);
+        } else if line.starts_with(b"diff --git ") {
+            return Err(bad("it holds more than one file"));
+        } else if INELIGIBLE_HEADERS.iter().any(|p| line.starts_with(p)) {
+            return Err(bad("the file is new, deleted, renamed, copied or binary"));
+        } else if line.starts_with(b"--- ") && !have_old {
+            have_old = true;
+            header.extend_from_slice(line);
+        } else if line.starts_with(b"+++ ") && !have_new {
+            have_new = true;
+            header.extend_from_slice(line);
+        }
+    }
+    if !(have_old && have_new) || hunks.is_empty() {
+        return Err(bad("it has no hunks"));
+    }
+    for h in &hunks {
+        let count = |k: u8| h.lines.iter().filter(|l| l.kind == k).count() as i64;
+        let (ctx, minus, plus) = (count(b' '), count(b'-'), count(b'+'));
+        if h.old_len != ctx + minus || h.new_len != ctx + plus {
+            return Err(bad("a hunk's line counts do not match its header"));
+        }
+    }
+    Ok(ParsedDiff { header, hunks })
+}
+
+/// A staleness token for a diff: its byte length and a `DefaultHasher` hash
+/// (fixed keys, so it is the same in every process of one build). It only
+/// tells the client's diff from the current one; it is not a security
+/// boundary. `None` when the diff is not eligible for hunk operations: longer
+/// than [`DIFF_CAP`], more than one file, no hunks, a new, deleted, renamed,
+/// copied or binary file, or a line the parser does not know.
+pub fn hunk_digest(diff: &[u8]) -> Option<String> {
+    use std::hash::Hasher;
+    if diff.len() > DIFF_CAP {
+        return None;
+    }
+    parse_diff(diff).ok()?;
+    let mut h = std::hash::DefaultHasher::new();
+    h.write(diff);
+    Some(format!("{:x}-{:016x}", diff.len(), h.finish()))
+}
+
+/// The shape rules of a pick list, needing no diff: not empty, each hunk at
+/// most once, a `lines` list not empty and without a repeat.
+pub fn check_picks_shape(picks: &[HunkPick]) -> Result<(), String> {
+    if picks.is_empty() {
+        return Err("hunks must not be empty".into());
+    }
+    let mut seen = HashSet::new();
+    for p in picks {
+        if !seen.insert(p.index) {
+            return Err(format!("hunk {} is listed twice", p.index));
+        }
+        if let Some(lines) = &p.lines {
+            if lines.is_empty() {
+                return Err(format!("hunk {}: lines must not be empty", p.index));
+            }
+            let mut seen_lines = HashSet::new();
+            if let Some(dup) = lines.iter().find(|l| !seen_lines.insert(**l)) {
+                return Err(format!("hunk {}: line {dup} is listed twice", p.index));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A patch of only the picked hunks (or only their picked lines) of one
+/// file's diff, for `git apply`. A body line is a diff line starting with
+/// ` `, `+` or `-`; `\ No newline` lines are not counted. `reverse` is for
+/// `git apply --reverse` (unstage, discard); otherwise the patch is applied
+/// forward (stage).
+///
+/// - Forward: an unselected `-` stays in the file, so it becomes context; an
+///   unselected `+` is dropped.
+/// - Reverse: the mirror: an unselected `+` becomes context, an unselected
+///   `-` is dropped.
+///
+/// The header is the `diff --git`, `---` and `+++` lines only, so a mode
+/// change is never part of it. Every `@@` line is recomputed: the counts from
+/// the lines kept, and the start of the side that changes from the other
+/// side's start plus the running line-count change of the hunks emitted
+/// before it. Hunks come out in diff order. A line without a trailing newline
+/// has to stay the last line of its side of the hunk, so half of a
+/// removed/added pair around it is refused.
+pub fn build_partial_patch(
+    diff: &[u8],
+    picks: &[HunkPick],
+    reverse: bool,
+) -> Result<Vec<u8>, String> {
+    check_picks_shape(picks)?;
+    let parsed = parse_diff(diff)?;
+    let mut ordered: Vec<&HunkPick> = picks.iter().collect();
+    ordered.sort_by_key(|p| p.index);
+    let mut out = parsed.header.clone();
+    let mut running: i64 = 0;
+    for pick in ordered {
+        let hunk = parsed.hunks.get(pick.index).ok_or_else(|| {
+            format!(
+                "hunk {} does not exist; the diff has {} hunks",
+                pick.index,
+                parsed.hunks.len()
+            )
+        })?;
+        let mut selected = vec![pick.lines.is_none(); hunk.lines.len()];
+        for &i in pick.lines.iter().flatten() {
+            match hunk.lines.get(i) {
+                None => {
+                    return Err(format!(
+                        "hunk {}: line {i} does not exist; the hunk has {} lines",
+                        pick.index,
+                        hunk.lines.len()
+                    ));
+                }
+                Some(l) if l.kind == b' ' => {
+                    return Err(format!(
+                        "hunk {}: line {i} is context, not a change",
+                        pick.index
+                    ));
+                }
+                Some(_) => selected[i] = true,
+            }
+        }
+        // The lines that stay, with the kind they now have.
+        let mut kept: Vec<(u8, &DiffLine)> = Vec::new();
+        for (l, sel) in hunk.lines.iter().zip(selected) {
+            let kind = match (l.kind, sel, reverse) {
+                (b' ', ..) | (b'-', false, false) | (b'+', false, true) => Some(b' '),
+                (k, true, _) => Some(k),
+                (b'-', false, true) | (b'+', false, false) => None,
+                _ => None,
+            };
+            if let Some(k) = kind {
+                kept.push((k, l));
+            }
+        }
+        let count = |k: u8| kept.iter().filter(|(kk, _)| *kk == k).count() as i64;
+        let (ctx, minus, plus) = (count(b' '), count(b'-'), count(b'+'));
+        if minus + plus == 0 {
+            return Err(format!("hunk {}: nothing is selected", pick.index));
+        }
+        for sides in [*b" -", *b" +"] {
+            let side: Vec<&(u8, &DiffLine)> =
+                kept.iter().filter(|(k, _)| sides.contains(k)).collect();
+            let last = side.len().saturating_sub(1);
+            if side
+                .iter()
+                .enumerate()
+                .any(|(i, (_, l))| l.marker.is_some() && i != last)
+            {
+                return Err("the last line has no trailing newline: select its removed and added lines together".into());
+            }
+        }
+        let (old_len, new_len) = (ctx + minus, ctx + plus);
+        // Where the first line of each side sits (a side with no lines is
+        // printed as the line before, so its position is start + 1).
+        let old_pos = if hunk.old_len == 0 {
+            hunk.old_start + 1
+        } else {
+            hunk.old_start
+        };
+        let new_pos = if hunk.new_len == 0 {
+            hunk.new_start + 1
+        } else {
+            hunk.new_start
+        };
+        let (old_pos, new_pos) = if reverse {
+            (new_pos - running, new_pos)
+        } else {
+            (old_pos, old_pos + running)
+        };
+        let start = |pos: i64, len: i64| if len == 0 { pos - 1 } else { pos };
+        out.extend_from_slice(
+            format!(
+                "@@ -{},{} +{},{} @@",
+                start(old_pos, old_len),
+                old_len,
+                start(new_pos, new_len),
+                new_len
+            )
+            .as_bytes(),
+        );
+        out.extend_from_slice(&hunk.tail);
+        for (k, l) in kept {
+            out.push(k);
+            out.extend_from_slice(&l.bytes[1..]);
+            if let Some(m) = &l.marker {
+                out.extend_from_slice(m);
+            }
+        }
+        running += new_len - old_len;
+    }
+    Ok(out)
 }
 
 // --- Writes (naru task 2738) -------------------------------------------
@@ -1214,6 +1571,19 @@ pub fn run_write(dir: &str, args: &[&str], stdin: Option<Vec<u8>>) -> Result<(),
         msg.truncate(cut.unwrap_or(0));
     }
     Err(msg)
+}
+
+/// Applies a patch from [`build_partial_patch`] with one `git apply` on stdin
+/// (naru task 2739): stage `--cached`, unstage `--cached --reverse`, discard
+/// `--reverse` on the working tree. `Err` is git's own stderr; never retried,
+/// and `index.lock` is never touched.
+pub fn apply_hunks(dir: &str, op: WriteOp, patch: Vec<u8>) -> Result<(), String> {
+    let args: &[&str] = match op {
+        WriteOp::Stage => &["apply", "--cached", "--whitespace=nowarn", "-"],
+        WriteOp::Unstage => &["apply", "--cached", "--reverse", "--whitespace=nowarn", "-"],
+        WriteOp::Discard => &["apply", "--reverse", "--whitespace=nowarn", "-"],
+    };
+    run_write(dir, args, Some(patch))
 }
 
 /// Recent commit log (`git -C <dir> log -n LOG_CAP --date=iso-strict
@@ -4426,5 +4796,525 @@ mod tests {
         let m = tempfile::tempdir().unwrap();
         std::fs::create_dir(m.path().join("rebase-merge")).unwrap();
         assert_eq!(operation_in(m.path()).as_deref(), Some("rebase"));
+    }
+
+    // --- Hunk and line patches (naru task 2739) --------------------------
+
+    fn pk(index: usize, lines: Option<&[usize]>) -> HunkPick {
+        HunkPick {
+            index,
+            lines: lines.map(<[usize]>::to_vec),
+        }
+    }
+
+    fn patch(diff: &str, picks: &[HunkPick], reverse: bool) -> String {
+        String::from_utf8(build_partial_patch(diff.as_bytes(), picks, reverse).unwrap()).unwrap()
+    }
+
+    fn patch_err(diff: &[u8], picks: &[HunkPick], reverse: bool) -> String {
+        build_partial_patch(diff, picks, reverse).unwrap_err()
+    }
+
+    const H: &str = "diff --git a/f b/f\nindex 1..2 100644\n--- a/f\n+++ b/f\n";
+    const H3: &str = "diff --git a/f b/f\n--- a/f\n+++ b/f\n";
+
+    /// One hunk: body lines 0 ` a`, 1 `-b`, 2 `-c`, 3 `+B`, 4 `+C`, 5 ` d`, 6 ` e`.
+    fn one_hunk() -> String {
+        format!("{H}@@ -1,5 +1,5 @@ fn\n a\n-b\n-c\n+B\n+C\n d\n e\n")
+    }
+
+    /// Three hunks: a line added, a line changed, a line added at the end.
+    fn three_hunks() -> String {
+        format!(
+            "{H3}@@ -1,3 +1,4 @@\n a\n+x\n b\n c\n@@ -10,3 +11,3 @@\n j\n-k\n+K\n l\n@@ -20,3 +21,4 @@\n t\n u\n+v\n w\n"
+        )
+    }
+
+    #[test]
+    fn patch_forward_keeps_unselected_removals_as_context_and_drops_additions() {
+        let h = one_hunk();
+        // b becomes B: the header keeps only diff/---/+++, counts follow.
+        assert_eq!(
+            patch(&h, &[pk(0, Some(&[1, 3]))], false),
+            format!("{H3}@@ -1,5 +1,5 @@ fn\n a\n-b\n c\n+B\n d\n e\n")
+        );
+        // Only the removal of c: the new side is a line shorter.
+        assert_eq!(
+            patch(&h, &[pk(0, Some(&[2]))], false),
+            format!("{H3}@@ -1,5 +1,4 @@ fn\n a\n b\n-c\n d\n e\n")
+        );
+        // Only additions: nothing removed, nothing of the old lines lost.
+        assert_eq!(
+            patch(&h, &[pk(0, Some(&[3, 4]))], false),
+            format!("{H3}@@ -1,5 +1,7 @@ fn\n a\n b\n c\n+B\n+C\n d\n e\n")
+        );
+        // The whole hunk, by `None` or by listing every change.
+        assert_eq!(
+            patch(&h, &[pk(0, None)], false),
+            patch(&h, &[pk(0, Some(&[1, 2, 3, 4]))], false)
+        );
+        assert_eq!(
+            patch(&h, &[pk(0, None)], false),
+            format!("{H3}@@ -1,5 +1,5 @@ fn\n a\n-b\n-c\n+B\n+C\n d\n e\n")
+        );
+    }
+
+    #[test]
+    fn patch_reverse_keeps_unselected_additions_as_context_and_drops_removals() {
+        let h = one_hunk();
+        assert_eq!(
+            patch(&h, &[pk(0, Some(&[3]))], true),
+            format!("{H3}@@ -1,4 +1,5 @@ fn\n a\n+B\n C\n d\n e\n")
+        );
+        assert_eq!(
+            patch(&h, &[pk(0, Some(&[1, 3]))], true),
+            format!("{H3}@@ -1,5 +1,5 @@ fn\n a\n-b\n+B\n C\n d\n e\n")
+        );
+        // Only a removal: the added lines stay as context.
+        assert_eq!(
+            patch(&h, &[pk(0, Some(&[2]))], true),
+            format!("{H3}@@ -1,6 +1,5 @@ fn\n a\n-c\n B\n C\n d\n e\n")
+        );
+    }
+
+    #[test]
+    fn patch_running_offset_forward_and_reverse() {
+        let t = three_hunks();
+        // Forward: hunk 1 and 3 of 3; the new start moves by hunk 1's +1.
+        assert_eq!(
+            patch(&t, &[pk(0, None), pk(2, None)], false),
+            format!("{H3}@@ -1,3 +1,4 @@\n a\n+x\n b\n c\n@@ -20,3 +21,4 @@\n t\n u\n+v\n w\n")
+        );
+        // Without hunk 1 nothing shifts.
+        assert_eq!(
+            patch(&t, &[pk(1, None), pk(2, None)], false),
+            format!("{H3}@@ -10,3 +10,3 @@\n j\n-k\n+K\n l\n@@ -20,3 +20,4 @@\n t\n u\n+v\n w\n")
+        );
+        // Lines of hunk 2 (one removal, so -1), then the whole of hunk 3.
+        assert_eq!(
+            patch(&t, &[pk(1, Some(&[1])), pk(2, None)], false),
+            format!("{H3}@@ -10,3 +10,2 @@\n j\n-k\n l\n@@ -20,3 +19,4 @@\n t\n u\n+v\n w\n")
+        );
+        // Lines of hunk 1 (the addition), then all of hunk 2.
+        assert_eq!(
+            patch(&t, &[pk(0, Some(&[1])), pk(1, None)], false),
+            format!("{H3}@@ -1,3 +1,4 @@\n a\n+x\n b\n c\n@@ -10,3 +11,3 @@\n j\n-k\n+K\n l\n")
+        );
+        // Reverse keeps the new start and moves the old one.
+        assert_eq!(
+            patch(&t, &[pk(1, None), pk(2, None)], true),
+            format!("{H3}@@ -11,3 +11,3 @@\n j\n-k\n+K\n l\n@@ -21,3 +21,4 @@\n t\n u\n+v\n w\n")
+        );
+        assert_eq!(
+            patch(&t, &[pk(0, None), pk(2, None)], true),
+            format!("{H3}@@ -1,3 +1,4 @@\n a\n+x\n b\n c\n@@ -20,3 +21,4 @@\n t\n u\n+v\n w\n")
+        );
+        // Picks come out in diff order whatever order they were given.
+        assert_eq!(
+            patch(&t, &[pk(2, None), pk(0, None)], false),
+            patch(&t, &[pk(0, None), pk(2, None)], false)
+        );
+    }
+
+    #[test]
+    fn patch_hunks_at_the_start_and_end_of_a_file() {
+        // An insertion into an empty old side prints the line before: 0.
+        let start = format!("{H}@@ -0,0 +1,2 @@\n+A\n+B\n");
+        assert_eq!(
+            patch(&start, &[pk(0, Some(&[0]))], false),
+            format!("{H3}@@ -0,0 +1,1 @@\n+A\n")
+        );
+        assert_eq!(
+            patch(&start, &[pk(0, Some(&[0]))], true),
+            format!("{H3}@@ -1,1 +1,2 @@\n+A\n B\n")
+        );
+        // A deletion that empties the new side.
+        let gone = format!("{H}@@ -1,2 +0,0 @@\n-A\n-B\n");
+        assert_eq!(
+            patch(&gone, &[pk(0, Some(&[1]))], false),
+            format!("{H3}@@ -1,2 +1,1 @@\n A\n-B\n")
+        );
+        // The last lines of a file, no trailing context.
+        let end = format!("{H}@@ -8,2 +8,2 @@\n h\n-i\n+I\n");
+        assert_eq!(
+            patch(&end, &[pk(0, Some(&[2]))], false),
+            format!("{H3}@@ -8,2 +8,3 @@\n h\n i\n+I\n")
+        );
+    }
+
+    #[test]
+    fn patch_without_a_trailing_newline() {
+        let d = format!(
+            "{H}@@ -1,2 +1,2 @@\n a\n-b\n\\ No newline at end of file\n+B\n\\ No newline at end of file\n"
+        );
+        // The removed and added pair together is fine, both ways.
+        let pair = format!(
+            "{H3}@@ -1,2 +1,2 @@\n a\n-b\n\\ No newline at end of file\n+B\n\\ No newline at end of file\n"
+        );
+        assert_eq!(patch(&d, &[pk(0, Some(&[1, 2]))], false), pair);
+        assert_eq!(patch(&d, &[pk(0, None)], true), pair);
+        // Only the removal: b is the last line of the old side.
+        assert_eq!(
+            patch(&d, &[pk(0, Some(&[1]))], false),
+            format!("{H3}@@ -1,2 +1,1 @@\n a\n-b\n\\ No newline at end of file\n")
+        );
+        // Only the addition would leave b, no newline, before B.
+        let e = patch_err(d.as_bytes(), &[pk(0, Some(&[2]))], false);
+        assert!(e.contains("no trailing newline"), "{e}");
+        let e = patch_err(d.as_bytes(), &[pk(0, Some(&[1]))], true);
+        assert!(
+            e.contains("select its removed and added lines together"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn patch_keeps_crlf_and_non_utf8_bytes() {
+        let mut d = Vec::new();
+        d.extend_from_slice(H.as_bytes());
+        d.extend_from_slice(b"@@ -1,3 +1,3 @@\n a\r\n-b\xff\r\n+B\xfe\r\n c\r\n");
+        let out = build_partial_patch(&d, &[pk(0, Some(&[1, 2]))], false).unwrap();
+        let mut want = Vec::new();
+        want.extend_from_slice(H3.as_bytes());
+        want.extend_from_slice(b"@@ -1,3 +1,3 @@\n a\r\n-b\xff\r\n+B\xfe\r\n c\r\n");
+        assert_eq!(out, want);
+        // The digest reads the bytes too.
+        assert!(hunk_digest(&d).is_some());
+    }
+
+    #[test]
+    fn patch_validation_errors() {
+        let h = one_hunk();
+        let b = h.as_bytes();
+        let e = |picks: &[HunkPick]| patch_err(b, picks, false);
+        assert!(e(&[]).contains("must not be empty"));
+        assert!(e(&[pk(0, Some(&[]))]).contains("lines must not be empty"));
+        assert!(e(&[pk(0, None), pk(0, None)]).contains("listed twice"));
+        assert!(e(&[pk(0, Some(&[1, 1]))]).contains("listed twice"));
+        assert!(e(&[pk(1, None)]).contains("does not exist"));
+        assert!(e(&[pk(0, Some(&[7]))]).contains("does not exist"));
+        assert!(e(&[pk(0, Some(&[0]))]).contains("context"));
+        assert!(e(&[pk(0, Some(&[1, 5]))]).contains("context"));
+        // A picked hunk with no change lines at all.
+        let ctx_only = format!("{H}@@ -1,2 +1,2 @@\n a\n b\n");
+        assert!(patch_err(ctx_only.as_bytes(), &[pk(0, None)], false).contains("nothing"));
+        // A diff the builder cannot read.
+        assert!(patch_err(b"not a diff", &[pk(0, None)], false).contains("cannot be staged"));
+    }
+
+    #[test]
+    fn hunk_digest_is_none_for_every_ineligible_shape() {
+        let ok = one_hunk();
+        let d1 = hunk_digest(ok.as_bytes()).unwrap();
+        assert_eq!(d1, hunk_digest(ok.as_bytes()).unwrap());
+        assert_ne!(d1, hunk_digest(three_hunks().as_bytes()).unwrap());
+        let none = |s: String| assert_eq!(hunk_digest(s.as_bytes()), None, "{s}");
+        none(String::from(
+            "diff --git a/f b/f\nnew file mode 100644\n--- /dev/null\n+++ b/f\n@@ -0,0 +1 @@\n+a\n",
+        ));
+        none(String::from(
+            "diff --git a/f b/f\ndeleted file mode 100644\n--- a/f\n+++ /dev/null\n@@ -1 +0,0 @@\n-a\n",
+        ));
+        none("diff --git a/f b/g\nsimilarity index 90%\nrename from f\nrename to g\n--- a/f\n+++ b/g\n@@ -1 +1 @@\n-a\n+b\n".into());
+        none(
+            "diff --git a/f b/g\ncopy from f\ncopy to g\n--- a/f\n+++ b/g\n@@ -1 +1 @@\n-a\n+b\n"
+                .into(),
+        );
+        none("diff --git a/f b/f\nBinary files a/f and b/f differ\n".into());
+        none("diff --git a/f b/f\nGIT binary patch\nliteral 1\n".into());
+        none("diff --git a/f b/f\nold mode 100644\nnew mode 100755\n".into());
+        none(format!(
+            "{ok}diff --git a/g b/g\n--- a/g\n+++ b/g\n@@ -1 +1 @@\n-a\n+b\n"
+        ));
+        none(format!("{H}@@ -1,2 +1,2 @@\n a\n-b\n+B\nstray\n"));
+        none(format!("{H}@@ -1,3 +1,3 @@\n a\n-b\n+B\n"));
+        none(format!("{H}@@ -1 +1 @@\n-a\n+b"));
+        none(String::new());
+        // Over the cap.
+        let big = format!("{H}@@ -1 +1 @@\n-a\n+{}\n", "x".repeat(DIFF_CAP));
+        none(big);
+        // A mode line next to hunks is fine: the builder drops it.
+        let moded = String::from(
+            "diff --git a/f b/f\nold mode 100644\nnew mode 100755\nindex 1..2\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n+b\n",
+        );
+        assert!(hunk_digest(moded.as_bytes()).is_some());
+    }
+
+    // The real repo: what `git diff --cached` and `git diff` print after a
+    // hunk operation, minus the `index` lines (blob ids).
+
+    fn gout(d: &tempfile::TempDir, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(d.path())
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout)
+            .split_inclusive('\n')
+            .filter(|l| !l.starts_with("index "))
+            .map(
+                |l| match l.strip_prefix("@@ ").and_then(|r| r.find(" @@")) {
+                    // Drop git's section text after the second `@@`.
+                    Some(at) => format!("{} @@\n", &l[..3 + at]),
+                    None => l.to_string(),
+                },
+            )
+            .collect()
+    }
+
+    fn cached(d: &tempfile::TempDir) -> String {
+        gout(d, &["diff", "--cached"])
+    }
+
+    fn unstaged(d: &tempfile::TempDir) -> String {
+        gout(d, &["diff"])
+    }
+
+    /// Builds the patch for `name`'s picked side as the route does, applies it.
+    fn hunk_op(
+        d: &tempfile::TempDir,
+        name: &str,
+        op: WriteOp,
+        picks: &[HunkPick],
+    ) -> Result<(), String> {
+        let f = pick(d, &[name]).remove(0);
+        let raw = diff_bytes_of_file(dstr(d), &f, op == WriteOp::Unstage).unwrap();
+        apply_hunks(
+            dstr(d),
+            op,
+            build_partial_patch(&raw, picks, op != WriteOp::Stage)?,
+        )
+    }
+
+    /// `f.txt` committed as a, b, c, d, e (LF) and edited to a, B, C, d, e.
+    fn abcde(eol: &str) -> tempfile::TempDir {
+        let d = wrepo(true);
+        let lines = |l: [&str; 5]| l.iter().map(|s| format!("{s}{eol}")).collect::<String>();
+        put(&d, "f.txt", &lines(["a", "b", "c", "d", "e"]));
+        wgit(d.path(), &["add", "f.txt"]);
+        wgit(d.path(), &["commit", "-q", "-m", "f"]);
+        put(&d, "f.txt", &lines(["a", "B", "C", "d", "e"]));
+        d
+    }
+
+    const HDR: &str = "diff --git a/f.txt b/f.txt\n--- a/f.txt\n+++ b/f.txt\n";
+
+    #[test]
+    fn stage_hunk_and_stage_lines_in_a_real_repo() {
+        let d = abcde("\n");
+        hunk_op(&d, "f.txt", WriteOp::Stage, &[pk(0, Some(&[1, 3]))]).unwrap();
+        // The added B goes after the kept c: it follows the removed block.
+        assert_eq!(
+            cached(&d),
+            format!("{HDR}@@ -1,5 +1,5 @@\n a\n-b\n c\n+B\n d\n e\n")
+        );
+        assert_eq!(
+            unstaged(&d),
+            format!("{HDR}@@ -1,5 +1,5 @@\n a\n-c\n B\n+C\n d\n e\n")
+        );
+        // The rest of the file, as a whole hunk of the new unstaged diff.
+        hunk_op(&d, "f.txt", WriteOp::Stage, &[pk(0, None)]).unwrap();
+        assert_eq!(
+            cached(&d),
+            format!("{HDR}@@ -1,5 +1,5 @@\n a\n-b\n-c\n+B\n+C\n d\n e\n")
+        );
+        assert_eq!(unstaged(&d), "");
+    }
+
+    #[test]
+    fn unstage_hunk_and_unstage_lines_in_a_real_repo() {
+        let d = abcde("\n");
+        wgit(d.path(), &["add", "f.txt"]);
+        hunk_op(&d, "f.txt", WriteOp::Unstage, &[pk(0, Some(&[1, 3]))]).unwrap();
+        assert_eq!(
+            cached(&d),
+            format!("{HDR}@@ -1,5 +1,5 @@\n a\n b\n-c\n+C\n d\n e\n")
+        );
+        assert_eq!(
+            unstaged(&d),
+            format!("{HDR}@@ -1,5 +1,5 @@\n a\n-b\n+B\n C\n d\n e\n")
+        );
+        hunk_op(&d, "f.txt", WriteOp::Unstage, &[pk(0, None)]).unwrap();
+        assert_eq!(cached(&d), "");
+        assert_eq!(
+            unstaged(&d),
+            format!("{HDR}@@ -1,5 +1,5 @@\n a\n-b\n-c\n+B\n+C\n d\n e\n")
+        );
+    }
+
+    #[test]
+    fn discard_hunk_and_discard_lines_in_a_real_repo() {
+        let d = abcde("\n");
+        hunk_op(&d, "f.txt", WriteOp::Discard, &[pk(0, Some(&[1, 3]))]).unwrap();
+        assert_eq!(cached(&d), "");
+        assert_eq!(
+            unstaged(&d),
+            format!("{HDR}@@ -1,5 +1,5 @@\n a\n b\n-c\n+C\n d\n e\n")
+        );
+        assert_eq!(
+            std::fs::read_to_string(d.path().join("f.txt")).unwrap(),
+            "a\nb\nC\nd\ne\n"
+        );
+        hunk_op(&d, "f.txt", WriteOp::Discard, &[pk(0, None)]).unwrap();
+        assert_eq!(unstaged(&d), "");
+        assert_eq!(
+            std::fs::read_to_string(d.path().join("f.txt")).unwrap(),
+            "a\nb\nc\nd\ne\n"
+        );
+    }
+
+    #[test]
+    fn stage_lines_keeps_crlf() {
+        let d = abcde("\r\n");
+        hunk_op(&d, "f.txt", WriteOp::Stage, &[pk(0, Some(&[1, 3]))]).unwrap();
+        assert_eq!(
+            cached(&d),
+            format!("{HDR}@@ -1,5 +1,5 @@\n a\r\n-b\r\n c\r\n+B\r\n d\r\n e\r\n")
+        );
+        assert_eq!(
+            unstaged(&d),
+            format!("{HDR}@@ -1,5 +1,5 @@\n a\r\n-c\r\n B\r\n+C\r\n d\r\n e\r\n")
+        );
+    }
+
+    #[test]
+    fn stage_hunk_of_a_file_without_a_trailing_newline() {
+        let d = wrepo(true);
+        put(&d, "f.txt", "a\nb\nc");
+        wgit(d.path(), &["add", "f.txt"]);
+        wgit(d.path(), &["commit", "-q", "-m", "f"]);
+        put(&d, "f.txt", "a\nb\nC");
+        // Half of the c/C pair is refused and changes nothing.
+        let e = hunk_op(&d, "f.txt", WriteOp::Stage, &[pk(0, Some(&[3]))]).unwrap_err();
+        assert!(e.contains("no trailing newline"), "{e}");
+        assert_eq!(cached(&d), "");
+        let nl = "\\ No newline at end of file\n";
+        hunk_op(&d, "f.txt", WriteOp::Stage, &[pk(0, None)]).unwrap();
+        assert_eq!(
+            cached(&d),
+            format!("{HDR}@@ -1,3 +1,3 @@\n a\n b\n-c\n{nl}+C\n{nl}")
+        );
+        assert_eq!(unstaged(&d), "");
+    }
+
+    #[test]
+    fn stage_a_hunk_at_the_start_then_one_at_the_end_of_a_file() {
+        let d = wrepo(true);
+        let nums = |first: &str, last: &str| {
+            let mut s = String::new();
+            for i in 1..=10 {
+                s += &match i {
+                    1 => first.to_string(),
+                    10 => last.to_string(),
+                    _ => format!("l{i}"),
+                };
+                s.push('\n');
+            }
+            s
+        };
+        put(&d, "f.txt", &nums("l1", "l10"));
+        wgit(d.path(), &["add", "f.txt"]);
+        wgit(d.path(), &["commit", "-q", "-m", "f"]);
+        put(&d, "f.txt", &nums("L1", "L10"));
+        let first = "@@ -1,4 +1,4 @@\n-l1\n+L1\n l2\n l3\n l4\n";
+        let last = "@@ -7,4 +7,4 @@\n l7\n l8\n l9\n-l10\n+L10\n";
+        hunk_op(&d, "f.txt", WriteOp::Stage, &[pk(0, None)]).unwrap();
+        assert_eq!(cached(&d), format!("{HDR}{first}"));
+        assert_eq!(unstaged(&d), format!("{HDR}{last}"));
+        wgit(d.path(), &["reset", "-q"]);
+        hunk_op(&d, "f.txt", WriteOp::Stage, &[pk(1, None)]).unwrap();
+        assert_eq!(cached(&d), format!("{HDR}{last}"));
+        assert_eq!(unstaged(&d), format!("{HDR}{first}"));
+    }
+
+    #[test]
+    fn stage_only_the_second_of_two_adjacent_hunks() {
+        let d = wrepo(true);
+        let body = |ins: bool, nine: &str| {
+            let mut s = String::new();
+            for i in 1..=12 {
+                s += &if i == 9 {
+                    nine.to_string()
+                } else {
+                    format!("l{i}")
+                };
+                s.push('\n');
+                if i == 1 && ins {
+                    s += "x\n";
+                }
+            }
+            s
+        };
+        put(&d, "f.txt", &body(false, "l9"));
+        wgit(d.path(), &["add", "f.txt"]);
+        wgit(d.path(), &["commit", "-q", "-m", "f"]);
+        put(&d, "f.txt", &body(true, "L9"));
+        hunk_op(&d, "f.txt", WriteOp::Stage, &[pk(1, None)]).unwrap();
+        assert_eq!(
+            cached(&d),
+            format!("{HDR}@@ -6,7 +6,7 @@\n l6\n l7\n l8\n-l9\n+L9\n l10\n l11\n l12\n")
+        );
+        assert_eq!(
+            unstaged(&d),
+            format!("{HDR}@@ -1,4 +1,5 @@\n l1\n+x\n l2\n l3\n l4\n")
+        );
+    }
+
+    /// With `diff.context=0` a hunk has no context and `git apply` would
+    /// anchor it to the end of the file, staging the LAST `foo` here instead
+    /// of the one on line 3. The canonical diff pins three context lines.
+    #[test]
+    fn a_zero_context_config_cannot_stage_a_different_identical_line() {
+        let d = wrepo(true);
+        wgit(d.path(), &["config", "diff.context", "0"]);
+        put(&d, "f.txt", "a\nb\nfoo\nc\nd\ne\nf\nfoo\n");
+        wgit(d.path(), &["add", "f.txt"]);
+        wgit(d.path(), &["commit", "-q", "-m", "f"]);
+        put(&d, "f.txt", "a\nb\nc\nd\ne\nf\nfoo\n");
+        hunk_op(&d, "f.txt", WriteOp::Stage, &[pk(0, None)]).unwrap();
+        let index = Command::new("git")
+            .args(["-C", d.path().to_str().unwrap(), "show", ":f.txt"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&index.stdout),
+            "a\nb\nc\nd\ne\nf\nfoo\n"
+        );
+        wgit(d.path(), &["config", "--unset", "diff.context"]);
+        assert_eq!(unstaged(&d), "");
+    }
+
+    #[test]
+    fn a_held_index_lock_fails_with_gits_message_and_changes_nothing() {
+        let d = abcde("\n");
+        let before = unstaged(&d);
+        let lock = d.path().join(".git/index.lock");
+        std::fs::write(&lock, "").unwrap();
+        let e = hunk_op(&d, "f.txt", WriteOp::Stage, &[pk(0, None)]).unwrap_err();
+        assert!(e.contains("index.lock"), "{e}");
+        assert!(lock.exists(), "the lock is never removed");
+        assert_eq!(cached(&d), "");
+        assert_eq!(unstaged(&d), before);
+    }
+
+    #[test]
+    fn staging_a_hunk_does_not_stage_a_mode_change() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = abcde("\n");
+        std::fs::set_permissions(
+            d.path().join("f.txt"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        hunk_op(&d, "f.txt", WriteOp::Stage, &[pk(0, None)]).unwrap();
+        let c = cached(&d);
+        assert!(c.contains("-b\n-c\n+B\n+C\n"), "{c}");
+        assert!(!c.contains("mode"), "{c}");
+        let u = unstaged(&d);
+        assert!(u.contains("old mode 100644\nnew mode 100755\n"), "{u}");
+        assert!(!u.contains("@@"), "{u}");
     }
 }

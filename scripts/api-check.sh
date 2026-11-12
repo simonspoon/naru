@@ -231,6 +231,24 @@ raw GET "/api/projects/$PROJ/git/stage"
 [ "$STATUS" = "405" ] || fail "git stage must not answer a GET, got $STATUS"
 ok "git write routes: foreign Origin/Host 403, JSON required, worktree required 422, no folder 404, never a GET"
 
+# ---- Git hunk routes (naru task 2739): the same gate and ladder ----
+for op in stage-hunks unstage-hunks discard-hunks; do
+  raw POST "/api/projects/$PROJ/git/$op" -H 'Origin: http://evil.example' -H 'Content-Type: application/json' \
+    -d '{"worktree":"/x","path":"a","digest":"d","hunks":[{"index":0}]}'
+  [ "$STATUS" = "403" ] || fail "git $op with a foreign Origin: expected 403, got $STATUS ($BODY)"
+  raw POST "/api/projects/$PROJ/git/$op" -H 'Host: evil.example' -H 'Content-Type: application/json' \
+    -d '{"worktree":"/x","path":"a","digest":"d","hunks":[{"index":0}]}'
+  [ "$STATUS" = "403" ] || fail "git $op with a foreign Host: expected 403, got $STATUS"
+  raw POST "/api/projects/$PROJ/git/$op" -d 'worktree=/x'
+  [ "$STATUS" = "415" ] || fail "git $op without JSON Content-Type: expected 415, got $STATUS"
+  api 422 POST "/api/projects/$PROJ/git/$op" '{"path":"a","digest":"d","hunks":[{"index":0}]}'
+  [ "$(jqb .error.code)" = "validation" ] || fail "git $op without a worktree: error.code ($BODY)"
+  api 404 POST "/api/projects/$PROJ/git/$op" '{"worktree":"/x","path":"a","digest":"d","hunks":[{"index":0}]}'
+done
+raw GET "/api/projects/$PROJ/git/stage-hunks"
+[ "$STATUS" = "405" ] || fail "git stage-hunks must not answer a GET, got $STATUS"
+ok "git hunk routes: foreign Origin/Host 403, JSON required, worktree required 422, no folder 404, never a GET"
+
 # ---- Content-Type gate (cross-site form posts) ----
 
 # No Content-Type at all.

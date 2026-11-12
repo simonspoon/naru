@@ -4411,6 +4411,19 @@ fn router(state: AppState) -> Router {
             "/api/projects/{id}/git/discard",
             post(post_project_git_discard),
         )
+        // Hunk and line staging (naru task 2739): same gate as the three above.
+        .route(
+            "/api/projects/{id}/git/stage-hunks",
+            post(post_project_git_stage_hunks),
+        )
+        .route(
+            "/api/projects/{id}/git/unstage-hunks",
+            post(post_project_git_unstage_hunks),
+        )
+        .route(
+            "/api/projects/{id}/git/discard-hunks",
+            post(post_project_git_discard_hunks),
+        )
         // Commit history: recent log, one commit's changed files, and one
         // commit-file's diff. Same read-only/standard-guard-only posture as
         // the two routes above — these execute nothing but `git` shell-outs.
@@ -10669,11 +10682,17 @@ async fn get_project_git_diff(
     let file = file.clone();
     let target = wanted.clone();
     let staged = q.staged;
-    let diff = tokio::task::spawn_blocking(move || git::diff_of_file(&dir, &file, &target, staged))
-        .await
-        .unwrap_or(None)
-        .unwrap_or_default();
-    Ok(Json(GitFileDiff { path: wanted, diff }).into_response())
+    let (diff, digest) =
+        tokio::task::spawn_blocking(move || git::diff_and_digest(&dir, &file, &target, staged))
+            .await
+            .unwrap_or(None)
+            .unwrap_or_default();
+    Ok(Json(GitFileDiff {
+        path: wanted,
+        diff,
+        digest,
+    })
+    .into_response())
 }
 
 /// Body of the three git write routes (naru task 2738).
@@ -10858,6 +10877,193 @@ async fn post_project_git_discard(
     require_agent_access(&state, &addr, &headers)?;
     let Json(body) = body?;
     git_write(&state, id, git::WriteOp::Discard, body).await
+}
+
+/// Body of the three hunk routes (naru task 2739).
+#[derive(Deserialize)]
+struct GitHunksBody {
+    /// REQUIRED, as for `GitWriteBody`.
+    worktree: Option<String>,
+    repo: Option<String>,
+    path: Option<String>,
+    /// The `GitFileDiff.digest` the client rendered from.
+    digest: Option<String>,
+    hunks: Option<Vec<git::HunkPick>>,
+}
+
+/// The message of a 409 for a digest that no longer matches; the client shows
+/// it as is.
+const GIT_DIFF_CHANGED: &str =
+    "The diff changed since it was shown. It was reloaded; nothing was applied.";
+
+/// Shared by `POST .../git/{stage,unstage,discard}-hunks`, after the access
+/// gate. Stage and discard pick from the unstaged diff, unstage from the
+/// staged one. Order: body shape (422), project/repo/worktree (404), a FRESH
+/// status for the path (404) and the per-file rules (422), the raw diff of
+/// that side (422 when it takes no hunk operations), the digest (409, caches
+/// dropped, nothing applied), the patch (422), `git apply` (409 with git's
+/// text). Caches drop after any attempt; success returns the fresh view.
+async fn git_write_hunks(
+    state: &AppState,
+    id: i64,
+    op: git::WriteOp,
+    body: GitHunksBody,
+) -> ApiResult<Response> {
+    let worktree = body
+        .worktree
+        .as_deref()
+        .filter(|w| !w.is_empty())
+        .ok_or_else(|| git_write_validation("worktree is required"))?;
+    let path = body
+        .path
+        .as_deref()
+        .filter(|p| !p.is_empty())
+        .ok_or_else(|| git_write_validation("path is required"))?;
+    let digest = body
+        .digest
+        .as_deref()
+        .ok_or_else(|| git_write_validation("digest is required"))?;
+    let picks = body.hunks.unwrap_or_default();
+    git::check_picks_shape(&picks).map_err(git_write_validation)?;
+    let not_found = |message: String| ApiError {
+        status: StatusCode::NOT_FOUND,
+        code: "not_found",
+        message,
+    };
+    let local_path = state.store.lock().unwrap().get_project(id)?.local_path;
+    let Some(local_path) = local_path.filter(|p| std::path::Path::new(p).is_dir()) else {
+        return Err(not_found("project has no git folder".into()));
+    };
+    let base = resolve_repo_dir(state, &local_path, body.repo.as_deref()).await?;
+    let (dir, _worktrees) = resolve_git_dir(state, &base, Some(worktree)).await?;
+    let fresh = {
+        let d = dir.clone();
+        tokio::task::spawn_blocking(move || git::view_of(&d))
+            .await
+            .unwrap_or(None)
+    };
+    let Some(fresh) = fresh else {
+        return Err(not_found(format!("not a git repo: {dir}")));
+    };
+    let Some(file) = git::pick_entry(op, &fresh.files, path) else {
+        return Err(not_found(format!("path not in git status: {path}")));
+    };
+    git::check_write(op, std::slice::from_ref(file)).map_err(git_write_validation)?;
+    let staged = op == git::WriteOp::Unstage;
+    if file.status == "??" {
+        return Err(git_write_validation(format!(
+            "{path} is untracked; stage the whole file"
+        )));
+    }
+    if file.submodule {
+        return Err(git_write_validation(format!(
+            "{path} is a submodule; it has no hunks"
+        )));
+    }
+    if file.orig_path.is_some() {
+        return Err(git_write_validation(format!(
+            "{path} is renamed; stage the whole file"
+        )));
+    }
+    let (x, y) = (
+        file.status.chars().next().unwrap_or('.'),
+        file.status.chars().nth(1).unwrap_or('.'),
+    );
+    if staged && matches!(x, '.' | '?') {
+        return Err(git_write_validation(format!("{path}: nothing staged")));
+    }
+    if !staged && matches!(y, '.' | 'A') {
+        return Err(git_write_validation(format!("{path}: nothing unstaged")));
+    }
+    let file = file.clone();
+    let raw = {
+        let (d, f) = (dir.clone(), file);
+        tokio::task::spawn_blocking(move || git::diff_bytes_of_file(&d, &f, staged))
+            .await
+            .unwrap_or(None)
+    };
+    let Some(raw) = raw else {
+        return Err(git_write_validation(format!(
+            "could not read the diff of {path}"
+        )));
+    };
+    let Some(current) = git::hunk_digest(&raw) else {
+        return Err(git_write_validation(format!(
+            "{path} cannot be staged by hunk; use the whole file"
+        )));
+    };
+    if current != digest {
+        drop_git_caches(state);
+        return Err(ApiError {
+            status: StatusCode::CONFLICT,
+            code: "conflict",
+            message: GIT_DIFF_CHANGED.into(),
+        });
+    }
+    let patch = git::build_partial_patch(&raw, &picks, op != git::WriteOp::Stage)
+        .map_err(git_write_validation)?;
+    let written = {
+        let d = dir.clone();
+        tokio::task::spawn_blocking(move || git::apply_hunks(&d, op, patch))
+            .await
+            .unwrap_or_else(|_| Err("git apply task panicked".into()))
+    };
+    drop_git_caches(state);
+    written.map_err(|message| ApiError {
+        status: StatusCode::CONFLICT,
+        code: "conflict",
+        message,
+    })?;
+    let d = dir.clone();
+    match tokio::task::spawn_blocking(move || git::view_of(&d))
+        .await
+        .unwrap_or(None)
+    {
+        Some(view) => Ok(Json(view).into_response()),
+        None => Err(not_found(format!("not a git repo: {dir}"))),
+    }
+}
+
+/// `POST /api/projects/{id}/git/stage-hunks` — `{worktree, repo?, path,
+/// digest, hunks}`; see `git_write_hunks`. Agent-grade gate, like `stage`.
+async fn post_project_git_stage_hunks(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    body: Result<Json<GitHunksBody>, JsonRejection>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let Json(body) = body?;
+    git_write_hunks(&state, id, git::WriteOp::Stage, body).await
+}
+
+/// `POST /api/projects/{id}/git/unstage-hunks` — same body and gate; picks
+/// from the staged diff.
+async fn post_project_git_unstage_hunks(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    body: Result<Json<GitHunksBody>, JsonRejection>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let Json(body) = body?;
+    git_write_hunks(&state, id, git::WriteOp::Unstage, body).await
+}
+
+/// `POST /api/projects/{id}/git/discard-hunks` — same body and gate; picks
+/// from the unstaged diff and throws the picked changes away.
+async fn post_project_git_discard_hunks(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    body: Result<Json<GitHunksBody>, JsonRejection>,
+) -> ApiResult<Response> {
+    require_agent_access(&state, &addr, &headers)?;
+    let Json(body) = body?;
+    git_write_hunks(&state, id, git::WriteOp::Discard, body).await
 }
 
 /// `git_log_cache` key: the folder actually read, `all`, `skip`, filters, branch.
@@ -11456,7 +11662,12 @@ async fn get_project_git_commit_diff(
             .await
             .unwrap_or(None)
             .unwrap_or_default();
-    Ok(Json(GitFileDiff { path: wanted, diff }).into_response())
+    Ok(Json(GitFileDiff {
+        path: wanted,
+        diff,
+        digest: None,
+    })
+    .into_response())
 }
 
 /// Resolves a project's `local_path` and whether it is currently a live,
@@ -28312,6 +28523,414 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
             }
         }
         assert_eq!(git_lines(&root), ["?? new.txt"], "a refused request wrote");
+    }
+
+    // --- Git hunk and line staging (naru task 2739) ----------------------
+
+    const HUNK_ROUTES: [&str; 3] = ["stage-hunks", "unstage-hunks", "discard-hunks"];
+
+    async fn hunks_post_as(
+        state: &AppState,
+        id: i64,
+        op: &str,
+        body: serde_json::Value,
+        addr: SocketAddr,
+        headers: HeaderMap,
+    ) -> ApiResult<Response> {
+        let b = Ok(Json(serde_json::from_value::<GitHunksBody>(body).unwrap()));
+        let (s, c, p) = (State(state.clone()), ConnectInfo(addr), Path(id));
+        match op {
+            "stage-hunks" => post_project_git_stage_hunks(s, c, headers, p, b).await,
+            "unstage-hunks" => post_project_git_unstage_hunks(s, c, headers, p, b).await,
+            _ => post_project_git_discard_hunks(s, c, headers, p, b).await,
+        }
+    }
+
+    async fn hunks_post(
+        state: &AppState,
+        id: i64,
+        op: &str,
+        body: serde_json::Value,
+    ) -> ApiResult<Response> {
+        hunks_post_as(
+            state,
+            id,
+            op,
+            body,
+            loopback(),
+            hdrs(Some("localhost:0"), None),
+        )
+        .await
+    }
+
+    async fn hunks_diff(
+        state: &AppState,
+        id: i64,
+        wt: &str,
+        path: &str,
+        staged: Option<bool>,
+    ) -> serde_json::Value {
+        let side = staged.map(|s| format!("&staged={s}")).unwrap_or_default();
+        let uri = format!("/x?path={path}&worktree={}{side}", wt.replace('/', "%2F"));
+        let q = Query::<GitDiffQuery>::try_from_uri(&uri.parse().unwrap()).unwrap();
+        let resp = get_project_git_diff(State(state.clone()), Path(id), q)
+            .await
+            .unwrap();
+        json_body(resp).await
+    }
+
+    /// [`hunks_diff`] after the test changed the repo behind the 5 s caches.
+    async fn hunks_diff_fresh(
+        state: &AppState,
+        id: i64,
+        wt: &str,
+        path: &str,
+        staged: Option<bool>,
+    ) -> serde_json::Value {
+        drop_git_caches(state);
+        hunks_diff(state, id, wt, path, staged).await
+    }
+
+    fn git_out(root: &std::path::Path, args: &[&str]) -> Vec<u8> {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap()
+            .stdout
+    }
+
+    /// The fixture plus `f.txt` committed as a b c d e and edited to a B C d e.
+    fn hunks_fixture(state: &AppState) -> (tempfile::TempDir, std::path::PathBuf, i64, String) {
+        let (tmp, root, id, wt) = git_write_fixture(state);
+        std::fs::write(root.join("f.txt"), "a\nb\nc\nd\ne\n").unwrap();
+        git_in(&root, &["add", "f.txt"]);
+        git_in(&root, &["commit", "-q", "-m", "f"]);
+        std::fs::write(root.join("f.txt"), "a\nB\nC\nd\ne\n").unwrap();
+        (tmp, root, id, wt)
+    }
+
+    #[tokio::test]
+    async fn git_hunk_routes_change_the_repo_and_the_next_diff_is_fresh() {
+        let (_db, state) = test_state();
+        let (_tmp, root, id, wt) = hunks_fixture(&state);
+        let d = hunks_diff(&state, id, &wt, "f.txt", Some(false)).await;
+        let digest = d["digest"].as_str().unwrap().to_string();
+        assert!(d["diff"].as_str().unwrap().contains("+B\n+C\n"));
+
+        // Stage two lines; the reply is the fresh view.
+        let resp = hunks_post(
+            &state,
+            id,
+            "stage-hunks",
+            json!({"worktree": wt, "path": "f.txt", "digest": digest,
+                   "hunks": [{"index": 0, "lines": [1, 3]}]}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(json_body(resp).await["files"][0]["status"], "MM");
+        assert_eq!(
+            String::from_utf8(git_out(&root, &["diff", "--cached", "--stat"])).unwrap(),
+            " f.txt | 2 +-\n 1 file changed, 1 insertion(+), 1 deletion(-)\n"
+        );
+        // Not the 5 s cached answer: the unstaged side has a new digest.
+        let u = hunks_diff(&state, id, &wt, "f.txt", Some(false)).await;
+        assert_ne!(u["digest"].as_str().unwrap(), digest);
+        assert!(u["diff"].as_str().unwrap().contains("-c\n B\n+C\n"));
+        let s = hunks_diff(&state, id, &wt, "f.txt", Some(true)).await;
+        assert!(s["diff"].as_str().unwrap().contains("-b\n c\n+B\n"));
+
+        // Unstage the whole staged hunk.
+        let sd = s["digest"].as_str().unwrap().to_string();
+        hunks_post(
+            &state,
+            id,
+            "unstage-hunks",
+            json!({"worktree": wt, "path": "f.txt", "digest": sd,
+                   "hunks": [{"index": 0}]}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(git_out(&root, &["diff", "--cached"]), b"");
+        assert_eq!(
+            std::fs::read_to_string(root.join("f.txt")).unwrap(),
+            "a\nB\nC\nd\ne\n"
+        );
+
+        // Discard one line pair of the unstaged hunk.
+        let u = hunks_diff(&state, id, &wt, "f.txt", Some(false)).await;
+        hunks_post(
+            &state,
+            id,
+            "discard-hunks",
+            json!({"worktree": wt, "path": "f.txt", "digest": u["digest"],
+                   "hunks": [{"index": 0, "lines": [1, 3]}]}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("f.txt")).unwrap(),
+            "a\nb\nC\nd\ne\n"
+        );
+        assert_eq!(git_out(&root, &["diff", "--cached"]), b"");
+    }
+
+    #[tokio::test]
+    async fn git_hunk_routes_refuse_a_stale_digest_and_change_nothing() {
+        let (_db, state) = test_state();
+        let (_tmp, root, id, wt) = hunks_fixture(&state);
+        let d = hunks_diff(&state, id, &wt, "f.txt", Some(false)).await;
+        let digest = d["digest"].as_str().unwrap().to_string();
+        // The file changes under the shown diff.
+        std::fs::write(root.join("f.txt"), "a\nB\nC\nd\nE\n").unwrap();
+        let file_before = std::fs::read(root.join("f.txt")).unwrap();
+        let cached_before = git_out(&root, &["diff", "--cached"]);
+        let diff_before = git_out(&root, &["diff"]);
+        for op in HUNK_ROUTES {
+            for stale in [digest.as_str(), "not-a-digest"] {
+                let e = hunks_post(
+                    &state,
+                    id,
+                    op,
+                    json!({"worktree": wt, "path": "f.txt", "digest": stale,
+                           "hunks": [{"index": 0}]}),
+                )
+                .await
+                .err()
+                .unwrap();
+                // unstage-hunks has nothing staged: refused before the digest.
+                if op == "unstage-hunks" {
+                    assert_eq!(e.status, StatusCode::UNPROCESSABLE_ENTITY);
+                    continue;
+                }
+                assert_eq!(e.status, StatusCode::CONFLICT, "{op}");
+                assert_eq!(e.code, "conflict");
+                assert_eq!(
+                    e.message,
+                    "The diff changed since it was shown. It was reloaded; nothing was applied."
+                );
+            }
+        }
+        assert_eq!(std::fs::read(root.join("f.txt")).unwrap(), file_before);
+        assert_eq!(git_out(&root, &["diff", "--cached"]), cached_before);
+        assert_eq!(git_out(&root, &["diff"]), diff_before);
+        // The same stale case on the staged side.
+        git_in(&root, &["add", "f.txt"]);
+        let s = hunks_diff(&state, id, &wt, "f.txt", Some(true)).await;
+        let sd = s["digest"].as_str().unwrap().to_string();
+        std::fs::write(root.join("f.txt"), "a\nB\nC\nd\nE\nf\n").unwrap();
+        git_in(&root, &["add", "f.txt"]);
+        let cached_before = git_out(&root, &["diff", "--cached"]);
+        let e = hunks_post(
+            &state,
+            id,
+            "unstage-hunks",
+            json!({"worktree": wt, "path": "f.txt", "digest": sd,
+                   "hunks": [{"index": 0}]}),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert_eq!(e.status, StatusCode::CONFLICT);
+        assert_eq!(git_out(&root, &["diff", "--cached"]), cached_before);
+    }
+
+    #[tokio::test]
+    async fn git_hunk_routes_validate_and_refuse_per_file() {
+        let (_db, state) = test_state();
+        let (_tmp, root, id, wt) = hunks_fixture(&state);
+        let d = hunks_diff(&state, id, &wt, "f.txt", Some(false)).await;
+        let digest = d["digest"].as_str().unwrap().to_string();
+        let body = |extra: serde_json::Value| {
+            let mut b = json!({"worktree": wt, "path": "f.txt", "digest": digest,
+                               "hunks": [{"index": 0}]});
+            for (k, v) in extra.as_object().unwrap() {
+                b[k] = v.clone();
+            }
+            b
+        };
+        let status = |r: ApiResult<Response>| r.err().unwrap().status;
+        let before = git_out(&root, &["diff"]);
+        for op in HUNK_ROUTES {
+            for bad in [
+                json!({"worktree": null}),
+                json!({"worktree": ""}),
+                json!({"path": null}),
+                json!({"path": ""}),
+                json!({"digest": null}),
+                json!({"hunks": null}),
+                json!({"hunks": []}),
+                json!({"hunks": [{"index": 0, "lines": []}]}),
+                json!({"hunks": [{"index": 0}, {"index": 0}]}),
+                json!({"hunks": [{"index": 0, "lines": [1, 1]}]}),
+            ] {
+                assert_eq!(
+                    status(hunks_post(&state, id, op, body(bad.clone())).await),
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "{op} {bad}"
+                );
+            }
+        }
+        // Against the real diff: a bad index, a context line, a line too far.
+        for bad in [
+            json!({"hunks": [{"index": 1}]}),
+            json!({"hunks": [{"index": 0, "lines": [0]}]}),
+            json!({"hunks": [{"index": 0, "lines": [99]}]}),
+        ] {
+            for op in ["stage-hunks", "discard-hunks"] {
+                assert_eq!(
+                    status(hunks_post(&state, id, op, body(bad.clone())).await),
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "{op} {bad}"
+                );
+            }
+        }
+        // Unlisted path: 404. Unknown folder: 404.
+        for op in HUNK_ROUTES {
+            assert_eq!(
+                status(hunks_post(&state, id, op, body(json!({"path": "nope.txt"}))).await),
+                StatusCode::NOT_FOUND
+            );
+            assert_eq!(
+                status(hunks_post(&state, id, op, body(json!({"worktree": "/nope"}))).await),
+                StatusCode::NOT_FOUND
+            );
+        }
+        // Nothing staged: unstage is 422.
+        let e = hunks_post(&state, id, "unstage-hunks", body(json!({})))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(e.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(e.message.contains("nothing staged"), "{}", e.message);
+        // Untracked: 422 on all three.
+        std::fs::write(root.join("new.txt"), "n\n").unwrap();
+        for op in HUNK_ROUTES {
+            assert_eq!(
+                status(hunks_post(&state, id, op, body(json!({"path": "new.txt"}))).await),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{op}"
+            );
+        }
+        assert_eq!(git_out(&root, &["diff"]), before);
+        assert_eq!(git_out(&root, &["diff", "--cached"]), b"");
+    }
+
+    #[tokio::test]
+    async fn git_hunk_routes_refuse_a_conflicted_file() {
+        let (_db, state) = test_state();
+        let (_tmp, root, id, wt) = git_write_fixture(&state);
+        git_in(&root, &["checkout", "-q", "-b", "feature"]);
+        std::fs::write(root.join("base.txt"), "feature\n").unwrap();
+        git_in(&root, &["commit", "-q", "-am", "f"]);
+        git_in(&root, &["checkout", "-q", "-"]);
+        std::fs::write(root.join("base.txt"), "trunk\n").unwrap();
+        git_in(&root, &["commit", "-q", "-am", "t"]);
+        let _ = git_out(&root, &["merge", "feature"]);
+        let d = hunks_diff(&state, id, &wt, "base.txt", Some(false)).await;
+        assert!(d["digest"].is_null());
+        for op in HUNK_ROUTES {
+            let e = hunks_post(
+                &state,
+                id,
+                op,
+                json!({"worktree": wt, "path": "base.txt", "digest": "x",
+                       "hunks": [{"index": 0}]}),
+            )
+            .await
+            .err()
+            .unwrap();
+            assert_eq!(e.status, StatusCode::UNPROCESSABLE_ENTITY, "{op}");
+            assert!(e.message.contains("has conflicts"), "{}", e.message);
+        }
+    }
+
+    #[tokio::test]
+    async fn git_hunk_routes_need_the_agent_gate() {
+        let (_db, state) = test_state();
+        let (_tmp, root, id, wt) = hunks_fixture(&state);
+        let before = git_out(&root, &["diff"]);
+        let body = || {
+            json!({"worktree": wt, "path": "f.txt", "digest": "x",
+                   "hunks": [{"index": 0}]})
+        };
+        let lan: SocketAddr = "192.168.1.9:4000".parse().unwrap();
+        for op in HUNK_ROUTES {
+            let cases = [
+                ("non-loopback peer", lan, hdrs(Some("localhost:0"), None)),
+                (
+                    "foreign Origin",
+                    loopback(),
+                    hdrs(Some("localhost:0"), Some("http://evil.example")),
+                ),
+                ("foreign Host", loopback(), hdrs(Some("evil.example"), None)),
+                ("no Host", loopback(), hdrs(None, None)),
+            ];
+            for (what, addr, h) in cases {
+                let e = hunks_post_as(&state, id, op, body(), addr, h)
+                    .await
+                    .err()
+                    .unwrap_or_else(|| panic!("{op}: {what} was let through"));
+                assert_eq!(e.status, StatusCode::FORBIDDEN, "{op}: {what}");
+            }
+        }
+        assert_eq!(git_out(&root, &["diff"]), before);
+    }
+
+    #[tokio::test]
+    async fn git_diff_digest_is_set_only_for_a_hunk_eligible_side() {
+        let (_db, state) = test_state();
+        let (_tmp, root, id, wt) = hunks_fixture(&state);
+        // A plain modified file: both sides, and absent `staged`, differ.
+        let u = hunks_diff_fresh(&state, id, &wt, "f.txt", Some(false)).await;
+        assert!(u["digest"].is_string());
+        assert!(hunks_diff_fresh(&state, id, &wt, "f.txt", None).await["digest"].is_null());
+        git_in(&root, &["add", "f.txt"]);
+        let s = hunks_diff_fresh(&state, id, &wt, "f.txt", Some(true)).await;
+        assert!(s["digest"].is_string());
+        // Stable for an unchanged diff.
+        assert_eq!(
+            s["digest"],
+            hunks_diff_fresh(&state, id, &wt, "f.txt", Some(true)).await["digest"]
+        );
+        // Untracked.
+        std::fs::write(root.join("new.txt"), "n\n").unwrap();
+        assert!(
+            hunks_diff_fresh(&state, id, &wt, "new.txt", Some(false)).await["digest"].is_null()
+        );
+        // New file (staged).
+        git_in(&root, &["add", "new.txt"]);
+        assert!(hunks_diff_fresh(&state, id, &wt, "new.txt", Some(true)).await["digest"].is_null());
+        // Deleted.
+        std::fs::remove_file(root.join("base.txt")).unwrap();
+        let d = hunks_diff_fresh(&state, id, &wt, "base.txt", Some(false)).await;
+        assert!(d["diff"].as_str().unwrap().contains("-base"));
+        assert!(d["digest"].is_null());
+        // Renamed.
+        git_in(&root, &["checkout", "-q", "--", "base.txt"]);
+        git_in(&root, &["mv", "base.txt", "moved.txt"]);
+        let r = hunks_diff_fresh(&state, id, &wt, "moved.txt", Some(true)).await;
+        assert!(r["diff"].as_str().unwrap().contains("rename"), "{r}");
+        assert!(r["digest"].is_null());
+        // Binary.
+        std::fs::write(root.join("bin.dat"), b"\0\x01\x02").unwrap();
+        git_in(&root, &["add", "bin.dat"]);
+        git_in(&root, &["commit", "-q", "-m", "bin"]);
+        std::fs::write(root.join("bin.dat"), b"\0\x01\x03").unwrap();
+        let b = hunks_diff_fresh(&state, id, &wt, "bin.dat", Some(false)).await;
+        assert!(b["diff"].as_str().unwrap().contains("Binary files"));
+        assert!(b["digest"].is_null());
+        // Over the diff cap: the text is cut, there is no digest.
+        std::fs::write(root.join("big.txt"), "x\n").unwrap();
+        git_in(&root, &["add", "big.txt"]);
+        git_in(&root, &["commit", "-q", "-m", "big"]);
+        std::fs::write(root.join("big.txt"), "yyyyyyyyyyyyyyy\n".repeat(20_000)).unwrap();
+        let big = hunks_diff_fresh(&state, id, &wt, "big.txt", Some(false)).await;
+        assert!(big["diff"].as_str().unwrap().ends_with("[diff truncated]"));
+        assert!(big["digest"].is_null());
     }
 
     #[tokio::test]
