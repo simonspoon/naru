@@ -4,6 +4,7 @@ import {
   dirtyPaths,
   isDirty,
   needsCloseConfirm,
+  splitBulkClose,
   tabLabel,
   type DraftState,
 } from './fileDirty'
@@ -139,5 +140,28 @@ describe('tabLabel / closeLabel', () => {
   it('keep the full path in both, since basenames collide', () => {
     expect(tabLabel('src/a.ts', true)).toContain('src/a.ts')
     expect(closeLabel('src/a.ts', true)).toContain('src/a.ts')
+  })
+})
+
+describe('splitBulkClose', () => {
+  it('keeps dirty tabs open behind the confirm and closes the clean ones now', () => {
+    const s = single(['a.rs', 'b.ts', 'c.md'])
+    expect(splitBulkClose(s, 'left', ['a.rs', 'b.ts', 'c.md'], new Set(['b.ts']))).toEqual({
+      now: ['a.rs', 'c.md'],
+      ask: ['b.ts'],
+    })
+  })
+
+  it('a dirty path the other pane also holds closes now — nothing is discarded', () => {
+    const s = split(['a.rs', 'b.ts'], ['b.ts'])
+    expect(splitBulkClose(s, 'left', ['a.rs', 'b.ts'], new Set(['b.ts']))).toEqual({
+      now: ['a.rs', 'b.ts'],
+      ask: [],
+    })
+  })
+
+  it('an edit-mode tab with no changes is clean', () => {
+    const dirty = dirtyPaths(new Map([['a.rs', ui({ editing: true, draft: 'x', baseline: 'x' })]]))
+    expect(splitBulkClose(single(['a.rs']), 'left', ['a.rs'], dirty)).toEqual({ now: ['a.rs'], ask: [] })
   })
 })

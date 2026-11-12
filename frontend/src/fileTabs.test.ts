@@ -4,9 +4,12 @@ import {
   MAX_RATIO,
   MIN_RATIO,
   activateTab,
+  bulkCloseTargets,
+  clampMenu,
   clampRatio,
   closeSubtree,
   closeTab,
+  closeTabs,
   collapseSplit,
   cycleTab,
   dropIndex,
@@ -430,5 +433,92 @@ describe('cycleTab', () => {
     const s = cycleTab(three(), 'left', true)!
     assertWellFormed(s)
     expect(s.left.tabs).toEqual(['a.rs', 'b.ts', 'c.md'])
+  })
+})
+
+describe('bulkCloseTargets', () => {
+  const none = new Set<string>()
+  it('names each action\'s tabs in strip order, in that pane only', () => {
+    const s = three()
+    expect(bulkCloseTargets(s, 'left', 'b.ts', 'others', none)).toEqual(['a.rs', 'c.md'])
+    expect(bulkCloseTargets(s, 'left', 'a.rs', 'right', none)).toEqual(['b.ts', 'c.md'])
+    expect(bulkCloseTargets(s, 'left', 'b.ts', 'all', none)).toEqual(['a.rs', 'b.ts', 'c.md'])
+    // split(): right pane holds only c.md.
+    expect(bulkCloseTargets(split(), 'right', 'c.md', 'all', none)).toEqual(['c.md'])
+  })
+
+  it('"saved" skips dirty tabs', () => {
+    expect(bulkCloseTargets(three(), 'left', 'a.rs', 'saved', new Set(['b.ts']))).toEqual([
+      'a.rs',
+      'c.md',
+    ])
+  })
+
+  it('is empty — a disabled item — when the action would do nothing', () => {
+    const s = three()
+    expect(bulkCloseTargets(s, 'left', 'c.md', 'right', none)).toEqual([])
+    expect(bulkCloseTargets(split(), 'right', 'c.md', 'others', none)).toEqual([])
+    expect(bulkCloseTargets(s, 'left', 'a.rs', 'saved', new Set(['a.rs', 'b.ts', 'c.md']))).toEqual([])
+    expect(bulkCloseTargets(s, 'right', 'a.rs', 'all', none)).toEqual([]) // unsplit
+    expect(bulkCloseTargets(s, 'left', 'nope', 'all', none)).toEqual([])
+  })
+})
+
+describe('closeTabs', () => {
+  it('closes the set and activates by closeTab\'s rule', () => {
+    const s = activateTab(three(), 'left', 'a.rs')
+    // a.rs active and closed with b.ts: its right neighbour that survives is c.md.
+    const next = closeTabs(s, 'left', ['a.rs', 'b.ts'])
+    expect(next.left).toEqual({ tabs: ['c.md'], active: 'c.md' })
+    assertWellFormed(next)
+    // Closing to the right of the active tab leaves it active.
+    const right = closeTabs(s, 'left', ['b.ts', 'c.md'])
+    expect(right.left).toEqual({ tabs: ['a.rs'], active: 'a.rs' })
+  })
+
+  it('closing all of the only pane leaves the empty state', () => {
+    const next = closeTabs(three(), 'left', ['a.rs', 'b.ts', 'c.md'])
+    expect(next).toEqual({ ...emptyTabsState(), ratio: DEFAULT_RATIO })
+  })
+
+  it('emptying the right pane collapses the split', () => {
+    const next = closeTabs(split(), 'right', ['c.md'])
+    expect(next.right).toBeNull()
+    expect(next.left.tabs).toEqual(['a.rs', 'b.ts', 'c.md'])
+    expect(next.focused).toBe('left')
+  })
+
+  it('emptying the left pane collapses onto the right, and never reaches into it', () => {
+    const s: TabsState = {
+      left: { tabs: ['a.rs', 'b.ts'], active: 'a.rs' },
+      right: { tabs: ['b.ts', 'c.md'], active: 'b.ts' },
+      focused: 'left',
+      ratio: DEFAULT_RATIO,
+    }
+    // A stray extra path after the collapse must not close the survivor's copy.
+    const next = closeTabs(s, 'left', ['a.rs', 'b.ts', 'c.md'])
+    expect(next.right).toBeNull()
+    expect(next.left).toEqual({ tabs: ['b.ts', 'c.md'], active: 'b.ts' })
+    assertWellFormed(next)
+  })
+
+  it('a path open in both panes closes only in the named one', () => {
+    const next = closeTabs(split(), 'left', ['c.md'])
+    expect(next.left.tabs).toEqual(['a.rs', 'b.ts'])
+    expect(next.right!.tabs).toEqual(['c.md'])
+    expect(openPaths(next)).toContain('c.md')
+  })
+})
+
+describe('clampMenu', () => {
+  it('leaves a menu that fits where it was opened', () => {
+    expect(clampMenu(100, 50, 180, 150, 1280, 800)).toEqual({ x: 100, y: 50 })
+  })
+
+  it('pulls a menu back inside the right and bottom edges, and at phone width', () => {
+    expect(clampMenu(1250, 780, 180, 150, 1280, 800)).toEqual({ x: 1096, y: 646 })
+    expect(clampMenu(300, 10, 180, 150, 375, 667)).toEqual({ x: 191, y: 10 })
+    // Wider than the viewport: pinned to the left margin rather than off-screen.
+    expect(clampMenu(10, 10, 400, 150, 375, 667).x).toBe(4)
   })
 })

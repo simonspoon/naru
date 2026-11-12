@@ -389,3 +389,73 @@ export function splitWithTab(state: TabsState, from: TabSource): TabsState | nul
     ratio: DEFAULT_RATIO,
   }
 }
+
+/** The tab menu's bulk actions (naru task 2730), each over one pane, like an
+ *  editor's tab context menu. Single "Close" goes through the ordinary close. */
+export type BulkClose = 'others' | 'right' | 'saved' | 'all'
+
+/**
+ * The paths in `side`'s pane that `action`, raised on the tab at `path`,
+ * would close — in strip order. Empty means the menu item would do nothing
+ * and is shown disabled. `'saved'` is every tab without unsaved edits; the
+ * others ignore dirtiness here, since keeping a dirty tab open is the
+ * caller's confirm step, not a different target set.
+ */
+export function bulkCloseTargets(
+  state: TabsState,
+  side: PaneSide,
+  path: string,
+  action: BulkClose,
+  dirty: ReadonlySet<string>,
+): string[] {
+  const pane = paneOf(state, side)
+  if (pane === null) return []
+  const i = pane.tabs.indexOf(path)
+  if (i < 0) return []
+  switch (action) {
+    case 'others':
+      return pane.tabs.filter((p) => p !== path)
+    case 'right':
+      return pane.tabs.slice(i + 1)
+    case 'saved':
+      return pane.tabs.filter((p) => !dirty.has(p))
+    case 'all':
+      return [...pane.tabs]
+  }
+}
+
+/**
+ * Close every listed tab in one pane. Repeated `closeTab`, so activation,
+ * focus and the empty-pane split-collapse follow the single close's rules
+ * exactly. Stops at a collapse: the survivor is renamed `'left'`, and a
+ * further close on that side would reach into the *other* pane.
+ */
+export function closeTabs(state: TabsState, side: PaneSide, paths: readonly string[]): TabsState {
+  let next = state
+  for (const path of paths) {
+    const before = next
+    next = closeTab(next, side, path)
+    if (before.right !== null && next.right === null) break
+  }
+  return next
+}
+
+/**
+ * Where a menu of `w`×`h` opened at (`x`, `y`) actually goes so it stays
+ * inside a `vw`×`vh` viewport: flipped back from the right and bottom edges,
+ * never past the top-left `margin`.
+ */
+export function clampMenu(
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  vw: number,
+  vh: number,
+  margin = 4,
+): { x: number; y: number } {
+  return {
+    x: Math.max(margin, Math.min(x, vw - w - margin)),
+    y: Math.max(margin, Math.min(y, vh - h - margin)),
+  }
+}

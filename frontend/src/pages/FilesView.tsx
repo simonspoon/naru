@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import type {
   CSSProperties,
   DragEvent as ReactDragEvent,
@@ -7,8 +8,11 @@ import type {
 import { SyntaxHighlighter, usePrismStyle, prismGrammar } from '../syntaxHighlighter'
 import {
   activateTab,
+  bulkCloseTargets,
+  clampMenu,
   closeSubtree,
   closeTab,
+  closeTabs,
   collapseSplit,
   cycleTab,
   dropIndex,
@@ -21,6 +25,7 @@ import {
   setRatio,
   splitPane,
   splitWithTab,
+  type BulkClose,
   type PaneSide,
   type TabSource,
   type TabsState,
@@ -30,6 +35,7 @@ import {
   dirtyPaths,
   isDirty,
   needsCloseConfirm,
+  splitBulkClose,
   tabLabel,
 } from '../fileDirty'
 import {
@@ -2600,6 +2606,7 @@ function TabStrip({
   dirty,
   onActivate,
   onClose,
+  onMenu,
   onSplit,
   onDragBegin,
   onDragFinish,
@@ -2620,6 +2627,9 @@ function TabStrip({
   /** *Requests* a close: a dirty tab's is answered by the confirm bar rather
    * than by the tab going away (`FilesView.requestClose`). */
   onClose: (path: string) => void
+  /** Opens the tab menu (naru task 2730) for `path` at a viewport point;
+   * `trigger` is where focus goes back to when it closes. */
+  onMenu: (path: string, at: { x: number; y: number }, trigger: HTMLElement) => void
   onSplit: () => void
   onDragBegin: () => void
   onDragFinish: () => void
@@ -2628,6 +2638,15 @@ function TabStrip({
   onDragLeaveStrip: () => void
 }) {
   const stripRef = useRef<HTMLDivElement>(null)
+  // The phone tier's long-press into the tab menu: the pending timer, and
+  // whether it fired — a fired press swallows its own touchend, or the
+  // synthesized click after it would land outside the menu and close it.
+  const press = useRef<{ timer: number; fired: boolean; x: number; y: number } | null>(null)
+  const cancelPress = () => {
+    if (press.current !== null) window.clearTimeout(press.current.timer)
+    press.current = null
+  }
+  useEffect(() => cancelPress, [])
 
   // The pure part is `dropIndex`; the measuring stays here, where the DOM is.
   function indexAt(clientX: number): number {
@@ -2676,6 +2695,7 @@ function TabStrip({
             mark !== null && mark.side === side && mark.index === i ? ' drop-before' : ''
           }`}
           onDragStart={(e) => {
+            cancelPress()
             dragging = { side, path }
             e.dataTransfer.effectAllowed = 'move'
             // Some browsers cancel a drag that carries no payload at all.
@@ -2693,6 +2713,45 @@ function TabStrip({
               e.preventDefault()
               onClose(path)
             }
+          }}
+          // The tab menu (naru task 2730): right-click, the menu key or
+          // Shift+F10 on the focused tab, and a long-press on touch.
+          onContextMenu={(e) => {
+            e.preventDefault()
+            onMenu(path, { x: e.clientX, y: e.clientY }, e.currentTarget.querySelector('button') ?? e.currentTarget)
+          }}
+          onKeyDown={(e) => {
+            if (!((e.shiftKey && e.key === 'F10') || e.key === 'ContextMenu')) return
+            e.preventDefault()
+            const r = e.currentTarget.getBoundingClientRect()
+            onMenu(path, { x: r.left, y: r.bottom }, (e.target as HTMLElement))
+          }}
+          onTouchStart={(e) => {
+            const t = e.touches[0]
+            const el = e.currentTarget
+            const at = { x: t.clientX, y: t.clientY }
+            cancelPress()
+            const p = { fired: false, timer: 0, ...at }
+            p.timer = window.setTimeout(() => {
+              p.fired = true
+              onMenu(path, at, el.querySelector('button') ?? el)
+            }, 500)
+            press.current = p
+          }}
+          // A held finger jitters a few pixels; only a real move (a scroll,
+          // a swipe) cancels the press.
+          onTouchMove={(e) => {
+            const p = press.current
+            const t = e.touches[0]
+            if (p !== null && !p.fired && Math.hypot(t.clientX - p.x, t.clientY - p.y) > 10) cancelPress()
+          }}
+          onTouchCancel={cancelPress}
+          onTouchEnd={(e) => {
+            const p = press.current
+            press.current = null
+            if (p === null) return
+            window.clearTimeout(p.timer)
+            if (p.fired) e.preventDefault()
           }}
         >
           <button
@@ -2806,6 +2865,147 @@ function CloseConfirmBar({
   )
 }
 
+/** An open tab menu: which tab it was raised on, where, and what to hand
+ *  focus back to. */
+interface TabMenuState {
+  side: PaneSide
+  path: string
+  x: number
+  y: number
+  trigger: HTMLElement
+}
+
+/** The menu's items, in order. `'close'` is the single close; the rest are
+ *  `fileTabs.ts`'s bulk actions. */
+const TAB_MENU_ITEMS: { action: 'close' | BulkClose; label: string }[] = [
+  { action: 'close', label: 'Close' },
+  { action: 'others', label: 'Close others' },
+  { action: 'right', label: 'Close to the right' },
+  { action: 'saved', label: 'Close saved' },
+  { action: 'all', label: 'Close all' },
+]
+
+/**
+ * A tab's context menu (naru task 2730): the editor set of closes over that
+ * tab's pane. The workflow canvas's pin menu is the house pattern — same
+ * classes, portalled to the body, first item focused, arrows move, Escape and
+ * a click away close — plus a clamp so it never opens past the viewport edge.
+ * Items with nothing to close are disabled rather than hidden, so the menu
+ * keeps one shape.
+ */
+function TabMenu({
+  menu,
+  enabled,
+  onPick,
+  onClose,
+}: {
+  menu: TabMenuState
+  enabled: (action: 'close' | BulkClose) => boolean
+  onPick: (action: 'close' | BulkClose) => void
+  onClose: () => void
+}) {
+  const ref = useRef<HTMLDivElement>(null)
+  const [at, setAt] = useState({ x: menu.x, y: menu.y })
+  useLayoutEffect(() => {
+    const el = ref.current
+    if (el === null) return
+    const r = el.getBoundingClientRect()
+    setAt(clampMenu(menu.x, menu.y, r.width, r.height, window.innerWidth, window.innerHeight))
+    el.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus()
+  }, [menu.x, menu.y])
+  useEffect(() => {
+    const away = (e: Event) => {
+      if (!ref.current?.contains(e.target as Node)) onClose()
+    }
+    window.addEventListener('mousedown', away)
+    window.addEventListener('touchstart', away)
+    return () => {
+      window.removeEventListener('mousedown', away)
+      window.removeEventListener('touchstart', away)
+    }
+  }, [onClose])
+  return createPortal(
+    <div
+      ref={ref}
+      className="wf-pin-menu files-tab-menu"
+      role="menu"
+      aria-label={`Tab ${basename(menu.path)}`}
+      style={{ left: at.x, top: at.y }}
+      // Handled here and stopped, so the app's arrow-key focus movement and
+      // the Files tab's own Escape owners never see a key meant for the menu.
+      onKeyDown={(e) => {
+        if (e.key === 'Escape' || e.key === 'Tab') {
+          e.preventDefault()
+          e.stopPropagation()
+          // A keyboard dismissal hands the caret back to the tab it came from.
+          menu.trigger.focus()
+          onClose()
+        } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+          e.preventDefault()
+          e.stopPropagation()
+          const items = Array.from(ref.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') ?? [])
+          const i = items.indexOf(document.activeElement as HTMLButtonElement)
+          items[(i + (e.key === 'ArrowDown' ? 1 : items.length - 1)) % items.length]?.focus()
+        }
+      }}
+    >
+      <div className="wf-pin-menu-head">{basename(menu.path)}</div>
+      {TAB_MENU_ITEMS.map(({ action, label }) => (
+        <button
+          key={action}
+          type="button"
+          role="menuitem"
+          disabled={!enabled(action)}
+          onClick={() => onPick(action)}
+        >
+          {label}
+        </button>
+      ))}
+    </div>,
+    document.body,
+  )
+}
+
+/**
+ * The one prompt a bulk close leaves behind (naru task 2730): every clean tab
+ * in the set has already gone, and these dirty ones are still open. Same
+ * classes and two-step shape as `CloseConfirmBar`, for the reasons given
+ * there; its own component because it counts files rather than naming one.
+ */
+function BulkCloseConfirmBar({
+  count,
+  onDiscard,
+  onCancel,
+}: {
+  count: number
+  onDiscard: () => void
+  onCancel: () => void
+}) {
+  return (
+    <div
+      className="files-close-confirm confirm-delete"
+      role="alert"
+      // Escape resolves the safe way and is stopped, as `CloseConfirmBar`'s is.
+      onKeyDown={(e) => {
+        if (e.key !== 'Escape') return
+        e.preventDefault()
+        e.stopPropagation()
+        onCancel()
+      }}
+    >
+      <span className="confirm-message">
+        {count} unsaved {count === 1 ? 'file remains' : 'files remain'} open.
+      </span>
+      <button className="danger" onClick={onDiscard}>
+        Discard {count} and close
+      </button>
+      <button autoFocus onClick={onCancel}>
+        Keep
+      </button>
+    </div>
+  )
+}
+
 /**
  * The prompt a dirty buffer puts between the user and either way out of edit
  * mode (mesa task 1271).
@@ -2869,6 +3069,7 @@ function FilePane({
   mark,
   dirty,
   pendingClose,
+  pendingBulk,
   fileUi,
   onUi,
   wrap,
@@ -2879,6 +3080,9 @@ function FilePane({
   onClose,
   onConfirmClose,
   onCancelClose,
+  onMenu,
+  onConfirmBulk,
+  onCancelBulk,
   onSplit,
   onDragBegin,
   onDragFinish,
@@ -2897,6 +3101,9 @@ function FilePane({
   dirty: ReadonlySet<string>
   /** The path in *this* pane awaiting a discard/keep answer, if any. */
   pendingClose: string | null
+  /** How many dirty tabs a bulk close in *this* pane left awaiting an answer
+   * (naru task 2730); 0 for none. */
+  pendingBulk: number
   fileUi: Map<string, FileUiState>
   onUi: (path: string, patch: Partial<FileUiState>) => void
   wrap: boolean
@@ -2911,6 +3118,9 @@ function FilePane({
   onClose: (path: string) => void
   onConfirmClose: () => void
   onCancelClose: () => void
+  onMenu: (path: string, at: { x: number; y: number }, trigger: HTMLElement) => void
+  onConfirmBulk: () => void
+  onCancelBulk: () => void
   onSplit: () => void
   onDragBegin: () => void
   onDragFinish: () => void
@@ -2935,6 +3145,7 @@ function FilePane({
         dirty={dirty}
         onActivate={onActivate}
         onClose={onClose}
+        onMenu={onMenu}
         onSplit={onSplit}
         onDragBegin={onDragBegin}
         onDragFinish={onDragFinish}
@@ -2950,6 +3161,13 @@ function FilePane({
           path={pendingClose}
           onDiscard={onConfirmClose}
           onCancel={onCancelClose}
+        />
+      )}
+      {pendingBulk > 0 && (
+        <BulkCloseConfirmBar
+          count={pendingBulk}
+          onDiscard={onConfirmBulk}
+          onCancel={onCancelBulk}
         />
       )}
       <div className="files-pane-body">
@@ -3169,6 +3387,14 @@ export function FilesView({ projectId }: { projectId: number }) {
     side: PaneSide
     path: string
   } | null>(null)
+  // A bulk close's dirty leftovers awaiting one discard/keep answer (naru task
+  // 2730), and the open tab menu. Raising either close prompt drops the other,
+  // so a pane never shows two.
+  const [pendingBulk, setPendingBulk] = useState<{
+    side: PaneSide
+    paths: string[]
+  } | null>(null)
+  const [tabMenu, setTabMenu] = useState<TabMenuState | null>(null)
   // Whether a tab drag is in flight at all — what arms the right-edge split
   // zone. Distinct from `mark`, which is only set while the pointer is over a
   // strip: leaving the strip for the edge clears the indicator but must not
@@ -3412,6 +3638,8 @@ export function FilesView({ projectId }: { projectId: number }) {
     setTreeAction(null)
     setTreeActionError(null)
     setPendingClose(null)
+    setPendingBulk(null)
+    setTabMenu(null)
     // A search is about one project's tree, and so is the result open on
     // screen; both are meaningless against the next one. The query itself goes
     // with them rather than being carried over, since the panel would
@@ -3441,6 +3669,13 @@ export function FilesView({ projectId }: { projectId: number }) {
   ) {
     setPendingClose(null)
   }
+  // The bulk prompt's paths that still need it, re-asked every render by the
+  // same rule — and dropped, by the same reasoning as above, once none do.
+  const bulkLeft =
+    pendingBulk === null
+      ? []
+      : splitBulkClose(tabs, pendingBulk.side, pendingBulk.paths, dirty).ask
+  if (pendingBulk !== null && bulkLeft.length === 0) setPendingBulk(null)
 
   /**
    * Every tabs write goes through here, as a **transition off the previous
@@ -3479,12 +3714,50 @@ export function FilesView({ projectId }: { projectId: number }) {
    */
   function requestClose(side: PaneSide, path: string) {
     if (needsCloseConfirm(tabs, side, path, dirty)) {
+      setPendingBulk(null)
       setPendingClose({ side, path })
       return
     }
     setPendingClose(null)
     commit((prev) => closeTab(prev, side, path))
   }
+
+  /** A tab menu pick (naru task 2730). The clean tabs in the set close now;
+   *  the dirty ones stay open behind one prompt, never discarded unasked. */
+  function pickTabMenu(menu: TabMenuState, action: 'close' | BulkClose) {
+    setTabMenu(null)
+    // The picked item unmounts with the menu; once the closes have rendered,
+    // hand the caret back to the tab it came from, or — if that one closed —
+    // to the focused pane's active tab, so a keyboard user stays in the strip.
+    // A confirm bar the pick raised keeps its autofocused safe answer.
+    requestAnimationFrame(() => {
+      if (document.activeElement?.closest('.files-close-confirm')) return
+      const back = menu.trigger.isConnected
+        ? menu.trigger
+        : document.querySelector<HTMLElement>('.files-content-pane.focused .files-tab.active .files-tab-label')
+      back?.focus()
+    })
+    if (action === 'close') {
+      requestClose(menu.side, menu.path)
+      return
+    }
+    const targets = bulkCloseTargets(tabs, menu.side, menu.path, action, dirty)
+    const { now, ask } = splitBulkClose(tabs, menu.side, targets, dirty)
+    setPendingClose(null)
+    setPendingBulk(ask.length > 0 ? { side: menu.side, paths: ask } : null)
+    commit((prev) => closeTabs(prev, menu.side, now))
+  }
+
+  /** "Discard N and close" — the bulk prompt's destructive answer. */
+  function confirmBulk() {
+    const pending = pendingBulk
+    if (pending === null) return
+    const paths = bulkLeft
+    setPendingBulk(null)
+    commit((prev) => closeTabs(prev, pending.side, paths))
+  }
+
+  const closeTabMenu = useCallback(() => setTabMenu(null), [])
 
   /** "discard and close" — the prompt's one destructive answer. */
   function confirmClose() {
@@ -3888,6 +4161,11 @@ export function FilesView({ projectId }: { projectId: number }) {
       onClose: (path: string) => requestClose(side, path),
       onConfirmClose: confirmClose,
       onCancelClose: () => setPendingClose(null),
+      pendingBulk: pendingBulk?.side === side ? bulkLeft.length : 0,
+      onMenu: (path: string, at: { x: number; y: number }, trigger: HTMLElement) =>
+        setTabMenu({ side, path, x: at.x, y: at.y, trigger }),
+      onConfirmBulk: confirmBulk,
+      onCancelBulk: () => setPendingBulk(null),
       onSplit: () => commit(splitPane),
       onDragBegin: () => setDragActive(true),
       onDragFinish: endDrag,
@@ -4122,6 +4400,17 @@ export function FilesView({ projectId }: { projectId: number }) {
           )}
         </div>
       </div>
+      {tabMenu !== null && (
+        <TabMenu
+          menu={tabMenu}
+          enabled={(action) =>
+            action === 'close' ||
+            bulkCloseTargets(tabs, tabMenu.side, tabMenu.path, action, dirty).length > 0
+          }
+          onPick={(action) => pickTabMenu(tabMenu, action)}
+          onClose={closeTabMenu}
+        />
+      )}
     </div>
   )
 }

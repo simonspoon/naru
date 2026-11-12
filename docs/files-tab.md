@@ -408,6 +408,19 @@ twice.
   right-hand neighbour, else its left. Emptying a pane while split *collapses*
   the split and the survivor takes the full width; emptying the only pane
   leaves the same "Select a file" empty state as before.
+- **Tab menu (naru task 2730).** Right-click a tab, long-press it on touch, or
+  press the menu key / Shift+F10 on a focused tab: **Close**, **Close others**,
+  **Close to the right**, **Close saved**, **Close all** — each over that tab's
+  pane only. An item that would close nothing is disabled. Escape (or Tab, or a
+  click away) dismisses it. It reuses the workflow pin menu's classes
+  (`.wf-pin-menu`), portalled to the body and clamped inside the viewport
+  (`clampMenu`). The target sets are `fileTabs.ts::bulkCloseTargets`, the
+  close itself repeated `closeTab` (`closeTabs`), so activation, focus and the
+  split collapse follow the single close. Unsaved work is never dropped: the
+  clean tabs close at once and the dirty ones stay open behind **one** inline
+  prompt — "N unsaved files remain open", **Discard N and close** / **Keep** —
+  split by `fileDirty.ts::splitBulkClose` with the single close's own rule, so
+  a dirty file the other pane still holds closes here and keeps its draft.
 - **Split.** Entered from the strip's **Split** button — which **copies** the
   active tab into a new right pane, because moving it would empty a one-tab
   source pane and collapse the split it just created — or by dragging a tab

@@ -99,3 +99,21 @@ export function tabLabel(path: string, dirty: boolean): string {
 export function closeLabel(path: string, dirty: boolean): string {
   return dirty ? `Close ${path} — unsaved changes` : `Close ${path}`
 }
+
+/**
+ * Split a bulk close's targets in one pane (naru task 2730) into the tabs that
+ * can go now and the ones that must stay open behind a confirm — exactly the
+ * single close's rule, `needsCloseConfirm`, per path. A dirty file the other
+ * pane also holds goes now: closing this copy discards nothing.
+ */
+export function splitBulkClose(
+  state: TabsState,
+  side: PaneSide,
+  paths: readonly string[],
+  dirty: ReadonlySet<string>,
+): { now: string[]; ask: string[] } {
+  const now: string[] = []
+  const ask: string[] = []
+  for (const p of paths) (needsCloseConfirm(state, side, p, dirty) ? ask : now).push(p)
+  return { now, ask }
+}
