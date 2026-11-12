@@ -34,13 +34,18 @@
 - **Tell the verifier how to wait.** A trial series runs as one **foreground**
   Bash command with an explicit `timeout` it computes (trial count × per-trial
   budget, plus margin) and states in its report.
+- **State the deadline as a clock time** (see `waiting.md`, "Deadlines"), and tell
+  the agent to report partial results by it rather than overrun, listing what was
+  and was not checked. Same line goes in every implementer brief.
 
 ```
 Metric: <measurable quantity> = <pass value> (e.g. failing requests after a restart = 0). Measure this first.
 Baseline rule: rate series only if HEAD reproduces within 3 trials; otherwise stop and report.
 Budget: 45 minutes wall clock; over budget, check in with evidence so far instead of continuing.
+Deadline: <HH:MM clock time>. Report partial results by then rather than overrun — list what was and was not checked.
 Waiting: one foreground command per trial series, with a timeout you compute and state. Inside trials use wait-for, not sleep.
 Handoff: <path to handoff.md or scripts/verify/>, or "none — design one".
+Audio (when the check touches sound): input only from files or a virtual loopback device (e.g. BlackHole 2ch) by name; never `sox -d`, `rec` or any default-input capture — the real mic records the person's conversation.
 Reporting: end your turn with the report; never SendMessage it as well — SendMessage is for mid-run questions only.
 ```
 
@@ -71,7 +76,25 @@ Task: <scoped change>. Files: <absolute paths, or quoted lines for files outside
 Worktree: <absolute worktree path>; confirm with `git rev-parse --show-toplevel` before editing.
 Gates: fast tier after each edit — <formatter>, <linter>, <the one test target touched>. Do not run the full chain; the supervisor runs it once on the committed tree.
 Cold build: <shared cache available | none — batch your edits before the first build>.
+Deadline: <HH:MM clock time>. Report partial results by then rather than overrun — list what was and was not done.
 Reporting: end your turn with the report; never SendMessage it as well — SendMessage is for mid-run questions and interim results you asked for.
+```
+
+## Parallel implementer brief
+
+For pieces of one `parallel-group` (up to 3 at once, see `splitting.md`), each
+launched with Agent `isolation: "worktree"`. Name the worktree path from the
+launch notification.
+
+```
+Task: <piece>. You are one of <n> parallel implementers; others edit other files at the same time.
+Worktree: <absolute worktree path>; confirm with `git rev-parse --show-toplevel` before editing. Use `git -C <absolute path> ...`, one plain command per call.
+Owned files: <absolute paths>. Touch these and nothing else; no lockfile or generated-file changes unless listed. Need another file? Stop and report.
+Shared resources: none. No dev servers, Naru Beta, simulators or UI checks; write code and run unit/fast tests only.
+Gates: fast tier only — <formatter>, <linter>, <the one test target touched>. Commit in the worktree. Do not merge; the supervisor merges pieces one at a time.
+Cold build: <none — own build dir, batch your edits before the first build>.
+Deadline: <HH:MM clock time>. Report partial results by then rather than overrun — list what was and was not done.
+Reporting: end your turn with the report (branch, commit sha, files changed); never SendMessage it as well.
 ```
 
 ## Reproduce before you implement

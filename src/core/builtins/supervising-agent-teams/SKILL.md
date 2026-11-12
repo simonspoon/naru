@@ -17,6 +17,9 @@ its moment.
 - **Every brief names its metric, budget, paths and gate tier.** Read
   [briefs.md](briefs.md) when you write an implementer, verifier or
   reproduction brief, or launch `ui-verifier`.
+- **Size the task before planning; split a big one into subtasks.** Read
+  [splitting.md](splitting.md) when a task may change many files or areas, or
+  before running implementers in parallel.
 - **One agent per device, simulator, port and scratch dir; stand-downs expire.**
   Read [resources.md](resources.md) when two agents might share something, or
   before you touch a simulator or resume an agent.

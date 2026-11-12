@@ -338,6 +338,10 @@ echo \"Claude Code stopped in $(pwd)\"
                 include_str!("builtins/supervising-agent-teams/resources.md"),
             ),
             (
+                "splitting.md",
+                include_str!("builtins/supervising-agent-teams/splitting.md"),
+            ),
+            (
                 "verifying.md",
                 include_str!("builtins/supervising-agent-teams/verifying.md"),
             ),
@@ -4643,7 +4647,7 @@ mod tests {
     }
 
     #[test]
-    fn the_supervising_skill_builtin_carries_its_five_sibling_files() {
+    fn the_supervising_skill_builtin_carries_its_six_sibling_files() {
         let (store, _dir) = temp_store();
         let items = effective_items(&store, None).unwrap();
         let skill = items
@@ -4662,6 +4666,7 @@ mod tests {
                 "briefs.md",
                 "intervening.md",
                 "resources.md",
+                "splitting.md",
                 "verifying.md",
                 "waiting.md"
             ]
@@ -4686,6 +4691,7 @@ mod tests {
                 "briefs.md",
                 "intervening.md",
                 "resources.md",
+                "splitting.md",
                 "verifying.md",
                 "waiting.md",
             ] {
@@ -4857,7 +4863,7 @@ mod tests {
                 false,
             )
             .unwrap();
-        assert_eq!(fork.files.len(), 5);
+        assert_eq!(fork.files.len(), 6);
         assert!(fork.files.contains_key("waiting.md"));
     }
 

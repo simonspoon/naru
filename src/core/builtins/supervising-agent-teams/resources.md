@@ -10,6 +10,13 @@ Assign them so agents cannot collide.
   `--profile`/port flag, each launch gets its own temp profile dir and debug
   port, so never share a session id), a distinct leased simulator, a
   distinct scratch dir.
+- **Parallel implementers (up to 3, each in its own worktree) use no shared
+  resources.** They write code and run unit/fast tests only: no dev server, no
+  Naru Beta app, no simulator, no UI check; those run once on the merged
+  result, by review/verify. Each worktree builds cold, with its own build dir /
+  `-derivedDataPath`; tell the brief so it batches edits. Lockfiles and
+  generated files conflict on merge: keep their changes in one piece, or
+  regenerate after the merge.
 - **Every stand-down gets an expiry**: "until X reports, or 30 minutes,
   whichever comes first."
 - **Ask for a shared resource; never take it.** Identify the holder from
@@ -32,10 +39,13 @@ Assign them so agents cannot collide.
 - **Never resume a worktree-isolated agent after it has ended its turn.** Its
   worktree may have been auto-removed as unchanged, and the resumed agent runs
   in the main checkout. Spawn a fresh isolated agent.
-- **Clean up a worktree only after its work is merged.** First
-  `git merge --ff-only <worktree-branch>` into the branch the worktree came
-  from (merge the base into the worktree and retest first if the base has
-  moved), and never push. If `git worktree remove <path>` then fails because
+- **Clean up a worktree only after its work is merged.** First land it with
+  `merge-to-main` run from the worktree (merge the base into the piece branch
+  and retest first; for parallel pieces, one at a time), never raw `git merge`
+  in the main checkout, and never push. The supervisor removes piece worktrees
+  it spawned: `git worktree remove <path>` then `git branch -d <branch>`. It has
+  `ExitWorktree` but not `EnterWorktree`, and a harness-created agent worktree
+  is not its to `ExitWorktree`. If `git worktree remove <path>` then fails because
   the worktree is locked (`git worktree list --porcelain` shows `locked`,
   often with a claude agent as the reason), pick one of two paths:
   - **Let the harness clean it up** when the lock belongs to a live agent or

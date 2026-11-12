@@ -65,6 +65,21 @@ while :; do n=0; for f in "${FS[@]}"; do fin "$f" && n=$((n+1)); done
 - Only the agent's transcript is watched: check every other running agent's
   last tool-call time yourself.
 
+## Deadlines
+
+Every delegated agent has a deadline (`date -v+15M +%H:%M` / epoch `D`), stated
+in its brief as a clock time. Use that same `D` in the blocking wait above, so
+`TIMEOUT` means the deadline passed with no report.
+
+At `TIMEOUT`:
+1. `SendMessage` at once: report now — findings so far, numbers, what remains.
+2. Grace ~3 minutes: one more blocking wait with `D` three minutes out. A
+   report ends it.
+3. Still nothing: `TaskStop` it, then relaunch narrower with a new deadline, or
+   report the result inconclusive with the partial evidence from its scratch dir.
+
+Never extend a deadline without a stated reason and a new deadline.
+
 ## The stall ladder
 
 - **Watch every running agent, not just the one you are waiting on.** Act on a
