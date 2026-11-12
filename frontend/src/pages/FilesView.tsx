@@ -3,6 +3,9 @@ import { createPortal } from 'react-dom'
 import type {
   CSSProperties,
   DragEvent as ReactDragEvent,
+  KeyboardEvent as ReactKeyboardEvent,
+  MouseEvent as ReactMouseEvent,
+  PointerEvent as ReactPointerEvent,
   RefObject,
 } from 'react'
 import { SyntaxHighlighter, usePrismStyle, prismGrammar } from '../syntaxHighlighter'
@@ -84,6 +87,20 @@ import { splitFrontmatter } from '../frontmatter'
 import { delimiterFor, parseDelimited, type DelimitedTable } from '../fileCsv'
 import { isHtmlDocumentPath } from '../fileHtml'
 import { isImagePath } from '../fileImage'
+import {
+  isFit,
+  panBy,
+  pinchView,
+  resolveView,
+  stepScale,
+  wheelZoomFactor,
+  zoomAt,
+  zoomKeyAction,
+  zoomPercent,
+  type Point,
+  type Size,
+  type ZoomView,
+} from '../imageZoom'
 import { mediaKindForPath } from '../fileMedia'
 import { resolveMarkdownImageSrc } from '../markdownAssets'
 import { newFilePath } from '../newFile'
@@ -484,6 +501,7 @@ function ContentPane({
   onWrapChange,
   focused,
   landing,
+  imageZoom,
 }: {
   projectId: number
   path: string
@@ -501,6 +519,8 @@ function ContentPane({
    * consumed once, by `seq`. Null in every other case, which is every case
    * before this feature existed. */
   landing: SearchLanding | null
+  /** The owning pane's zoom per open image (naru task 2731); see `FilePane`. */
+  imageZoom: Map<string, ZoomView | null>
 }) {
   const { data, error, refetch } = useFetch(
     () => getProjectFilesContent(projectId, path),
@@ -1144,7 +1164,12 @@ function ContentPane({
     // content, an `.svg` arrives as ordinary text. Neither is displayable as
     // its bytes; both are displayable as an image. Keyed on the path so the
     // load-error state below can't leak from one file into the next.
-    <FileImageBody key={data.path} projectId={projectId} path={data.path} />
+    <FileImageBody
+      key={data.path}
+      projectId={projectId}
+      path={data.path}
+      zoomStore={imageZoom}
+    />
   ) : mediaKindForPath(data.path) !== null ? (
     // Video/audio (naru task 1751): same raw route, native controls. Keyed on
     // the path so the error fallback can't leak into the next file.
@@ -1193,7 +1218,13 @@ function ContentPane({
     // the scroller (so its sticky header pins), and it needs a *bounded* column
     // to fill. See the class's rule in App.css.
     <div
-      className={`files-content${csvTable !== null ? ' is-table' : ''}`}
+      className={`files-content${
+        csvTable !== null
+          ? ' is-table'
+          : !editing && !historyOpen && isImagePath(data.path)
+            ? ' is-image'
+            : ''
+      }`}
       ref={contentRef}
       tabIndex={-1}
     >
@@ -1704,26 +1735,282 @@ function HtmlBody({ content }: { content: string }) {
  * with the same muted line the non-image binary branch uses, so a failure
  * reads as a state rather than as a broken-image icon. The parent keys this
  * component on the path, which is what resets the flag when the tab switches
- * files. */
+ * files.
+ *
+ * Zoom and pan (naru task 2731): the image sits in a stage that clips it, and
+ * `imageZoom.ts` decides the view — this component only measures the stage and
+ * the image, routes events to it and applies the answer as a size and a
+ * translate. The view is stored as `null` while the image is at fit, so a
+ * fitted image refits when the pane is resized or split. It is written through
+ * to the owning pane's `zoomStore`, which is what carries it across a tab
+ * switch (this component is unmounted then). */
 function FileImageBody({
   projectId,
   path,
+  zoomStore,
 }: {
   projectId: number
   path: string
+  zoomStore: Map<string, ZoomView | null>
 }) {
   const [failed, setFailed] = useState(false)
+  const [view, setViewState] = useState<ZoomView | null>(() => zoomStore.get(path) ?? null)
+  const [natural, setNatural] = useState<Size | null>(null)
+  const [stage, setStage] = useState<Size | null>(null)
+  const stageRef = useRef<HTMLDivElement>(null)
+  // The latest of everything the native wheel listener and the pointer
+  // handlers read, so they can be bound once rather than re-bound per render.
+  const live = useRef<{ shown: ZoomView | null; natural: Size | null; stage: Size | null }>({
+    shown: null,
+    natural: null,
+    stage: null,
+  })
+
+  const setView = useCallback(
+    (asked: ZoomView | null) => {
+      const { natural, stage } = live.current
+      // A view that is the fit (a double-click on an image already at 100%,
+      // a zoom-out clamped at a fit below 10%) is stored as fit, so it keeps
+      // refitting as the pane resizes.
+      const next =
+        asked !== null && natural !== null && stage !== null && isFit(asked, natural, stage)
+          ? null
+          : asked
+      zoomStore.set(path, next)
+      setViewState(next)
+      // Every view `imageZoom.ts` answers is already bounded, so it is what
+      // will be on screen: record it now, so a second wheel or pointer event
+      // landing before the re-render builds on this one instead of dropping it.
+      live.current.shown =
+        next === null && natural !== null && stage !== null
+          ? resolveView(null, natural, stage)
+          : next
+    },
+    [zoomStore, path],
+  )
+
+  useLayoutEffect(() => {
+    const el = stageRef.current
+    if (el === null) return
+    const measure = () => setStage({ w: el.clientWidth, h: el.clientHeight })
+    measure()
+    const ro = new ResizeObserver(measure)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [failed])
+
+  const shown = natural !== null && stage !== null ? resolveView(view, natural, stage) : null
+
+  const latestSetView = useRef(setView)
+  useLayoutEffect(() => {
+    live.current = { shown, natural, stage }
+    latestSetView.current = setView
+  })
+
+  // Native and non-passive: React's `onWheel` is passive, and a passive
+  // listener cannot stop Ctrl/Cmd + wheel (and a trackpad pinch, which arrives
+  // as one) from zooming the whole page. Bound on the stage only, so browser
+  // zoom everywhere else is untouched.
+  useEffect(() => {
+    const el = stageRef.current
+    if (el === null) return
+    const onWheel = (e: WheelEvent) => {
+      const { shown, natural, stage } = live.current
+      const setView = latestSetView.current
+      if (shown === null || natural === null || stage === null) return
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault()
+        const at = pointIn(el, e)
+        setView(zoomAt(shown, shown.scale * wheelZoomFactor(e.deltaY, e.deltaMode), at, natural, stage))
+        return
+      }
+      // A plain wheel / two-finger scroll pans — only once there is something
+      // to pan to; a fitted image lets the wheel through.
+      if (natural.w * shown.scale <= stage.w && natural.h * shown.scale <= stage.h) return
+      e.preventDefault()
+      const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? stage.h : 1
+      setView(panBy(shown, -e.deltaX * unit, -e.deltaY * unit, natural, stage))
+    }
+    el.addEventListener('wheel', onWheel, { passive: false })
+    return () => el.removeEventListener('wheel', onWheel)
+  }, [failed])
+
+  // Pointers down on the stage: one drags the image, two (touch) pinch it.
+  const pointers = useRef(new Map<number, Point>())
+  const gesture = useRef<
+    | { kind: 'drag'; last: Point }
+    | { kind: 'pinch'; start: ZoomView; distance: number; centre: Point }
+    | null
+  >(null)
+
+  function startGesture() {
+    const pts = [...pointers.current.values()]
+    const { shown } = live.current
+    if (pts.length === 1) gesture.current = { kind: 'drag', last: pts[0] }
+    else if (pts.length === 2 && shown !== null)
+      gesture.current = {
+        kind: 'pinch',
+        start: shown,
+        distance: Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y),
+        centre: { x: (pts[0].x + pts[1].x) / 2, y: (pts[0].y + pts[1].y) / 2 },
+      }
+    else gesture.current = null
+  }
+
+  function onPointerDown(e: ReactPointerEvent<HTMLDivElement>) {
+    if (e.pointerType === 'mouse' && e.button !== 0) return
+    e.currentTarget.setPointerCapture(e.pointerId)
+    pointers.current.set(e.pointerId, pointIn(e.currentTarget, e))
+    startGesture()
+  }
+
+  function onPointerMove(e: ReactPointerEvent<HTMLDivElement>) {
+    if (!pointers.current.has(e.pointerId)) return
+    const p = pointIn(e.currentTarget, e)
+    pointers.current.set(e.pointerId, p)
+    const g = gesture.current
+    const { shown, natural, stage } = live.current
+    if (g === null || shown === null || natural === null || stage === null) return
+    if (g.kind === 'drag') {
+      const dx = p.x - g.last.x
+      const dy = p.y - g.last.y
+      g.last = p
+      if (dx !== 0 || dy !== 0) setView(panBy(shown, dx, dy, natural, stage))
+    } else {
+      const pts = [...pointers.current.values()]
+      const distance = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y)
+      const centre = { x: (pts[0].x + pts[1].x) / 2, y: (pts[0].y + pts[1].y) / 2 }
+      setView(pinchView(g.start, g.distance, distance, g.centre, centre, natural, stage))
+    }
+  }
+
+  function onPointerEnd(e: ReactPointerEvent<HTMLDivElement>) {
+    if (!pointers.current.delete(e.pointerId)) return
+    // Lifting one finger of a pinch carries on as a drag from where it is.
+    startGesture()
+  }
+
+  /** Zoom about the stage's centre — the buttons and the keys. */
+  function zoomCentre(scale: number) {
+    if (shown === null || natural === null || stage === null) return
+    setView(zoomAt(shown, scale, { x: stage.w / 2, y: stage.h / 2 }, natural, stage))
+  }
+
+  function onKeyDown(e: ReactKeyboardEvent<HTMLDivElement>) {
+    const action = zoomKeyAction(e)
+    if (action === null || shown === null) return
+    e.preventDefault()
+    if (action === 'in') zoomCentre(stepScale(shown.scale, 1))
+    else if (action === 'out') zoomCentre(stepScale(shown.scale, -1))
+    else if (action === 'fit') setView(null)
+    else zoomCentre(1)
+  }
+
+  function onDoubleClick(e: ReactMouseEvent<HTMLDivElement>) {
+    if (shown === null || natural === null || stage === null) return
+    if (isFit(shown, natural, stage)) setView(zoomAt(shown, 1, pointIn(e.currentTarget, e), natural, stage))
+    else setView(null)
+  }
+
   if (failed) return <p className="muted">Binary file — cannot display.</p>
   return (
-    <div className="files-content-image-wrap">
-      <img
-        className="files-content-image"
-        src={projectFileRawUrl(projectId, path)}
-        alt={basename(path)}
-        onError={() => setFailed(true)}
-      />
+    <div className="files-image-view">
+      <div className="files-image-toolbar" role="toolbar" aria-label="Image zoom">
+        <button
+          type="button"
+          className="files-image-btn"
+          aria-label="Zoom out"
+          title="Zoom out (-)"
+          disabled={shown === null}
+          onClick={() => shown && zoomCentre(stepScale(shown.scale, -1))}
+        >
+          −
+        </button>
+        <span className="files-image-percent" aria-live="polite">
+          {shown === null ? '—' : zoomPercent(shown.scale)}
+        </span>
+        <button
+          type="button"
+          className="files-image-btn"
+          aria-label="Zoom in"
+          title="Zoom in (+)"
+          disabled={shown === null}
+          onClick={() => shown && zoomCentre(stepScale(shown.scale, 1))}
+        >
+          +
+        </button>
+        <button
+          type="button"
+          className="files-image-btn"
+          title="Fit to pane (0)"
+          disabled={shown === null}
+          onClick={() => setView(null)}
+        >
+          Fit
+        </button>
+        <button
+          type="button"
+          className="files-image-btn"
+          title="Actual size (1)"
+          disabled={shown === null}
+          onClick={() => zoomCentre(1)}
+        >
+          100%
+        </button>
+        {natural !== null && (
+          <span className="files-image-dims">
+            {natural.w} × {natural.h} px
+          </span>
+        )}
+      </div>
+      <div
+        className={`files-image-stage${shown !== null && shown.scale > 1 ? ' is-pixelated' : ''}`}
+        ref={stageRef}
+        tabIndex={0}
+        aria-label={`${basename(path)} — scroll with Ctrl or Cmd to zoom, drag to pan`}
+        onKeyDown={onKeyDown}
+        onDoubleClick={onDoubleClick}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerEnd}
+        onPointerCancel={onPointerEnd}
+        onLostPointerCapture={onPointerEnd}
+      >
+        <img
+          className="files-content-image"
+          src={projectFileRawUrl(projectId, path)}
+          alt={basename(path)}
+          draggable={false}
+          style={
+            shown === null || natural === null
+              ? { visibility: 'hidden' }
+              : {
+                  width: natural.w * shown.scale,
+                  height: natural.h * shown.scale,
+                  transform: `translate(${shown.x}px, ${shown.y}px)`,
+                }
+          }
+          onLoad={(e) => setNatural(imageSize(e.currentTarget))}
+          onError={() => setFailed(true)}
+        />
+      </div>
     </div>
   )
+}
+
+/** A pointer's position in an element's own coordinates. */
+function pointIn(el: Element, e: { clientX: number; clientY: number }): Point {
+  const r = el.getBoundingClientRect()
+  return { x: e.clientX - r.left, y: e.clientY - r.top }
+}
+
+/** The loaded image's pixel size. An SVG with no width/height of its own can
+ * report 0, which would leave nothing to scale: it is given the replaced
+ * element default (300 × 150) instead. */
+function imageSize(img: HTMLImageElement): Size {
+  if (img.naturalWidth > 0 && img.naturalHeight > 0)
+    return { w: img.naturalWidth, h: img.naturalHeight }
+  return { w: 300, h: 150 }
 }
 
 /** A video or audio file played inline with the browser's native controls
@@ -3129,6 +3416,16 @@ function FilePane({
   onDragLeaveStrip: () => void
   style?: CSSProperties
 }) {
+  // Each open image's zoom (naru task 2731), held by the pane rather than in
+  // `fileUi`: that is keyed by path alone, and the same image open in both
+  // halves of a split zooms independently. A mutable Map that is never
+  // replaced, because only the mounted image reads or writes it — it never
+  // needs to re-render the pane. Entries for tabs this pane no longer has are
+  // dropped, so reopening starts at fit.
+  const [imageZoom] = useState(() => new Map<string, ZoomView | null>())
+  useEffect(() => {
+    for (const p of [...imageZoom.keys()]) if (!tabs.includes(p)) imageZoom.delete(p)
+  }, [tabs, imageZoom])
   return (
     <section
       className={`files-content-pane${focused ? ' focused' : ''}`}
@@ -3187,6 +3484,7 @@ function FilePane({
             onWrapChange={onWrapChange}
             focused={focused}
             landing={landing?.path === active ? landing : null}
+            imageZoom={imageZoom}
           />
         ) : (
           <p className="muted">Select a file to see its content.</p>

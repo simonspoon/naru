@@ -6465,6 +6465,106 @@ body.live-panel-ratio-resizing {
     -8px 0;
 }
 
+/* Zoom and pan for an image file (naru task 2731). The image branch is
+   bounded like the table one (.files-content.is-table): the stage fills the
+   column's leftover height with `flex: 1` and clips, so the image is moved
+   inside it by a translate rather than scrolled by the pane. The min-height
+   keeps a usable stage where the column is not bounded (beside the history
+   list). `touch-action: none` hands every touch on the stage to the pointer
+   handlers, so a one-finger drag pans the image and a pinch zooms it instead
+   of scrolling or zooming the page. The decisions are imageZoom.ts's; these
+   rules only lay it out. */
+.files-content.is-image {
+  height: 100%;
+  min-height: 0;
+}
+
+.files-image-view {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.files-image-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.files-image-btn {
+  font-size: 0.75rem;
+  padding: 0.15rem 0.5rem;
+  min-width: 1.9rem;
+}
+
+.files-image-percent {
+  min-width: 3.2rem;
+  text-align: center;
+  font-family: var(--font-mono);
+  color: var(--text);
+}
+
+.files-image-dims {
+  margin-left: auto;
+  font-family: var(--font-mono);
+}
+
+.files-image-stage {
+  position: relative;
+  flex: 1;
+  min-height: 12rem;
+  overflow: hidden;
+  touch-action: none;
+  user-select: none;
+  cursor: grab;
+  border-radius: var(--r-md);
+}
+
+.files-image-stage:active {
+  cursor: grabbing;
+}
+
+.files-image-stage:focus-visible {
+  outline: 1px solid var(--cyan);
+  outline-offset: -1px;
+}
+
+/* Sized and placed by the view (inline width/height + translate), so the
+   pane-width cap the plain image rule carries for video must not apply. */
+.files-image-stage .files-content-image {
+  position: absolute;
+  top: 0;
+  left: 0;
+  max-width: none;
+  /* No border here: with border-box sizing it would eat 2px of the inline
+     size, so 100% would not be one image pixel per CSS pixel. */
+  border: 0;
+  /* The stage rounds its own corners; rounding the image too would clip
+     pixels off a zoomed image's corners. */
+  border-radius: 0;
+  transform-origin: 0 0;
+}
+
+/* Crisp pixels only once a pixel is bigger than a pixel: below 100% smoothing
+   is what keeps a downscaled photo legible. */
+.files-image-stage.is-pixelated .files-content-image {
+  image-rendering: pixelated;
+}
+
+/* The phone column is not bounded, so the image stage would sit at its 12rem
+   floor. Half the screen gives the image room while leaving the rest of the
+   page to scroll by (the stage itself takes every touch). */
+@media (max-width: 600px) {
+  .files-image-stage {
+    min-height: 50vh;
+  }
+}
+
 /* A delimited file shown as a table (mesa task 1110). The wrapper is the
    scroller — both ways: sideways for a wide file, the twin of
    .files-content-image-wrap, and vertically because a sticky header is clamped

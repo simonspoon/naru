@@ -718,6 +718,53 @@ missing-`?path=` cases, the download route's unchanged headers, and — in
 **both** serve modes — that raw is reachable while the PATCH write keeps its
 `require_agent_access` + Content-Type gate.
 
+### Zoom and pan (naru task 2731)
+
+An image opens at **fit** — the whole image visible in the pane, never scaled
+up past 100%, so a small image shows at its own size — and can be zoomed and
+panned like an IDE's image viewer instead of by resizing the window. The
+maths is `frontend/src/imageZoom.ts` (fit scale, zoom about a point, the zoom
+and pan bounds, the wheel and key mapping), with unit tests beside it;
+`FileImageBody` in `FilesView.tsx` only measures, routes events and applies the
+view as an inline size plus a `translate`.
+
+| Input | Effect |
+| --- | --- |
+| Ctrl/Cmd + wheel, trackpad pinch | Zoom about the pointer |
+| Two-finger pinch (touch) | Zoom about the pinch centre (moving both fingers also pans) |
+| Wheel / two-finger scroll | Pan, once the image is larger than the pane |
+| Drag, one-finger drag | Pan |
+| Double-click | Toggle fit ↔ 100% (about the click point) |
+| `+` / `=`, `-` | Zoom in / out one step (×1.25) about the centre, image stage focused |
+| `0`, `1` | Fit, 100% |
+| Toolbar | Zoom out, the current percent, zoom in, Fit, 100%, and the image's natural pixel size |
+
+- **Range:** 10% to 3200% (`MIN_ZOOM`, `MAX_ZOOM`). An image whose fit is
+  below 10% (a very large one) can still go down to its fit.
+- **Pan bound:** on an axis where the image is smaller than the pane it is
+  centred; where it is larger, it moves only until its edge meets the pane's
+  edge, so it can never be panned out of view.
+- **Wheel capture:** the wheel listener is native and non-passive on the
+  stage only, so Ctrl/Cmd + wheel (and a trackpad pinch, which browsers send
+  as one) zooms the image and not the page; outside the stage the browser's
+  own zoom is untouched. A plain wheel over a fitted image is let through.
+  Ctrl/Cmd + `+`/`-`/`0` are left to the browser everywhere.
+- **Touch:** the stage is `touch-action: none`, so on the phone tier a drag or
+  pinch on the image is the image's and never scrolls or zooms the page.
+- **Pixel art:** `image-rendering: pixelated` only above 100%; below it the
+  browser's smoothing keeps a downscaled photo legible.
+- **State:** the view is per pane per open tab, in `FilePane` (not `fileUi`,
+  which is keyed by path alone — the same image in both halves of a split zooms
+  independently). It survives a tab switch, is dropped when the tab closes so
+  reopening starts at fit, and is stored as "fit" rather than numbers while at
+  fit, so a fitted image refits as the pane resizes. A zoomed view is re-bounded
+  on every render, so a resize never strands it.
+- **SVG without a size of its own** (no `width`/`height`) is given the
+  replaced-element default of 300 × 150 if the browser reports a natural size
+  of 0.
+- The failure fallback is unchanged: anything the `<img>` cannot decode is
+  "Binary file — cannot display."
+
 ## Inline video and audio (naru task 1751)
 
 `GET .../files/raw` also plays media. `files::media_mime` is a second
