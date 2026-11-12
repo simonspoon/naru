@@ -8,6 +8,7 @@ import { AudioAdminPanel } from './components/AudioAdminPanel'
 import { CommandPalette } from './components/CommandPalette'
 import { WorkflowsPanel } from './components/WorkflowsPanel'
 import { DockBar, DockLayout } from './components/DockLayout'
+import { DockSlot } from './components/DockSlot'
 import { useDockStore } from './useDockStore'
 import {
   agentPanels,
@@ -971,11 +972,14 @@ function App() {
               content (`page`) keeps its existing per-route mount/unmount
               behavior; only the pane wrapper's visibility toggles alongside
               Terminal's, so navigating to/from Terminal never touches
-              TerminalPage's own mounted state (arch.md §4.3). */}
+              TerminalPage's own mounted state (arch.md §4.3). `page` itself
+              is the portal below, shown here through the same stable host
+              the dock uses, so crossing the phone breakpoint (a rotation)
+              moves it rather than remounting it (naru task 2793). */}
           <div
             className={terminalActive ? 'main-slot-pane main-slot-pane-hidden' : 'main-slot-pane'}
           >
-            <main>{page}</main>
+            <DockSlot panel="main" />
           </div>
           <div className={terminalActive ? 'main-slot-pane' : 'main-slot-pane main-slot-pane-hidden'}>
             <TerminalPage active={terminalActive} />
@@ -1000,8 +1004,7 @@ function App() {
             dock moves between groups (`lib/dockHosts.ts`), so re-docking never
             remounts the page, the terminal's shells or the agents' panes. The
             conversation's two panels are portalled the same way by LiveHub. */}
-        {docked &&
-          createPortal(<main>{page}</main>, hostFor('main'))}
+        {createPortal(<main>{page}</main>, hostFor('main'))}
         {docked &&
           createPortal(<TerminalPage active={terminalVisible} />, hostFor('terminal'))}
         {docked &&
