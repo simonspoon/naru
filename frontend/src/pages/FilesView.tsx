@@ -87,6 +87,7 @@ import { splitFrontmatter } from '../frontmatter'
 import { delimiterFor, parseDelimited, type DelimitedTable } from '../fileCsv'
 import { isHtmlDocumentPath } from '../fileHtml'
 import { isImagePath } from '../fileImage'
+import { setDragOutData } from '../fileDragOut'
 import {
   isFit,
   panBy,
@@ -1128,23 +1129,9 @@ function ContentPane({
   async function download() {
     setDownloading(true)
     setSaveError(null)
-    try {
-      const resp = await fetch(projectFileDownloadUrl(projectId, path))
-      if (!resp.ok) {
-        setSaveError(await downloadErrorMessage(resp))
-        return
-      }
-      const url = URL.createObjectURL(await resp.blob())
-      const link = document.createElement('a')
-      link.href = url
-      link.download = basename(path)
-      link.click()
-      URL.revokeObjectURL(url)
-    } catch {
-      setSaveError('Failed to download file.')
-    } finally {
-      setDownloading(false)
-    }
+    const failure = await downloadProjectFile(projectId, path)
+    if (failure !== null) setSaveError(failure)
+    setDownloading(false)
   }
 
   // The file itself, in whichever form applies. Pulled out of the JSX below
@@ -1549,6 +1536,25 @@ function FindBar({
       </button>
     </div>
   )
+}
+
+/** Fetches a file from the download route and hands it to the browser as a
+ * save. Returns the failure message (404, over the cap, network), or null on
+ * success — shared by the content pane's Download and the tree row's. */
+async function downloadProjectFile(projectId: number, path: string): Promise<string | null> {
+  try {
+    const resp = await fetch(projectFileDownloadUrl(projectId, path))
+    if (!resp.ok) return await downloadErrorMessage(resp)
+    const url = URL.createObjectURL(await resp.blob())
+    const link = document.createElement('a')
+    link.href = url
+    link.download = basename(path)
+    link.click()
+    URL.revokeObjectURL(url)
+    return null
+  } catch {
+    return 'Failed to download file.'
+  }
 }
 
 /** The message out of a failed download response's `{"error": {code, message}}`
@@ -2276,6 +2282,12 @@ interface TreeOps {
   onDeleteStart: (entry: FileTreeEntry) => void
   onDeleteConfirm: () => void
   onCancel: () => void
+  /** Task 2733: Download on a file row, and the dragstart that lets Chromium
+   *  save the file to the desktop. `downloadError` is the failed row's
+   *  `{path, message}`. */
+  onDownload: (entry: FileTreeEntry) => void
+  onFileDragStart: (e: ReactDragEvent, path: string) => void
+  downloadError: { path: string; message: string } | null
 }
 
 /** The `+` that opens a naming row, on a directory row and on the tree pane's
@@ -2351,6 +2363,20 @@ function TreeRowButtons({ entry, ops }: { entry: FileTreeEntry; ops: TreeOps }) 
   const what = entry.is_dir ? 'folder' : 'file'
   return (
     <>
+      {!entry.is_dir && (
+        <button
+          type="button"
+          className="files-tree-add"
+          aria-label={`Download file ${entry.path}`}
+          title={`Download ${entry.name}`}
+          onClick={(e) => {
+            e.stopPropagation()
+            ops.onDownload(entry)
+          }}
+        >
+          ↓
+        </button>
+      )}
       <button
         type="button"
         className="files-tree-add"
@@ -2692,6 +2718,8 @@ function TreeNode({
         style={indent}
         data-upload-path={entry.path}
         data-upload-row="file"
+        draggable={!renaming}
+        onDragStart={(e) => ops.onFileDragStart(e, entry.path)}
         onClick={() => onSelectFile(entry.path)}
       >
         {renaming ? (
@@ -2704,6 +2732,11 @@ function TreeNode({
         )}
       </li>
       <TreeRowAction entry={entry} depth={depth} ops={ops} />
+      {ops.downloadError?.path === entry.path && (
+        <li className="files-tree-note error" style={indent}>
+          {ops.downloadError.message}
+        </li>
+      )}
     </>
   )
 }
@@ -2946,6 +2979,7 @@ interface DropMark {
  * indicator at the gap that measurement chose.
  */
 function TabStrip({
+  projectId,
   side,
   tabs,
   active,
@@ -2963,6 +2997,7 @@ function TabStrip({
   onDropOnStrip,
   onDragLeaveStrip,
 }: {
+  projectId: number
   side: PaneSide
   tabs: string[]
   active: string | null
@@ -3046,9 +3081,10 @@ function TabStrip({
           onDragStart={(e) => {
             cancelPress()
             dragging = { side, path }
-            e.dataTransfer.effectAllowed = 'move'
-            // Some browsers cancel a drag that carries no payload at all.
-            e.dataTransfer.setData('text/plain', path)
+            // Also carries the Chromium `DownloadURL` so a tab dragged out of
+            // the window saves its file (naru task 2733); `copyMove` keeps the
+            // internal move and allows that external copy.
+            setDragOutData(e.dataTransfer, location.origin, projectId, path)
             onDragBegin()
           }}
           onDragEnd={() => {
@@ -3498,6 +3534,7 @@ function FilePane({
       onMouseDown={onFocus}
     >
       <TabStrip
+        projectId={projectId}
         side={side}
         tabs={tabs}
         active={active}
@@ -3699,6 +3736,9 @@ export function FilesView({ projectId }: { projectId: number }) {
   // makes "at most one at a time" true by construction.
   const [treeAction, setTreeAction] = useState<TreeAction | null>(null)
   const [treeActionError, setTreeActionError] = useState<string | null>(null)
+  const [downloadError, setDownloadError] = useState<{ path: string; message: string } | null>(
+    null,
+  )
   const [treeBusy, setTreeBusy] = useState(false)
   // Uploading (naru task 2732). `dropDir` is where an OS file drag would land
   // right now; `upload` is the batch in flight (which file, a Replace question
@@ -4032,6 +4072,7 @@ export function FilesView({ projectId }: { projectId: number }) {
     setTreeOpen(true)
     setTreeAction(null)
     setTreeActionError(null)
+    setDownloadError(null)
     setDropDir(null)
     setUpload({ progress: null, replace: null, note: null, done: null })
     setPendingClose(null)
@@ -4618,6 +4659,15 @@ export function FilesView({ projectId }: { projectId: number }) {
       }),
     onDeleteConfirm: confirmDeleteEntry,
     onCancel: cancelTreeAction,
+    onDownload: (entry) => {
+      setDownloadError(null)
+      void downloadProjectFile(projectId, entry.path).then((message) => {
+        if (message !== null) setDownloadError({ path: entry.path, message })
+      })
+    },
+    onFileDragStart: (e, path) =>
+      setDragOutData(e.dataTransfer, location.origin, projectId, path),
+    downloadError,
   }
 
   // Same `dragenter`-as-well-as-`dragover` rule as the strips above.

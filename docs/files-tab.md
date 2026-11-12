@@ -1984,3 +1984,27 @@ only wires them. The name rules are `newFile.ts`'s `newFilePath`, reused.
   drop. `endDrag()` clears the tab-drag slot too: a tab that changed panes is
   unmounted mid-drag and may never fire `dragend`, and a stale slot would make
   every later file drag look like a tab drag.
+
+## Dragging files out to the desktop (naru task 2733)
+
+A file row of the tree and a file tab set, on `dragstart`, `text/plain` (the
+project-relative path — a terminal or chat box takes it), `text/uri-list` (the
+absolute download URL) and the Chromium `DownloadURL` triple
+`<mime>:<name>:<absolute url>`, with `effectAllowed = 'copyMove'` so tab
+reorder/split (a move) and the external save (a copy) coexist. The builder is
+`frontend/src/fileDragOut.ts` (pure, tested): the name field has `:`, `/` and
+control characters replaced by `_` (a colon would end the field), the mime comes
+from `imageMimeForPath` / `mediaMimeForPath`, else `application/octet-stream`,
+and the URL is `location.origin` + the download route, so it works on the LAN
+origin too. No server change: the route keeps its attachment/octet-stream
+boundary.
+
+**Browser support.** Only Chromium (Chrome, Edge, Arc, Brave) acts on
+`DownloadURL`. Safari, Firefox and the native Mac app's WKWebView ignore it; the
+drag there still carries the path text. The fallback that works everywhere is
+the `↓` Download button on every file row (always visible under `hover: none`,
+so reachable by touch), which reuses the content pane's fetch
+(`downloadProjectFile`); a 404 or a file over `FILE_DOWNLOAD_CAP` (100 MiB)
+renders as an inline note under the row. A drag of an over-cap file produces a
+failed browser download — accepted. Folders are not draggable out and have no
+Download (no archive route). The UI shows no hint promising drag-out.
