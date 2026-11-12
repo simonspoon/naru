@@ -11,8 +11,10 @@ import {
   getTaskReceipt,
   listAttachments,
   listDependencies,
+  listProjects,
   listTaskNotes,
   listTasks,
+  moveTask,
   regenerateTaskReceipt,
   updateTask,
   updateTaskReceipt,
@@ -359,16 +361,18 @@ export function TaskPanel({
   const [selectError, setSelectError] = useState<string | null>(null)
   const { data, error, refetch } = useFetch(async () => {
     const task = await getTask(taskId)
-    const [siblings, blockers, attachments, receipt, notes] = await Promise.all([
-      listTasks({ project: task.project_id }),
-      listDependencies(taskId),
-      listAttachments(taskId),
-      getTaskReceipt(taskId),
-      listTaskNotes(taskId),
-    ])
+    const [siblings, blockers, attachments, receipt, notes, projects] =
+      await Promise.all([
+        listTasks({ project: task.project_id }),
+        listDependencies(taskId),
+        listAttachments(taskId),
+        getTaskReceipt(taskId),
+        listTaskNotes(taskId),
+        listProjects(true),
+      ])
     // One level of nesting only (spec Assumption 6).
     const subtasks = siblings.filter((t) => t.parent_id === taskId)
-    return { task, subtasks, blockers, attachments, receipt, notes }
+    return { task, subtasks, blockers, attachments, receipt, notes, projects }
   }, `task-${taskId}`)
 
   const head = (
@@ -394,7 +398,8 @@ export function TaskPanel({
       </>
     )
 
-  const { task, subtasks, blockers, attachments, receipt, notes } = data
+  const { task, subtasks, blockers, attachments, receipt, notes, projects } =
+    data
 
   function changed() {
     refetch()
@@ -407,6 +412,22 @@ export function TaskPanel({
       () => {
         setSelectError(null)
         changed()
+      },
+      (e: unknown) => {
+        setSelectError(e instanceof Error ? e.message : String(e))
+      },
+    )
+  }
+
+  // Naru task 2729: the server moves the whole subtree and refuses a
+  // subtask or anything in_progress; on success the task now lives under the
+  // other project's route, so follow it there.
+  function moveTo(projectId: number) {
+    moveTask(taskId, projectId).then(
+      () => {
+        setSelectError(null)
+        changed()
+        window.location.hash = `#/projects/${projectId}/tasks/${taskId}`
       },
       (e: unknown) => {
         setSelectError(e instanceof Error ? e.message : String(e))
@@ -445,6 +466,28 @@ export function TaskPanel({
               {p}
             </option>
           ))}
+        </select>{' '}
+        <select
+          aria-label="Project"
+          value={task.project_id}
+          disabled={task.parent_id !== null}
+          title={
+            task.parent_id !== null
+              ? 'A subtask moves with its parent'
+              : 'Move to another project (subtasks move too)'
+          }
+          onChange={(e) => moveTo(Number(e.target.value))}
+        >
+          {/* Archived projects are not offered as destinations (a task moved
+              there would vanish from unscoped views); the current one stays
+              listed so the controlled select keeps a matching option. */}
+          {projects
+            .filter((p) => !p.archived || p.id === task.project_id)
+            .map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
         </select>
         {task.blocked && <span className="badge blocked"> blocked</span>}
         {selectError && <span className="error">{selectError}</span>}

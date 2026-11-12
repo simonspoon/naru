@@ -175,7 +175,18 @@ The code is the source of truth. These are the invariants you must not break:
 
 ## Validation invariants (enforced in `Store`, not the schema)
 
-- A task's project is immutable after creation.
+- A task's project changes only through `naru task move <id> --project <p>` /
+  `POST /api/tasks/{id}/move {"project_id"}` (`Store::move_task`, naru task
+  2729), never through `update`/`PATCH`. It moves a top-level task with its
+  whole subtree; a subtask alone is `validation` (move its root, or detach it),
+  and anything in the subtree `in_progress` is `conflict` (its session and
+  worktree belong to the old project's folder). Dependencies (already allowed
+  across projects), notes, attachments, receipt, status history, `artifact`
+  and `sort_order` are kept; each moved task gets a task note
+  `moved from project "A" (id N) to project "B" (id M)` as its history. An
+  `artifacts` row linked to the task keeps its own, immutable, project. Moving
+  to the task's own project is a no-op that writes nothing. The web UI's task
+  panel exposes it as a project picker (disabled on a subtask).
 - A task's `description` is required and may never be empty — it is the task's
   identity, so unlike the other free-text bodies it has no clear: `mesa task
   update --description ""` and `PATCH {"description": null}` are both

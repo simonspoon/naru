@@ -849,8 +849,8 @@ PJQ=$(jqs .id)
 # moves between the two calls (Project carries no timestamp at all).
 run 0 "$MESA" project show "$PJQ"
 printf '%s' "$STDOUT" >"$TMP/pfull.json"
-# non-quiet output is unchanged: the full 10-key project object
-[ "$(jqs 'keys | join(",")')" = "archived,description,id,local_path,name,parent_id,previous_paths,root_commit,shared_notebook,sort_order" ] ||
+# non-quiet output is unchanged: the full 11-key project object
+[ "$(jqs 'keys | join(",")')" = "archived,description,id,local_path,name,parent_id,previous_paths,root_commit,run_profile,shared_notebook,sort_order" ] ||
   fail "project show (no --quiet): full key set must be unchanged"
 [ "$(jqs 'has("description")')" = "true" ] || fail "project show (no --quiet): description present"
 run 0 "$MESA" project show "$PJQ" --quiet
@@ -1423,5 +1423,33 @@ run 1 "$MESA" task note 999999 hello
 run 0 "$MESA" task delete "$NT"
 [ "$(sqlite3 "$MESA_DB" 'SELECT COUNT(*) FROM task_notes')" = "0" ] || fail "delete task cascades its notes"
 ok "task note: append, session env, quiet, show lists oldest first, validation, cascade"
+
+# ---- task move (naru task 2729): whole subtree, refusals, history note ----
+run 0 "$MESA" project create "Move source" --no-git
+MSRC=$(jqs .id)
+run 0 "$MESA" project create "Move dest" --no-git
+MDST=$(jqs .id)
+run 0 "$MESA" task create "$MSRC" "Move root"
+MR=$(jqs .id)
+run 0 "$MESA" task create "$MSRC" "Move child" --parent "$MR"
+MC=$(jqs .id)
+run 1 "$MESA" task move "$MC" --project "$MDST"
+[ "$(jqe .error.code)" = "validation" ] || fail "move a subtask: validation"
+run 0 "$MESA" task claim "$MC" --owner sess-m
+run 1 "$MESA" task move "$MR" --project "$MDST"
+[ "$(jqe .error.code)" = "conflict" ] || fail "move with an in_progress subtask: conflict"
+run 0 "$MESA" task update "$MC" --status todo
+run 1 "$MESA" task move "$MR" --project "No such project"
+[ "$(jqe .error.code)" = "not_found" ] || fail "move to an unknown project: not_found"
+run 0 "$MESA" task move "$MR" --project "move dest"
+[ "$(jqs .project_id)" = "$MDST" ] || fail "task move: root project_id"
+run 0 "$MESA" task show "$MR"
+[ "$(jqs '.notes[-1].body')" = "moved from project \"Move source\" (id $MSRC) to project \"Move dest\" (id $MDST)" ] ||
+  fail "task move: history note on the root"
+run 0 "$MESA" task show "$MC"
+[ "$(jqs .project_id)" = "$MDST" ] && [ "$(jqs .parent_id)" = "$MR" ] || fail "task move: subtask follows its parent"
+run 0 "$MESA" task move "$MR" --project "$MDST" --quiet
+[ "$(jqs 'has("description")')" = "false" ] || fail "task move --quiet: compact projection"
+ok "task move: subtree moves, subtask/in_progress/unknown refused, history note, --quiet"
 
 echo "all $CHECKS checks passed"

@@ -1131,7 +1131,7 @@ EXAMPLES
   mesa task create 1 --description-file - < spec.md   # multi-line body from stdin
   mesa task create 1 \"Draft copy\" --description \"Three sections.\"  # name + body")]
     Create {
-        /// Project the task belongs to, by id or name (immutable after creation)
+        /// Project the task belongs to, by id or name (change it later with `task move`)
         #[arg(value_name = "PROJECT", required_unless_present = "project")]
         project_pos: Option<String>,
         /// The task itself, in free text; its first non-empty line is the task's name
@@ -1560,6 +1560,28 @@ EXAMPLES
     Release {
         /// Task id
         id: i64,
+        /// Print the compact task (the `task list` shape) instead of the full object
+        #[arg(long)]
+        quiet: bool,
+    },
+    /// Move a task, with all its subtasks, to another project
+    ///
+    /// The one way to change a task's project. A subtask cannot be moved on
+    /// its own (exit 1, code "validation"): move its top-level task, which
+    /// takes the whole subtree along. A move is refused while the task or any
+    /// subtask is in_progress (exit 1, code "conflict"), since its session and
+    /// worktree belong to the old project. Dependencies, notes, attachments,
+    /// receipt, status history and board order are kept; each moved task gets
+    /// a note recording the move. Moving to the task's own project is a no-op.
+    #[command(after_help = "\
+EXAMPLES
+  naru task move 3 --project vox      # task 3 and its subtasks now belong to vox")]
+    Move {
+        /// Task id (a top-level task)
+        id: i64,
+        /// Destination project, by id or name
+        #[arg(long)]
+        project: String,
         /// Print the compact task (the `task list` shape) instead of the full object
         #[arg(long)]
         quiet: bool,
@@ -7070,6 +7092,10 @@ fn run_task(cmd: TaskCmd) -> Result<()> {
             quiet,
         } => print_task(&store.claim_task(id, &owner, force)?, quiet),
         TaskCmd::Release { id, quiet } => print_task(&store.release_task(id)?, quiet),
+        TaskCmd::Move { id, project, quiet } => {
+            let project_id = resolve_project(&store, &project)?;
+            print_task(&store.move_task(id, project_id)?, quiet)
+        }
         TaskCmd::Block { id, by, quiet } => print_task(&store.add_dependency(id, by)?, quiet),
         TaskCmd::Unblock { id, on, quiet } => print_task(&store.remove_dependency(id, on)?, quiet),
         TaskCmd::Deps { id } => {

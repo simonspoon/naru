@@ -327,6 +327,11 @@ export function updateTask(id: number, patch: TaskPatch): Promise<Task> {
   return request(`/api/tasks/${id}`, jsonInit('PATCH', patch))
 }
 
+/** Moves a top-level task and its subtasks to another project (naru task 2729). */
+export function moveTask(id: number, projectId: number): Promise<Task> {
+  return request(`/api/tasks/${id}/move`, jsonInit('POST', { project_id: projectId }))
+}
+
 /** Returns the destroyed records: the task plus all cascaded subtasks. */
 export function deleteTask(id: number): Promise<Task[]> {
   return request(`/api/tasks/${id}`, {

@@ -361,6 +361,9 @@ naru task next "Website redesign"
 naru task claim 1 --owner 5b043350
 naru task release 1
 
+# Send a top-level task, with its subtasks, to another project
+naru task move 1 --project "Website redesign"
+
 # Append context to a task without rewriting it (put flags before the text)
 naru task note 1 Waiting on the copy review.
 

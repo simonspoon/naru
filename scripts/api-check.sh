@@ -479,6 +479,19 @@ api 404 POST "/api/tasks/999999/release"
 [ "$(jqb .error.code)" = "not_found" ] || fail "release unknown task: error.code"
 ok "POST .../release on an unknown task: 404 not_found"
 
+# ---- move (naru task 2729) ----
+api 201 POST "/api/projects" '{"name":"Move dest"}'
+MDST=$(jqb .id)
+api 201 POST "/api/tasks" "{\"project_id\":$PROJ,\"description\":\"Movable\"}"
+TMV=$(jqb .id)
+api 200 POST "/api/tasks/$TMV/move" "{\"project_id\":$MDST}"
+[ "$(jqb .project_id)" = "$MDST" ] || fail "move: project_id"
+api 409 POST "/api/tasks/$T1/move" "{\"project_id\":$MDST}"
+[ "$(jqb .error.code)" = "conflict" ] || fail "move an in_progress task: conflict"
+api 404 POST "/api/tasks/$TMV/move" '{"project_id":999999}'
+[ "$(jqb .error.code)" = "not_found" ] || fail "move to an unknown project: not_found"
+ok "POST /api/tasks/{id}/move: 200 moved, 409 while in_progress, 404 unknown project"
+
 # An in_progress task with a null owner is not a live hold, so it is claimable
 # without --force (a plain status flip, or a pre-claims row).
 api 200 POST "/api/tasks/$T1/claim" '{"owner":"session-ccc"}'

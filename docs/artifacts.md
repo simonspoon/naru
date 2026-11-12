@@ -92,8 +92,8 @@ document that may still be useful on its own.
 - An unknown `project_id` or `task_id` is `validation`, not `not_found` — it
   arrives as a field of the record being written, mirroring
   `assign_inbox_item` and `create_script`'s own unknown-project handling.
-- `project_id` is **immutable after creation** — a task's project already is,
-  for the same reason: the id is baked into the record's own URL
+- `project_id` is **immutable after creation**, and stays so even when the
+  task it links to moves project (`naru task move`): the id is baked into the record's own URL
   (`/api/projects/{id}/artifacts/{aid}`), so letting it move would leave
   stale links pointing at the wrong project.
 - `update_artifact` re-enforces every rule `create_artifact` does, because an

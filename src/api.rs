@@ -3930,6 +3930,7 @@ fn router(state: AppState) -> Router {
         .route("/api/tasks/{id}/execute", post(execute_task))
         .route("/api/tasks/{id}/claim", post(claim_task))
         .route("/api/tasks/{id}/release", post(release_task))
+        .route("/api/tasks/{id}/move", post(move_task))
         .route("/api/tasks/{id}/block", post(block_task))
         .route("/api/tasks/{id}/unblock", post(unblock_task))
         // Task receipts (task 920) — NO per-route gate, matching the plain
@@ -5336,6 +5337,23 @@ async fn claim_task(
 async fn release_task(State(state): State<AppState>, Path(id): Path<i64>) -> ApiResult<Response> {
     let mut store = state.store.lock().unwrap();
     Ok(Json(store.release_task(id)?).into_response())
+}
+
+/// Body for `POST /api/tasks/{id}/move`, mirroring `naru task move`.
+#[derive(Deserialize)]
+struct MoveBody {
+    /// Destination project id.
+    project_id: i64,
+}
+
+async fn move_task(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    body: Result<Json<MoveBody>, JsonRejection>,
+) -> ApiResult<Response> {
+    let Json(body) = body?;
+    let mut store = state.store.lock().unwrap();
+    Ok(Json(store.move_task(id, body.project_id)?).into_response())
 }
 
 async fn unblock_task(

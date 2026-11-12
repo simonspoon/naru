@@ -135,7 +135,8 @@ Full text: `docs/contracts.md`.
 
 Full text: `docs/contracts.md`.
 
-- A task's project is immutable; a subtask shares its parent's project.
+- A task's project changes only via `task move` (whole subtree; refused for a
+  subtask or while in_progress); a subtask shares its parent's project.
 - A task's `description` may never be empty (no clear; `validation`).
 - Dependency self-edges and cycles are rejected (`cycle`); so are project
   self-parenting and parent cycles.

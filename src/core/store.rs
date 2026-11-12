@@ -3368,7 +3368,8 @@ pub struct ProjectPatch {
 }
 
 /// Fields to change on a task; `None` means leave unchanged.
-/// A task's project is immutable: there is deliberately no `project_id` field.
+/// There is deliberately no `project_id` field: a task changes project only
+/// through [`Store::move_task`], which moves its whole subtree.
 #[derive(Debug, Default, Clone)]
 pub struct TaskPatch {
     /// Replace-only: a task's description is its identity (task 660), so
@@ -4710,6 +4711,67 @@ impl Store {
              updated_at = datetime('now') WHERE id = ?1",
             [id],
         )?;
+        self.get_task(id)
+    }
+
+    /// Moves a top-level task and all its subtasks (recursively) to another
+    /// project (naru task 2729); the one write path that changes a task's
+    /// `project_id`. A subtask is refused (`validation`): it shares its
+    /// parent's project, so the subtree moves from its root. Anything in the
+    /// subtree `in_progress` is refused (`conflict`): its agent session and
+    /// worktree live in the old project's folder. Dependencies (cross-project
+    /// already), notes, attachments, receipt, status history, `artifact` and
+    /// `sort_order` are untouched; each moved task gets a note recording the
+    /// move. Moving to the task's own project is a no-op that writes nothing.
+    pub fn move_task(&mut self, id: i64, project_id: i64) -> Result<Task> {
+        let task = self.get_task(id)?;
+        let to = self.get_project(project_id)?;
+        if task.project_id == project_id {
+            return Ok(task);
+        }
+        if let Some(pid) = task.parent_id {
+            return Err(Error::Validation(format!(
+                "task {id} is a subtask of task {pid}: a subtask shares its parent's project, \
+                 so move task {pid} (it takes its subtasks along) or detach task {id} first"
+            )));
+        }
+        let from = self.get_project(task.project_id)?;
+        let tx = self.conn.transaction()?;
+        let subtree: Vec<(i64, String)> = {
+            let mut stmt = tx.prepare(
+                "WITH RECURSIVE sub(sid) AS ( \
+                     SELECT id FROM tasks WHERE id = ?1 \
+                     UNION \
+                     SELECT t.id FROM tasks t JOIN sub ON t.parent_id = sub.sid \
+                 ) \
+                 SELECT t.id, t.status FROM tasks t JOIN sub ON t.id = sub.sid ORDER BY t.id",
+            )?;
+            let rows = stmt.query_map([id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        if let Some((busy, _)) = subtree.iter().find(|(_, s)| s == "in_progress") {
+            return Err(Error::Conflict(format!(
+                "task {busy} is in_progress: its session and worktree belong to project \
+                 \"{}\"; finish it or move it out of in_progress before moving task {id}",
+                from.name
+            )));
+        }
+        let note = format!(
+            "moved from project \"{}\" (id {}) to project \"{}\" (id {})",
+            from.name, from.id, to.name, to.id
+        );
+        for (tid, _) in &subtree {
+            tx.execute(
+                "UPDATE tasks SET project_id = ?1, updated_at = datetime('now') WHERE id = ?2",
+                (project_id, tid),
+            )?;
+            tx.execute(
+                "INSERT INTO task_notes (task_id, body, session, created_at) \
+                 VALUES (?1, ?2, NULL, datetime('now'))",
+                (tid, &note),
+            )?;
+        }
+        tx.commit()?;
         self.get_task(id)
     }
 
@@ -15429,6 +15491,111 @@ mod tests {
         assert_eq!(released.status, Status::InProgress);
         // Releasing again is a no-op, not an error.
         assert_eq!(store.release_task(t.id).unwrap().owner, None);
+    }
+
+    fn add_child(store: &mut Store, project_id: i64, parent: i64, description: &str) -> Task {
+        store
+            .create_task(
+                project_id,
+                description,
+                Priority::Medium,
+                &[],
+                Some(parent),
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn move_task_takes_the_subtree_and_keeps_everything_else() {
+        let (mut store, _dir) = temp_store();
+        let a = store.create_project("a", None, None, None, None).unwrap();
+        let b = store.create_project("b", None, None, None, None).unwrap();
+        let root = add_task(&mut store, a.id, "root");
+        let child = add_child(&mut store, a.id, root.id, "child");
+        let grandchild = add_child(&mut store, a.id, child.id, "grandchild");
+        let blocker = add_task(&mut store, a.id, "blocker");
+        let other = add_task(&mut store, a.id, "other");
+        store.add_dependency(root.id, blocker.id).unwrap();
+        store.add_dependency(other.id, child.id).unwrap();
+        store.add_task_note(root.id, "kept", Some("s")).unwrap();
+        store
+            .update_task(
+                root.id,
+                &TaskPatch {
+                    artifact: Some(Some("abc123".into())),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let events_before = store.list_events(Some(root.id)).unwrap().len();
+
+        let moved = store.move_task(root.id, b.id).unwrap();
+        assert_eq!(moved.project_id, b.id);
+        assert_eq!(moved.parent_id, None);
+        assert_eq!(moved.sort_order, root.sort_order);
+        assert_eq!(moved.artifact.as_deref(), Some("abc123"));
+        assert!(moved.blocked, "dependency on the blocker left in a is kept");
+        for t in [child.id, grandchild.id] {
+            assert_eq!(store.get_task(t).unwrap().project_id, b.id);
+        }
+        assert_eq!(store.get_task(child.id).unwrap().parent_id, Some(root.id));
+        assert_eq!(store.get_task(blocker.id).unwrap().project_id, a.id);
+        assert_eq!(store.list_blockers(other.id).unwrap()[0].id, child.id);
+        let notes = store.list_task_notes(root.id).unwrap();
+        assert_eq!(notes.len(), 2);
+        assert_eq!(notes[0].body, "kept");
+        assert_eq!(
+            notes[1].body,
+            format!(
+                "moved from project \"a\" (id {}) to project \"b\" (id {})",
+                a.id, b.id
+            )
+        );
+        assert_eq!(store.list_task_notes(grandchild.id).unwrap().len(), 1);
+        // A move is not a status change.
+        assert_eq!(
+            store.list_events(Some(root.id)).unwrap().len(),
+            events_before
+        );
+        // Same project: no-op, no extra note.
+        store.move_task(root.id, b.id).unwrap();
+        assert_eq!(store.list_task_notes(root.id).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn move_task_refuses_subtasks_in_progress_and_unknowns() {
+        let (mut store, _dir) = temp_store();
+        let a = store.create_project("a", None, None, None, None).unwrap();
+        let b = store.create_project("b", None, None, None, None).unwrap();
+        let root = add_task(&mut store, a.id, "root");
+        let child = add_child(&mut store, a.id, root.id, "child");
+
+        assert!(matches!(
+            store.move_task(child.id, b.id),
+            Err(Error::Validation(_))
+        ));
+        assert!(matches!(
+            store.move_task(root.id, 9999),
+            Err(Error::NotFound(_))
+        ));
+        assert!(matches!(
+            store.move_task(9999, b.id),
+            Err(Error::NotFound(_))
+        ));
+        // An in_progress task anywhere in the subtree refuses the whole move.
+        store.claim_task(child.id, "sess", false).unwrap();
+        assert!(matches!(
+            store.move_task(root.id, b.id),
+            Err(Error::Conflict(_))
+        ));
+        for t in [root.id, child.id] {
+            let t = store.get_task(t).unwrap();
+            assert_eq!(t.project_id, a.id);
+            assert!(store.list_task_notes(t.id).unwrap().is_empty());
+        }
     }
 
     #[test]
