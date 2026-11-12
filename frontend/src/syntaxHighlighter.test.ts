@@ -1,6 +1,6 @@
 import { refractor } from 'refractor/core'
 import { describe, expect, it } from 'vitest'
-import { prismGrammar } from './syntaxHighlighter'
+import { grammarForPath, highlightLines, prismGrammar } from './syntaxHighlighter'
 
 // Importing the module under test is what runs its registerLanguage calls,
 // and PrismLight's registerLanguage ignores the name it is given and hands the
@@ -126,5 +126,47 @@ describe('registered grammars', () => {
     for (const [grammar, source] of samples) {
       expect(elements(refractor.highlight(source, grammar)), grammar).toBeGreaterThan(1)
     }
+  })
+})
+
+describe('grammarForPath', () => {
+  it('goes by extension, whatever the directory or case', () => {
+    expect(grammarForPath('src/core/git.rs')).toBe('rust')
+    expect(grammarForPath('frontend/src/App.TSX')).toBe('tsx')
+    expect(grammarForPath('a.b/include/x.h')).toBe('c')
+    expect(grammarForPath('lib/x.mjs')).toBe('javascript')
+    expect(grammarForPath('.env')).toBe('ini')
+  })
+
+  it('knows the files named for their language', () => {
+    expect(grammarForPath('Dockerfile')).toBe('docker')
+    expect(grammarForPath('ops/Dockerfile.dev')).toBe('docker')
+    expect(grammarForPath('Makefile')).toBe('makefile')
+  })
+
+  it('has none for an unknown extension or no extension', () => {
+    expect(grammarForPath('data.xyz')).toBeUndefined()
+    expect(grammarForPath('LICENSE')).toBeUndefined()
+    expect(grammarForPath('dir.rs/LICENSE')).toBeUndefined()
+    expect(grammarForPath('')).toBeUndefined()
+    expect(grammarForPath('a.constructor')).toBeUndefined()
+    expect(grammarForPath('a.toString')).toBeUndefined()
+  })
+
+  it('only ever answers a registered grammar', () => {
+    for (const path of ['a.h', 'a.hpp', 'a.cc', 'a.mts', 'a.htm', 'a.exs', 'a.pm', 'a.mm', 'a.kts']) {
+      expect(refractor.registered(grammarForPath(path)!)).toBe(true)
+    }
+  })
+})
+
+describe('highlightLines', () => {
+  it('answers one list of token segments per line, text intact', () => {
+    const code = 'const a = "x"\n\n// done'
+    const lines = highlightLines(code, 'typescript')
+    expect(lines).toHaveLength(3)
+    expect(lines.map((l) => l.map((s) => s.text).join('')).join('\n')).toBe(code)
+    expect(lines[0][0]).toEqual({ text: 'const', classes: ['keyword'] })
+    expect(lines[2][0].classes).toEqual(['comment'])
   })
 })

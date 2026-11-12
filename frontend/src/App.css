@@ -4732,7 +4732,8 @@ body.live-panel-ratio-resizing {
   margin: 0 0 0.75rem;
 }
 
-.git-mode-toggle button.active {
+.git-mode-toggle button.active,
+.diff-view-mode button.active {
   color: var(--bg);
   background: var(--cyan);
   border-color: var(--cyan);
@@ -4812,10 +4813,9 @@ body.live-panel-ratio-resizing {
   padding: 0.5rem 0.75rem;
 }
 
-/* Diff text is untrusted plain text: <pre> keeps it verbatim (no wrapping —
-   the pane scrolls both ways). Lines are wrapped in spans classified by
-   prefix for color only. `display: block` lets add/del rows carry a
-   full-width background tint. */
+/* Diff text the views show verbatim (a diff with no hunks the parser can
+   name): untrusted plain text in a <pre>, no wrapping — the pane scrolls
+   both ways. */
 .git-diff-text {
   margin: 0;
   font-family: var(--font-mono);
@@ -4823,27 +4823,208 @@ body.live-panel-ratio-resizing {
   line-height: 1.4;
 }
 
-.git-diff-text span {
-  display: block;
-  min-width: fit-content;
+/* ---- The Git tab's diff view (DiffView.tsx, naru task 2734). The pane is
+   the scroller and gives up its padding so the header can stick flush to its
+   top edge; the header is opaque (--panel) because lines scroll under it. */
+.git-diff-pane:has(> .diff-view) {
+  padding: 0;
 }
 
-.git-diff-text .diff-add {
+.diff-view-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem 0.6rem;
+  padding: 0.4rem 0.75rem;
+  background: var(--panel);
+  box-shadow: 0 1px 0 var(--hairline);
+  font-size: 0.8rem;
+}
+
+.diff-view-path {
+  flex: 1 1 10rem;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  color: var(--text-h);
+  overflow-wrap: anywhere;
+}
+
+.diff-view-badge-text {
+  text-transform: none;
+  overflow-wrap: anywhere;
+}
+
+.diff-view-counts {
+  font-family: var(--font-mono);
+  white-space: nowrap;
+}
+
+.diff-view-added {
   color: var(--green);
-  background: rgba(var(--green-rgb), 0.07);
 }
 
-.git-diff-text .diff-del {
+.diff-view-removed {
   color: var(--red);
-  background: rgba(var(--red-rgb), 0.08);
 }
 
-.git-diff-text .diff-hunk {
-  color: var(--cyan);
+.diff-view-nav,
+.diff-view-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
 }
 
-.git-diff-text .diff-meta {
+.diff-view-head button {
+  padding: 0.1rem 0.5rem;
+  font-size: 0.8rem;
+}
+
+.diff-view-position {
+  font-family: var(--font-mono);
+  min-width: 3.5rem;
+  text-align: center;
+}
+
+.diff-view-warning {
+  flex-basis: 100%;
+  color: var(--amber);
+}
+
+.diff-view-plain-note {
+  flex-basis: 100%;
+}
+
+.diff-view-note,
+.diff-view-raw {
+  margin: 0;
+  padding: 0.75rem;
+}
+
+/* One grid with cells emitted straight into it (no row wrapper), so every
+   line shares the column tracks and stays aligned however a long line wraps:
+   old no | old text | new no | new text when split, old no | new no | text
+   when inline. Long lines wrap rather than scroll, so the header and the
+   line numbers never leave the pane. */
+.diff-view-grid {
+  display: grid;
+  padding-bottom: 0.5rem;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  line-height: 1.45;
+  color: var(--text);
+}
+
+.diff-view-split {
+  grid-template-columns: auto minmax(0, 1fr) auto minmax(0, 1fr);
+}
+
+.diff-view-inline {
+  grid-template-columns: auto auto minmax(0, 1fr);
+}
+
+.diff-view-grid > span {
+  padding: 0 0.4rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* A hunk header is a quiet separator, not a line of the file. */
+.diff-view-full {
+  grid-column: 1 / -1;
+}
+
+.diff-view-grid > .diff-view-hunk {
+  padding: 0.15rem 0.75rem;
+  margin: 0.3rem 0;
+  font-size: 0.72rem;
   color: var(--muted);
+  background: rgba(var(--cyan-rgb), 0.05);
+  box-shadow:
+    0 1px 0 var(--hairline),
+    0 -1px 0 var(--hairline);
+}
+
+.diff-view-grid > .diff-view-hunk:first-child {
+  margin-top: 0;
+}
+
+.diff-view-grid > .diff-view-meta {
+  padding: 0.3rem 0.75rem;
+  color: var(--amber);
+}
+
+.diff-view-del {
+  background: rgba(var(--red-rgb), 0.1);
+}
+
+.diff-view-add {
+  background: rgba(var(--green-rgb), 0.1);
+}
+
+.diff-view-empty {
+  background: rgba(var(--white-rgb), 0.02);
+}
+
+/* The changed span inside a changed line: the line's own tint, stronger. */
+.diff-view-del .diff-view-word {
+  background: rgba(var(--red-rgb), 0.32);
+  border-radius: 2px;
+}
+
+.diff-view-add .diff-view-word {
+  background: rgba(var(--green-rgb), 0.3);
+  border-radius: 2px;
+}
+
+.diff-view-no {
+  min-width: 2.5ch;
+  text-align: right;
+  color: var(--muted);
+  user-select: none;
+}
+
+/* The change last stepped to with previous/next. */
+.diff-view-no.diff-view-current {
+  box-shadow: inset 3px 0 0 var(--cyan);
+  color: var(--text-h);
+}
+
+/* Inline mode marks the side in a hanging gutter: a static literal, never
+   file content. The negative indent hangs it, so a wrapped line's later
+   visual lines start under the text, not under the marker. */
+.diff-view-inline > .diff-view-text {
+  padding-left: calc(0.4rem + 2ch);
+  text-indent: -2ch;
+}
+
+.diff-view-inline > .diff-view-text::before {
+  display: inline-block;
+  width: 2ch;
+  text-indent: 0;
+  user-select: none;
+  content: ' ';
+}
+
+.diff-view-inline > .diff-view-text.diff-view-del::before {
+  content: '-';
+  color: var(--red);
+}
+
+.diff-view-inline > .diff-view-text.diff-view-add::before {
+  content: '+';
+  color: var(--green);
+}
+
+/* "No newline at end of file" and a changed line ending: notes about a
+   line, set apart from its text. */
+.diff-view-eol {
+  color: var(--muted);
+  font-style: italic;
+  user-select: none;
 }
 
 .git-placeholder {

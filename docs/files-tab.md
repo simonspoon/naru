@@ -334,7 +334,8 @@ create, on its own stricter gate (`docs/fs-browse.md`).
   cell carries, which nothing in the component reads (task 559,
   `docs/mobile.md`). Diff text
   is untrusted: every line is a plain text node in a `<span>`, classified by
-  prefix for CSS only, exactly as in `GitView`'s unified `DiffText`.
+  prefix for CSS only. The parser lives in `frontend/src/diffModel.ts`, shared
+  with the Git tab's `DiffView` (`docs/git-tab.md`, naru task 2734).
   Tree-row and
   content-header tinting is still extension/language-derived:
   tree rows derive their tint client-side from `FileTreeEntry.name`'s

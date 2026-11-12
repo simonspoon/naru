@@ -44,6 +44,9 @@ import yaml from 'react-syntax-highlighter/dist/esm/languages/prism/yaml'
 import vscDarkPlus from 'react-syntax-highlighter/dist/esm/styles/prism/vsc-dark-plus'
 import vsLight from 'react-syntax-highlighter/dist/esm/styles/prism/vs'
 import { useSyncExternalStore } from 'react'
+import { refractor } from 'refractor/core'
+import { hastLines } from './diffModel'
+import type { Seg } from './diffModel'
 import { onThemeChange } from './theme'
 
 // Registered once at module load, shared by every code-colouring surface
@@ -217,4 +220,52 @@ const PRISM_GRAMMAR: Record<string, string> = {
 export function prismGrammar(token: string | null | undefined): string | undefined {
   if (!token) return undefined
   return PRISM_GRAMMAR[token.toLowerCase()]
+}
+
+// File extensions that are not themselves a language token above.
+const EXTENSION_GRAMMAR: Record<string, string> = {
+  h: 'c',
+  hpp: 'cpp',
+  hh: 'cpp',
+  cc: 'cpp',
+  cxx: 'cpp',
+  mjs: 'javascript',
+  cjs: 'javascript',
+  mts: 'typescript',
+  cts: 'typescript',
+  htm: 'markup',
+  ex: 'elixir',
+  exs: 'elixir',
+  pl: 'perl',
+  pm: 'perl',
+  m: 'objectivec',
+  mm: 'objectivec',
+  kts: 'kotlin',
+}
+
+/** The Prism grammar for a file path, by its name or extension, or
+ * `undefined` when there is none — the diff views then render plain text
+ * (naru task 2734). A diff carries no `language` tag the way the Files
+ * content endpoint does, so the path is all there is to go on. */
+export function grammarForPath(path: string): string | undefined {
+  const name = path.slice(path.lastIndexOf('/') + 1).toLowerCase()
+  if (name === 'dockerfile' || name.startsWith('dockerfile.')) return 'docker'
+  if (name === 'makefile' || name === 'gnumakefile') return 'makefile'
+  const dot = name.lastIndexOf('.')
+  if (dot === -1) return undefined
+  const ext = name.slice(dot + 1)
+  // The path is untrusted and both tables are plain objects: `a.constructor`
+  // must not answer an inherited member.
+  const grammar = Object.hasOwn(EXTENSION_GRAMMAR, ext)
+    ? EXTENSION_GRAMMAR[ext]
+    : prismGrammar(ext)
+  return typeof grammar === 'string' ? grammar : undefined
+}
+
+/** `code` highlighted with a registered grammar, as one list of token
+ * segments per line. Reads the same refractor singleton `PrismLight`
+ * registered the grammars on above; the segments are plain data, so the
+ * caller decides the markup. */
+export function highlightLines(code: string, grammar: string): Seg[][] {
+  return hastLines(refractor.highlight(code, grammar))
 }

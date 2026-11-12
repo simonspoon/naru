@@ -313,12 +313,11 @@ row's two halves apart, since both are `diff-split-ctx`. `::before` markers
 decoration once colour is the only other signal and the two lines are stacked
 rather than side by side. Measured after: text column 150px → **306px**.
 
-The Git tab is *not* part of this. It renders its own unified `<pre
-class="git-diff-text">` (`GitView.tsx`) and never touches `SideBySideDiff`;
-verified readable at 390×844 as-is — single column, 250 lines, mono, scrolling
-both ways per the same verbatim doctrine as the file viewer. Its file list has
-the same push-below-the-fold shape the tree had (diff pane top at 680px), which
-is a real but separate gap.
+The Git tab is *not* part of this. It renders its own `DiffView`
+(`docs/git-tab.md`, naru task 2734), never `SideBySideDiff`: a Split | Inline
+pick that defaults to Inline at this tier (`usePhoneTier`), with lines that
+wrap inside the pane. Its file list has the same push-below-the-fold shape the
+tree had (diff pane top at 680px), which is a real but separate gap.
 
 ## CC Dashboard tables
 

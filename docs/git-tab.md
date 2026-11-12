@@ -2,7 +2,7 @@
 
 The **Git** tab on a project page (web UI) shows the working tree of the
 project's `local_path`: branch/ahead-behind + changed-file list, with a
-per-file unified-diff pane, plus a **worktree selector** (below) and a
+per-file diff pane ("Diff view" below), plus a **worktree selector** (below) and a
 **History** sub-view (toggle, default Working tree) that browses commit
 history. Like `/api/git-status` it reads **external** state via read-only
 `git` shell-outs (`view_of`/`diff_of`/`worktrees_of`/`commit_log_of`/
@@ -124,3 +124,59 @@ nothing.
 - Every `sha` accepted from a request path is validated by
   `git::is_valid_commit_id` (7–64 hex chars) **before** any `git` subprocess
   is spawned, so it can never be read as a flag or a path.
+
+## Diff view (naru task 2734)
+
+Both diff panes — the working-tree file and the commit file — render the
+route's unified diff through one component, `DiffView`
+(`frontend/src/components/DiffView.tsx`). It adds no route and changes no
+server format; everything below is client-side, from `GitFileDiff.diff` and
+the selected path.
+
+- **Parser.** `parseDiff` in `frontend/src/diffModel.ts` — the same parser the
+  Files tab's `SideBySideDiff` renders from (it was that component's
+  `parseSideBySide`; there is no second one). It pairs each run of `-` lines
+  with the run of `+` lines after it, numbers both sides from the hunk
+  headers, and reads the lines before the first hunk for what they say about
+  the file (new, deleted, renamed, mode change, binary). All of the view's
+  logic is pure functions in that module, covered by `diffModel.test.ts`.
+- **Split | Inline.** Split is old | new in four columns (number, text,
+  number, text); Inline is one text column behind an old and a new number
+  column, removed lines of a run before its added lines, with a `-`/`+` gutter.
+  The pick is remembered in `localStorage` (`naru-git-diff-mode`); with no
+  pick, a phone-width screen (≤600px) opens Inline and everything wider opens
+  Split.
+- **Syntax colour** by file name or extension (`grammarForPath` in
+  `syntaxHighlighter.ts`), using the Prism grammars already registered there
+  and the same palette as the file viewer (`usePrismStyle`). Each hunk's old
+  side and new side is highlighted as a block. An unknown extension renders
+  plain. Only colour and font style are taken from the palette, so the
+  add/delete tint always shows.
+- **Word-level marks.** Inside a changed line pair, the spans that differ are
+  tinted stronger than the line (`wordDiff`: a longest-common-subsequence over
+  word tokens). A pair that shares no word, or less than a quarter of its
+  text, is left unmarked — it is two unrelated lines, not an edit.
+- **Header.** Sticky at the top of the pane: the path, badges for new /
+  deleted / renamed / mode change / binary, `+added −removed` line counts,
+  previous / next change (a change is a run of added or removed rows; the
+  buttons scroll it to the middle of the pane), and the Split | Inline pick.
+- **Hunk headers** are quiet full-width separators. Long lines wrap inside
+  their column; the pane never scrolls sideways.
+- **No hunks.** A diff without hunks gets a sentence instead of an empty pane:
+  "Binary file, no text diff.", "Renamed without content changes.", "File mode
+  changed from A to B, no content change.", "Empty file added." / "Empty file
+  deleted."; a shape it does not know is shown verbatim.
+- **Notes on a line.** "No newline at end of file" is shown after the line it
+  belongs to, on the side it belongs to. A changed pair whose only line-ending
+  difference is a carriage return gets a `CR` note on the side that has it
+  (a CRLF file's other lines are shown without their `\r`).
+- **Size limits.** Past **2,000 lines or 150,000 characters** of diff
+  (`RICH_MAX_LINES`, `RICH_MAX_CHARS`) the view skips syntax colour and word
+  marks and says so in the header; lines, numbers, both modes and navigation
+  still work. A single line over 2,000 characters (`RICH_MAX_LINE_CHARS`, a
+  minified file) is left plain the same way. The server's own cut at
+  `DIFF_CAP` (256 KiB) arrives as a `[diff truncated]` line; the view shows a
+  warning in the header and a notice at the cut.
+- **Untrusted text.** Diff text and the path reach the page only as text
+  nodes. Classes come from the parser; inline colours come from the Prism
+  palette, keyed by token class, never from the text.

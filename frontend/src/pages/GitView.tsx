@@ -15,6 +15,7 @@ import type { GitWorktree } from '../types/GitWorktree'
 import { useLiveContext } from '../liveContext'
 import { LiveFocus } from './LiveFocus'
 import { useFetch } from '../useFetch'
+import { DiffView } from '../components/DiffView'
 import {
   effectiveRepo,
   hashWithRepo,
@@ -63,53 +64,6 @@ function commitStatusLabel(status: string): string {
   return word ?? status
 }
 
-/** CSS class for one unified-diff line, by prefix. File headers (---/+++)
- * and other metadata (diff --git, index, mode/rename lines, "Binary files
- * ... differ", "\ No newline...") are checked before the one-char +/-
- * content prefixes they would otherwise match. */
-function diffLineClass(line: string): string {
-  if (line.startsWith('@@')) return 'diff-hunk'
-  if (
-    line.startsWith('+++') ||
-    line.startsWith('---') ||
-    line.startsWith('diff ') ||
-    line.startsWith('index ') ||
-    line.startsWith('old mode') ||
-    line.startsWith('new mode') ||
-    line.startsWith('new file') ||
-    line.startsWith('deleted file') ||
-    line.startsWith('similarity ') ||
-    line.startsWith('rename ') ||
-    line.startsWith('copy ') ||
-    line.startsWith('Binary files ') ||
-    line.startsWith('\\')
-  )
-    return 'diff-meta'
-  if (line.startsWith('+')) return 'diff-add'
-  if (line.startsWith('-')) return 'diff-del'
-  return 'diff-ctx'
-}
-
-/** Renders a unified diff, color-coded per line. Diff text is untrusted
- * data: each line is rendered as a plain text node inside a <span> in the
- * <pre> — classified by prefix for CSS only, never interpreted as markup
- * (spec M11). Binary files carry git's own "Binary files ... differ" line
- * as the diff text, which serves as the notice (S3). Shared by the
- * working-tree DiffPane and the per-commit CommitDiffPane below (M3: same
- * diff-line classification, reused verbatim). */
-function DiffText({ diff }: { diff: string }) {
-  if (diff === '') return <p className="muted">No diff.</p>
-  return (
-    <pre className="git-diff-text">
-      {diff.split('\n').map((line, i) => (
-        <span key={i} className={diffLineClass(line)}>
-          {line + '\n'}
-        </span>
-      ))}
-    </pre>
-  )
-}
-
 /** The selected working-tree file's unified diff vs HEAD, scoped to
  * `worktree` when a non-default one is selected (same selector GitView's
  * own file list/diff already resolved `path` against). */
@@ -130,7 +84,7 @@ function DiffPane({
   )
   if (error) return <p className="error">{error}</p>
   if (!data) return <p className="muted">Loading…</p>
-  return <DiffText diff={data.diff} />
+  return <DiffView key={`${worktree ?? ''} ${path}`} diff={data.diff} path={path} />
 }
 
 /** The selected file's unified diff as introduced by one commit. Sibling of
@@ -153,7 +107,7 @@ function CommitDiffPane({
   )
   if (error) return <p className="error">{error}</p>
   if (!data) return <p className="muted">Loading…</p>
-  return <DiffText diff={data.diff} />
+  return <DiffView key={`${sha} ${path}`} diff={data.diff} path={path} />
 }
 
 function fileLabel(f: GitFile): string {
