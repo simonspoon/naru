@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use crate::core::types::{
     DirEntry, DirListing, FileContentView, FileSearchFile, FileSearchMatch, FileTreeEntry,
-    ProjectFileSearch,
+    ProjectFileNames, ProjectFileSearch,
 };
 
 /// Mirrors `git.rs`'s `DIFF_CAP` precedent: one huge file can't balloon the
@@ -1330,29 +1330,26 @@ pub fn search_files(root: &str, query: &str, opts: SearchOptions) -> Option<Proj
         return Some(out);
     }
     let mut scanned = 0usize;
-    search_dir(&root_canon, "", &needle, opts, &mut out, &mut scanned);
+    walk_files(&root_canon, "", &mut |path, rel| {
+        search_one_file(path, rel, &needle, opts, &mut out, &mut scanned);
+        !out.truncated
+    });
     Some(out)
 }
 
-/// One directory level of [`search_files`]'s walk: scan this level's files,
-/// then recurse into its subdirectories, in the order [`tree_level`] lists
-/// them. Stops the moment any cap is hit, which is what `out.truncated`
-/// carries back up.
-fn search_dir(
-    dir: &Path,
-    rel: &str,
-    needle: &[char],
-    opts: SearchOptions,
-    out: &mut ProjectFileSearch,
-    scanned: &mut usize,
-) {
-    if out.truncated {
-        return;
-    }
-    // An unreadable directory is "no entries", not a failed search — the same
+/// The walk behind [`search_files`] and [`list_file_names`]: one directory
+/// level at a time, in the order [`tree_level`] lists them — this level's
+/// files first, then its subdirectories, recursively. [`EXCLUDED_DIRS`] are
+/// skipped by name and symlinks are skipped outright (never opened, never
+/// recursed into), so `visit` is only ever handed a regular file the tree
+/// could list. `visit` gets the file's path on disk and its root-relative
+/// path, and returns `false` to stop the whole walk; so does this, which is
+/// how a stop at any depth unwinds every level above it.
+fn walk_files(dir: &Path, rel: &str, visit: &mut dyn FnMut(&Path, &str) -> bool) -> bool {
+    // An unreadable directory is "no entries", not a failed walk — the same
     // precedent `tree_level` takes for a permission change under it.
     let Ok(read_dir) = fs::read_dir(dir) else {
-        return;
+        return true;
     };
     let mut entries: Vec<(String, bool)> = Vec::new();
     for entry in read_dir.flatten() {
@@ -1376,34 +1373,24 @@ fn search_dir(
         _ => a.0.cmp(&b.0),
     });
 
-    for (name, is_dir) in &entries {
-        if *is_dir {
-            continue;
-        }
-        if out.truncated {
-            return;
-        }
-        let child_rel = if rel.is_empty() {
-            name.clone()
+    let child_rel = |name: &str| {
+        if rel.is_empty() {
+            name.to_string()
         } else {
             format!("{rel}/{name}")
-        };
-        search_one_file(&dir.join(name), &child_rel, needle, opts, out, scanned);
-    }
-    for (name, is_dir) in &entries {
-        if !*is_dir {
-            continue;
         }
-        if out.truncated {
-            return;
+    };
+    for (name, _) in entries.iter().filter(|(_, is_dir)| !is_dir) {
+        if !visit(&dir.join(name), &child_rel(name)) {
+            return false;
         }
-        let child_rel = if rel.is_empty() {
-            name.clone()
-        } else {
-            format!("{rel}/{name}")
-        };
-        search_dir(&dir.join(name), &child_rel, needle, opts, out, scanned);
     }
+    for (name, _) in entries.iter().filter(|(_, is_dir)| *is_dir) {
+        if !walk_files(&dir.join(name), &child_rel(name), visit) {
+            return false;
+        }
+    }
+    true
 }
 
 /// Scan one file and append its group, if it has one.
@@ -1475,6 +1462,56 @@ fn search_one_file(
     if out.files.len() >= MAX_SEARCH_FILES {
         out.truncated = true;
     }
+}
+
+/// The most files [`list_file_names`] lists — and, since it opens nothing and
+/// counts only files, the most it visits: the walk stops at the first file
+/// past this, so the cap bounds the work and the response together. Well
+/// above any source tree the Files tab is for (this repo, `target/` and
+/// `node_modules/` excluded, is under 2,000), and at roughly 40 bytes a path
+/// still a response of a couple of megabytes at worst.
+pub const MAX_NAME_FILES: usize = 50_000;
+
+/// Every file under `root` by root-relative path, for the Files tab's
+/// Cmd/Ctrl+P "Go to file" box (naru task 2744) — `GET
+/// /api/projects/{id}/files/names`.
+///
+/// Exactly the tree the browser can list, because it is [`search_files`]'s
+/// own walk ([`walk_files`]): [`EXCLUDED_DIRS`] skipped at any depth,
+/// symlinks never followed, `root` resolved once through [`safe_path`] and
+/// everything else reached by walking real entries from there. Nothing is
+/// opened — this is names only — and binary files are listed like any other,
+/// since the box opens them in their own viewers.
+///
+/// No query: the client ranks the whole list itself (`quickOpen.ts`), because
+/// the cost here is the walk, which is the same whatever is typed, so a
+/// request per keystroke would repeat it per keystroke. Capped at
+/// [`MAX_NAME_FILES`] with `truncated` set when there were more. `None` only
+/// for a `root` that does not resolve to a directory, as for [`tree_level`].
+pub fn list_file_names(root: &str) -> Option<ProjectFileNames> {
+    list_file_names_capped(root, MAX_NAME_FILES)
+}
+
+/// [`list_file_names`] with the cap as an argument, so a test can hit it
+/// without writing fifty thousand files.
+fn list_file_names_capped(root: &str, cap: usize) -> Option<ProjectFileNames> {
+    let root_canon = safe_path(root, ".")?;
+    if !root_canon.is_dir() {
+        return None;
+    }
+    let mut out = ProjectFileNames {
+        paths: Vec::new(),
+        truncated: false,
+    };
+    walk_files(&root_canon, "", &mut |_, rel| {
+        if out.paths.len() >= cap {
+            out.truncated = true;
+            return false;
+        }
+        out.paths.push(rel.to_string());
+        true
+    });
+    Some(out)
 }
 
 /// NUL-byte sniff over the first 8 KiB — the standard cheap binary-file
@@ -3265,5 +3302,73 @@ mod tests {
         let res = search_files(root, "needle", SearchOptions::default()).unwrap();
         let paths: Vec<&str> = res.files.iter().map(|f| f.path.as_str()).collect();
         assert_eq!(paths, vec!["inside.txt"]);
+    }
+
+    // --- list_file_names (naru task 2744) ------------------------------
+
+    #[test]
+    fn list_file_names_walks_the_search_tree_and_skips_excluded_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_search_tree(dir.path());
+        fs::create_dir_all(dir.path().join("target/release")).unwrap();
+        fs::write(dir.path().join("target/release/naru"), "bin").unwrap();
+        fs::create_dir_all(dir.path().join("src/deep/er")).unwrap();
+        fs::write(dir.path().join("src/deep/er/x.ts"), "").unwrap();
+        let res = list_file_names(dir.path().to_str().unwrap()).unwrap();
+        // Walk order: a level's files before its directories, alphabetical;
+        // binary files are names like any other.
+        assert_eq!(
+            res.paths,
+            vec![
+                "README.md",
+                "blob.dat",
+                "logo.png",
+                "src/main.rs",
+                "src/deep/er/x.ts"
+            ]
+        );
+        assert!(!res.truncated);
+    }
+
+    #[test]
+    fn list_file_names_caps_and_flags_truncated() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..5 {
+            fs::write(dir.path().join(format!("f{i}.txt")), "").unwrap();
+        }
+        let root = dir.path().to_str().unwrap();
+        let capped = list_file_names_capped(root, 3).unwrap();
+        assert_eq!(capped.paths, vec!["f0.txt", "f1.txt", "f2.txt"]);
+        assert!(capped.truncated);
+        // Exactly at the cap is not truncated: nothing was left out.
+        let exact = list_file_names_capped(root, 5).unwrap();
+        assert_eq!(exact.paths.len(), 5);
+        assert!(!exact.truncated);
+    }
+
+    #[test]
+    fn list_file_names_is_none_for_a_dead_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("gone");
+        assert!(list_file_names(missing.to_str().unwrap()).is_none());
+        fs::write(dir.path().join("file"), "").unwrap();
+        assert!(list_file_names(dir.path().join("file").to_str().unwrap()).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_file_names_never_follows_a_symlink_out_of_the_root() {
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("secret.txt"), "").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("inside.txt"), "").unwrap();
+        symlink(outside.path(), dir.path().join("link")).unwrap();
+        symlink(
+            outside.path().join("secret.txt"),
+            dir.path().join("alias.txt"),
+        )
+        .unwrap();
+        let res = list_file_names(dir.path().to_str().unwrap()).unwrap();
+        assert_eq!(res.paths, vec!["inside.txt"]);
     }
 }

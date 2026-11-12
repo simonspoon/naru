@@ -334,3 +334,40 @@ describe('shouldIgnoreFilesShortcut — replace and go to line', () => {
     expect(ignoresChord('goto', at('editor'))).toBe(true)
   })
 })
+
+describe('shouldIgnoreFilesShortcut — go to file (Cmd/Ctrl+P)', () => {
+  const fields = `
+    <div class="files-content-editor" contenteditable="true" id="editor"></div>
+    <input class="files-find-input" id="find" />
+    <input class="files-find-input files-replace-input" id="replace" />
+    <input class="files-goto-input" id="goto" />
+    <input class="files-search-input" id="search" />
+    <input class="files-new-file-input" id="other" />`
+  const at = (id: string) => document.getElementById(id)!
+  const ignoresOpen = (target: Element) => {
+    let seen: boolean | undefined
+    const handler = (e: Event) => {
+      seen = shouldIgnoreFilesShortcut(e as KeyboardEvent, 'open')
+    }
+    document.addEventListener('keydown', handler)
+    target.dispatchEvent(new KeyboardEvent('keydown', { key: 'p', metaKey: true, bubbles: true }))
+    document.removeEventListener('keydown', handler)
+    if (seen === undefined) throw new Error('keydown never reached document')
+    return seen
+  }
+
+  it('claims it from the editor, the find and replace boxes, go-to-line and search', () => {
+    document.body.innerHTML = fields
+    for (const id of ['editor', 'find', 'replace', 'goto', 'search']) {
+      expect(ignoresOpen(at(id))).toBe(false)
+    }
+    expect(ignoresOpen(document.body)).toBe(false)
+  })
+
+  it('stands down in any other field, and under a modal or its own box', () => {
+    document.body.innerHTML = fields
+    expect(ignoresOpen(at('other'))).toBe(true)
+    document.body.innerHTML = fields + '<div class="command-palette-backdrop"></div>'
+    expect(ignoresOpen(at('editor'))).toBe(true)
+  })
+})

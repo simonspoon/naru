@@ -5278,6 +5278,12 @@ body.live-panel-ratio-resizing {
   line-height: 1;
 }
 
+/* Its neighbour, "Go to file" (naru task 2744), shares the look but not the
+   push: the search toggle's `margin-left: auto` already sends both right. */
+.files-tree-quick-open {
+  margin-left: 0;
+}
+
 .files-tree-search-toggle:hover,
 .files-tree-search-toggle[aria-pressed='true'] {
   background: none;
@@ -7001,6 +7007,49 @@ body.live-panel-ratio-resizing {
 
 .command-palette-empty {
   padding: 0.4rem 0.6rem;
+}
+
+/* The Files tab's "Go to file" box (naru task 2744) is the palette with a file
+   row: the name first, its folder dimmed after it and cut before the name
+   ever is. The note line carries "gone" and "listing was capped". */
+.files-quick-open-item {
+  justify-content: flex-start;
+}
+
+.files-quick-open-name {
+  flex: none;
+}
+
+.files-quick-open-dir {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.files-quick-open-note {
+  margin: 0;
+  padding: 0.4rem 1rem 0;
+  font-size: 0.8rem;
+}
+
+/* Phone tier: pinned near the top and no taller than the half of the screen
+   the soft keyboard leaves, with touch-sized rows. */
+@media (max-width: 600px) {
+  .files-quick-open-backdrop {
+    padding-top: 0.5rem;
+  }
+
+  .files-quick-open {
+    max-height: 45vh;
+  }
+
+  .files-quick-open-item {
+    align-items: center;
+    min-height: 44px;
+  }
 }
 
 /* Shared backdrop for the centered modals (new task, new project, and task

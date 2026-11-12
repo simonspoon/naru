@@ -21,6 +21,7 @@ page's.
 | `Escape` | `live-cancel` | live conversation, joined | Drops what the microphone heard and has not sent, and mutes it; again to resume its own mute (task 1354, `docs/live.md`) — any other Escape owner wins |
 | `Cmd/Ctrl+F` | — | Files tab, focused pane, findable file | Opens find-in-file, selecting the remembered query (task 809) |
 | `Cmd/Ctrl+Shift+F` | — | Files tab | Opens the project-wide search panel in place of the tree, selecting the remembered query (task 813) |
+| `Cmd/Ctrl+P` | — | Files tab with a tree | Opens the "Go to file" box; Enter opens in the focused pane, Cmd/Ctrl+Enter beside it, Escape closes (task 2744). Cmd+P on macOS only — Ctrl+P there is the editor's line-up — and Ctrl+P elsewhere. Print everywhere else |
 | `Cmd/Ctrl+Alt+F` | — | Files tab, focused pane, editor | Opens the find bar with its replace row, or moves the caret to the replace box of a bar already up (task 2743). Also `Ctrl+H` off macOS only — on macOS Ctrl+H is the editor's own delete-backward |
 | `Ctrl+G` | — | Files tab, focused pane, editor | Opens the go-to-line prompt in the status bar: `line` or `line:column` (task 2743). Ctrl on every platform — Cmd+G is the browser's find-next |
 | `Cmd/Ctrl+S` | — | Files tab editor | Saves the file (and swallows Save Page); nothing to write over a clean buffer |
@@ -198,8 +199,12 @@ chord survives is one table in the module (`CHORD_FIELDS`), and it is the only
 place the chords part company: `'find'` and `'replace'` (task 2743) keep
 `.files-find-input` *and* `.files-replace-input`, `'goto'` (task 2743) keeps
 only its own `.files-goto-input`, `'search'` keeps `.files-find-input` and
-`.files-search-input`, `'tabs'` keeps none. The `chord` argument (`'find'` |
-`'replace'` | `'goto'` | `'search'` | `'tabs'`, required, never defaulted) is
+`.files-search-input`, `'open'` (Cmd/Ctrl+P, task 2744) keeps all four — the
+find and replace boxes, the go-to-line prompt and the search box — since the box
+opens over the page and Escape hands the caret back, so it changes nothing under
+the caret and there is no reason to let Print have the key, `'tabs'` keeps none.
+The `chord` argument (`'find'` | `'replace'` | `'goto'` | `'search'` | `'open'` |
+`'tabs'`, required, never defaulted) is
 how a caller says which it is, rather than inheriting whichever answer happened
 to be the default.
 
@@ -254,6 +259,19 @@ rather than an oversight: Alt is the only chord space this page owns (Cmd/Ctrl+W
 and Ctrl+Tab are the browser's, below), and losing a curly quote in a code
 editor is the smaller loss. Elsewhere in the app — and in any other text control,
 where the predicate stands down — all three still type.
+
+**Cmd/Ctrl+P is the page's while the Files tab has a tree** (task 2744), and
+Print everywhere else: the listener lives in `FilesView`, so it exists only while
+the tab is mounted, and it also stands down while the tab shows a placeholder
+(no folder to list). Inside the box the chord is claimed by the box's own input
+(re-selecting the query), since the tab's listener stands down under the
+palette backdrop the box uses. With trusted key events delivered to the page (CDP, headless Chrome on
+macOS) `Cmd+P` opens the box from the tree, the code editor, the find box and
+the replace box, and is `defaultPrevented` there, while on the project board it
+is left alone. Whether real Chrome and Safari (the Mac app's WKWebView) hand the
+page `Cmd+P` before printing has **not** been checked with a person at the
+keyboard; the **⇢** button on the tree's header rail is the route that does not
+depend on it.
 
 **Cmd/Ctrl+W is deliberately not bound.** Chrome and Safari deliver it to the
 browser, not the document, so binding it would ship a shortcut that works

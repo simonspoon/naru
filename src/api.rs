@@ -46,15 +46,15 @@ use crate::core::{
     LiveBoardHistoryEntry, LiveBoardHistoryPage, LiveBoardInkEntry, LiveBoardKind,
     LiveBoardSummary, LiveContext, LiveNotebookEntry, LiveNotice, LiveOffer, LiveState, LiveStatus,
     LiveTranscript, LiveWindow, ModelRates, NaruVersion, NextResult, Priority, ProjectAgents,
-    ProjectFileTree, ProjectGitLog, ProjectGitRepos, ProjectGitStatus, ProjectGitView,
-    ProjectPatch, ProjectVersion, ReceiptPatch, STALE_CLAIM_MINUTES, Script, ScriptArg,
-    ScriptPatch, ScriptRunEvent, ServeBoolSetting, ServeHostsSetting, ServeNumberSetting, Status,
-    Store, SystemInfo, Task, TaskNote, TaskPatch, TaskSummary, WorkflowEdgeKind,
-    WorkflowGateStatus, WorkflowNodeKind, WorkflowNodeNew, WorkflowNodePatch, WorkflowPatch,
-    WorkflowTrigger, WorkflowType, agents, attachments, audio, board, claude_trust, config, files,
-    git, guard, hooks, inbox_triage, kb, library, listen, live, memory_job, model_router, notify,
-    orbit, project_memory, receipt, runner, script_runs, scripts, speech, supervisor, system,
-    validate_live_client, version, workflow,
+    ProjectFileNames, ProjectFileTree, ProjectGitLog, ProjectGitRepos, ProjectGitStatus,
+    ProjectGitView, ProjectPatch, ProjectVersion, ReceiptPatch, STALE_CLAIM_MINUTES, Script,
+    ScriptArg, ScriptPatch, ScriptRunEvent, ServeBoolSetting, ServeHostsSetting,
+    ServeNumberSetting, Status, Store, SystemInfo, Task, TaskNote, TaskPatch, TaskSummary,
+    WorkflowEdgeKind, WorkflowGateStatus, WorkflowNodeKind, WorkflowNodeNew, WorkflowNodePatch,
+    WorkflowPatch, WorkflowTrigger, WorkflowType, agents, attachments, audio, board, claude_trust,
+    config, files, git, guard, hooks, inbox_triage, kb, library, listen, live, memory_job,
+    model_router, notify, orbit, project_memory, receipt, runner, script_runs, scripts, speech,
+    supervisor, system, validate_live_client, version, workflow,
 };
 
 /// The Vite build output, embedded into the binary at compile time.
@@ -4426,6 +4426,12 @@ fn router(state: AppState) -> Router {
         // search is keyed on a query and cached by nothing. Standard guard
         // only, like every other read on this tab.
         .route("/api/projects/{id}/files/search", get(search_project_files))
+        // Every file name in that same tree, for the Cmd/Ctrl+P "Go to file"
+        // box (naru task 2744). A read like its siblings — standard guard only.
+        .route(
+            "/api/projects/{id}/files/names",
+            get(list_project_file_names),
+        )
         // Change notifications for the tree (naru task 1875): an NDJSON stream
         // the page refetches on. A read on the standard guard only, like the
         // tree it announces changes to.
@@ -11125,6 +11131,29 @@ async fn search_project_files(
     found.map(|r| Json(r).into_response()).ok_or_else(not_found)
 }
 
+/// `GET /api/projects/{id}/files/names` — every file the tree could list, by
+/// relative path, capped (`core::files::list_file_names`, naru task 2744). No
+/// query: the client ranks the list. No `local_path`, a dead folder, or a root
+/// `safe_path` refuses is 404 `not_found`, as for the search route above.
+async fn list_project_file_names(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<ProjectFileNames>> {
+    let not_found = || ApiError {
+        status: StatusCode::NOT_FOUND,
+        code: "not_found",
+        message: "project has no readable local path".into(),
+    };
+    let (path, is_dir) = project_files_root(&state, id).await?;
+    let (Some(root), true) = (path, is_dir) else {
+        return Err(not_found());
+    };
+    let found = tokio::task::spawn_blocking(move || files::list_file_names(&root))
+        .await
+        .unwrap_or(None);
+    found.map(Json).ok_or_else(not_found)
+}
+
 /// Files tab raw-bytes download (task 683) — the same `?path=` contract as
 /// [`get_project_files_content`] above (missing `path` 422 `validation`, no
 /// `local_path` / dead folder / anything `safe_path` rejects 404 `not_found`
@@ -15793,6 +15822,35 @@ mod tests {
         let tree = body["tree"].as_array().unwrap();
         assert_eq!(tree.len(), 1);
         assert_eq!(tree[0]["path"], "sub/b.rs");
+    }
+
+    #[tokio::test]
+    async fn files_names_lists_the_tree_and_404s_without_a_root() {
+        let (dir, state) = test_state();
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::create_dir_all(root.join("node_modules/dep")).unwrap();
+        std::fs::write(root.join("a.txt"), "hi").unwrap();
+        std::fs::write(root.join("sub/b.rs"), "fn main() {}").unwrap();
+        std::fs::write(root.join("node_modules/dep/index.js"), "").unwrap();
+        let id = new_project(&state, Some(root.to_str().unwrap()));
+        let Json(names) = list_project_file_names(State(state.clone()), Path(id))
+            .await
+            .unwrap();
+        assert_eq!(names.paths, vec!["a.txt", "sub/b.rs"]);
+        assert!(!names.truncated);
+
+        let no_root = new_project(&state, None);
+        let err = list_project_file_names(State(state.clone()), Path(no_root))
+            .await
+            .unwrap_err();
+        assert_eq!(err.status, StatusCode::NOT_FOUND);
+        let gone = dir.path().join("gone").to_str().unwrap().to_string();
+        let dead = new_project(&state, Some(&gone));
+        let err = list_project_file_names(State(state), Path(dead))
+            .await
+            .unwrap_err();
+        assert_eq!(err.status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

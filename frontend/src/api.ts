@@ -84,6 +84,7 @@ import type { LiveTurn } from './types/LiveTurn'
 import type { LiveWindow } from './types/LiveWindow'
 import type { NaruVersion } from './types/NaruVersion'
 import type { ModelRates } from './types/ModelRates'
+import type { ProjectFileNames } from './types/ProjectFileNames'
 import type { ProjectFileSearch } from './types/ProjectFileSearch'
 import type { ProjectFileTree } from './types/ProjectFileTree'
 import type { ProjectGitLog } from './types/ProjectGitLog'
@@ -783,6 +784,12 @@ export function searchProjectFiles(
   if (options.caseSensitive) params.set('case', 'true')
   if (options.wholeWord) params.set('word', 'true')
   return request(`/api/projects/${id}/files/search?${params.toString()}`)
+}
+
+/** Every file the project's tree could list, capped — the Files tab's
+ *  Cmd/Ctrl+P box ranks this itself (`quickOpen.ts`, naru task 2744). */
+export function listProjectFileNames(id: number): Promise<ProjectFileNames> {
+  return request(`/api/projects/${id}/files/names`)
 }
 
 // ---- agents (live Claude Code sessions; local/LAN-page-gated endpoints) ----

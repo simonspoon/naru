@@ -1589,6 +1589,85 @@ snippet highlighting; `keyboardScope.test.ts` covers the `'search'` chord.
 Everything else — the panel's focus routing, the landing's reveal — is khora's,
 per CLAUDE.md's standing split.
 
+## Go to file (naru task 2744)
+
+`Cmd/Ctrl+P`, or the **⇢** button beside the search toggle on the tree's header
+rail — open a file by typing part of its name, the way an editor's quick open
+does, instead of clicking down the tree.
+
+### The route
+
+`GET /api/projects/{id}/files/names` → `ProjectFileNames { paths, truncated }`:
+every file under `local_path` by root-relative path, in walk order. A read on
+the standard guard only, like every other GET on this tab. No `local_path`, a
+dead folder or an unknown project is 404 `not_found`, the search route's rule.
+
+It is `core::files::list_file_names`, and its walk **is** the search's:
+`walk_files` (the old `search_dir`, turned into a visitor both callers share),
+so `EXCLUDED_DIRS` are skipped at any depth, symlinks are never followed or
+listed, and the root goes through `safe_path` once — a name in the box is always
+a file the tree could show. Nothing is opened; a binary file or an image is a
+name like any other, and opens in its own viewer. One cap, `MAX_NAME_FILES` =
+50,000: the walk counts only files and stops at the first one past the cap, so
+it bounds the work and the response together, and sets `truncated`.
+
+### Filtering is client-side, over one list per open
+
+The server walks once each time the box opens; every keystroke after that is
+ranked in memory by `quickOpen.ts`. A per-keystroke query would repeat the same
+walk per keystroke, since what costs is reading directories, not comparing
+names — whereas ranking 50,000 short strings is milliseconds in the browser. On
+this repo (1,683 files once `target/` and `node_modules/` are excluded) the
+route answered in 83 ms cold and about 10 ms warm, 71 KB of JSON (measured
+2026-11-12 against the dev serve).
+
+The previous listing stays on screen while the next one is fetched, so a reopen
+is instant, and a sequence counter drops a listing that lands after a newer
+request — the search panel's rule.
+
+### Ranking
+
+`rankPaths` (`quickOpen.ts`, unit-tested): exact file name, then file-name
+prefix, then the query's characters in order through the file name, then in
+order through the whole path; within a tier the shorter path wins, then string
+order. Case-insensitive unless the query has an uppercase letter (smart case);
+whitespace in the query is ignored. At most 100 rows.
+
+With nothing typed the box lists the recently opened files (most recent first,
+remembered per project in `localStorage` as `naru-recent-files`, the last 20),
+then any other open tab, then the rest of the project in walk order. A
+remembered path a complete listing no longer holds drops out unless it is open.
+
+### The box
+
+The command palette's own classes and backdrop (`.command-palette*`), so it
+looks like the palette and every other shortcut stands down under it. The file
+name reads first with its folder dimmed after it. Up/Down move, **Enter** opens
+in the focused pane, **Cmd/Ctrl+Enter** (or Cmd/Ctrl+click) opens beside it
+(`fileTabs.ts::openFileBeside`: the other pane of a split, or a new split when
+the content area is wide enough — otherwise the focused pane), **Escape** or a
+backdrop click closes it and hands the caret back to whatever had it (the
+editor, the find bar, the tree). Opening a file expands its folders in the tree
+(each level loaded as a click would) but does not scroll the tree.
+
+The listing can be older than the disk, so a pick reads the file first: one
+deleted since is a message in the box ("… no longer exists"), and its row drops
+out — never a tab that cannot load. A truncated listing says so in the box.
+
+A project with no `local_path` or a dead folder shows the placeholders, which
+have no button, and Cmd/Ctrl+P is left to the browser there. Phone tier: the
+box is pinned near the top and at most 45vh tall, so it stays above the soft
+keyboard, and its rows are 44px.
+
+### Gates
+
+`core::files` unit tests (excluded dirs absent, symlinks not followed, the cap
+and `truncated`, a dead root is `None`) and an `api.rs` test for the handler;
+`scripts/files-check.sh` section 5b (and the route reachable in both serve
+modes); `quickOpen.test.ts` for ranking and the empty-query order;
+`fileTabs.test.ts` for `openFileBeside`; `keyboardScope.test.ts` for the
+`'open'` chord.
+
 ## Renaming and deleting an entry (task 877)
 
 The tab's third and fourth writes, and its first destructive one: a `✎` and a

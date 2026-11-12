@@ -67,10 +67,11 @@ export function shouldIgnoreShortcut(e: KeyboardEvent, claimedFrom?: string): bo
 /** Which of the Files tab's chords is asking: `'find'` is Cmd/Ctrl+F,
  * `'replace'` is Cmd/Ctrl+Alt+F (and Ctrl+H off macOS) and `'goto'` is Ctrl+G
  * (naru task 2743), `'search'` is Cmd/Ctrl+Shift+F (the project-wide search
- * panel, mesa task 813), `'tabs'` is Alt+W and Alt+[ / Alt+]. They differ on
+ * panel, mesa task 813), `'open'` is Cmd/Ctrl+P (the "Go to file" box, naru
+ * task 2744), `'tabs'` is Alt+W and Alt+[ / Alt+]. They differ on
  * exactly one thing — which text controls they may still be claimed from —
  * see `shouldIgnoreFilesShortcut`. */
-export type FilesChord = 'find' | 'replace' | 'goto' | 'search' | 'tabs'
+export type FilesChord = 'find' | 'replace' | 'goto' | 'search' | 'open' | 'tabs'
 
 /**
  * The text controls each chord is still claimed *from*, beyond the code editor
@@ -84,20 +85,23 @@ export type FilesChord = 'find' | 'replace' | 'goto' | 'search' | 'tabs'
  * boxes, since Cmd/Ctrl+Shift+F is that same reflex for the panel and is also
  * the natural escalation from the in-file bar to the whole project — and
  * unlike the tab chords it has somewhere deliberate to put the caret
- * afterwards, its own input. `tabs` keeps neither, for the reason spelled out
- * below.
+ * afterwards, its own input. `open` keeps all four of the tab's own boxes:
+ * it changes nothing under the caret (the box opens over the page and Escape
+ * hands focus back), so there is no reason to let Print have the key from any
+ * of them. `tabs` keeps neither, for the reason spelled out below.
  */
 const CHORD_FIELDS: Record<FilesChord, readonly string[]> = {
   find: ['files-find-input', 'files-replace-input'],
   replace: ['files-find-input', 'files-replace-input'],
   goto: ['files-goto-input'],
   search: ['files-find-input', 'files-search-input'],
+  open: ['files-find-input', 'files-replace-input', 'files-goto-input', 'files-search-input'],
   tabs: [],
 }
 
 /**
  * True when a Files-tab chord (Cmd/Ctrl+F, Cmd/Ctrl+Alt+F, Ctrl+G,
- * Cmd/Ctrl+Shift+F, Alt+W, Alt+[ / Alt+]) must let the keystroke go — to the browser's own binding, or
+ * Cmd/Ctrl+Shift+F, Cmd/Ctrl+P, Alt+W, Alt+[ / Alt+]) must let the keystroke go — to the browser's own binding, or
  * to whatever else is on screen.
  *
  * One predicate for all of them rather than one per chord: they ask nearly the

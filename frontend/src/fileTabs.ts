@@ -97,6 +97,22 @@ export function openFile(state: TabsState, path: string): TabsState {
   })
 }
 
+/**
+ * Open `path` in the pane *beside* the focused one — the "Go to file" box's
+ * Cmd/Ctrl+Enter (naru task 2744). Split: into the other pane (activating it
+ * there if that strip already holds it), which takes focus. Not split: a new
+ * right pane holding just `path`, when `canSplit` (the content area is wide
+ * enough for two), otherwise the ordinary `openFile`.
+ */
+export function openFileBeside(state: TabsState, path: string, canSplit: boolean): TabsState {
+  if (state.right === null) {
+    if (!canSplit || state.left.active === null) return openFile(state, path)
+    return { ...state, right: { tabs: [path], active: path }, focused: 'right' }
+  }
+  const other: PaneSide = state.focused === 'left' ? 'right' : 'left'
+  return openFile({ ...state, focused: other }, path)
+}
+
 /** Show an already-open tab, and focus its pane. */
 export function activateTab(state: TabsState, side: PaneSide, path: string): TabsState {
   const pane = paneOf(state, side)

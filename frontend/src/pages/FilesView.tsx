@@ -22,6 +22,7 @@ import {
   focusPane,
   moveTab,
   openFile,
+  openFileBeside,
   openPaths,
   paneOf,
   renameSubtree,
@@ -33,6 +34,14 @@ import {
   type TabSource,
   type TabsState,
 } from '../fileTabs'
+import {
+  emptyQueryPaths,
+  loadRecentFiles,
+  rankPaths,
+  recordRecent,
+  saveRecentFiles,
+} from '../quickOpen'
+import type { ProjectFileNames } from '../types/ProjectFileNames'
 import {
   closeLabel,
   dirtyPaths,
@@ -130,6 +139,7 @@ import {
   getProjectFilesContent,
   getProjectGitCommitDiff,
   getProjectGitFileLog,
+  listProjectFileNames,
   projectFileDownloadUrl,
   projectFileRawUrl,
   renameProjectFileEntry,
@@ -3273,6 +3283,160 @@ interface SearchRun {
   data: ProjectFileSearch
 }
 
+/** Cmd+P on macOS, Ctrl+P elsewhere — never the other modifier: on macOS
+ *  Ctrl+P is the editor's own line-up (CodeMirror's emacs-style binding), and
+ *  claiming it too would move the caret *and* open the box. */
+function isQuickOpenChord(e: { metaKey: boolean; ctrlKey: boolean; altKey: boolean }): boolean {
+  if (e.altKey) return false
+  return IS_MAC ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey
+}
+
+/**
+ * The "Go to file" box (naru task 2744) — Cmd/Ctrl+P, or the tree head's ⇢.
+ *
+ * The command palette's look and backdrop (`.command-palette*`), not a new
+ * overlay: the same centred box, and the same backdrop class, which is also
+ * what every other shortcut listener already stands down under. Ranking is
+ * `quickOpen.ts`; this is the list, the selection and the keys.
+ */
+function QuickOpenBox({
+  names,
+  busy,
+  error,
+  openError,
+  open,
+  recent,
+  onPick,
+  onClose,
+}: {
+  /** The project's listing, or null before the first one lands. */
+  names: ProjectFileNames | null
+  busy: boolean
+  error: string | null
+  /** Why the last pick did not open (the file is gone), shown inline. */
+  openError: string | null
+  /** Paths open in either pane. */
+  open: readonly string[]
+  recent: readonly string[]
+  onPick: (path: string, beside: boolean) => void
+  onClose: () => void
+}) {
+  const [query, setQuery] = useState('')
+  const [selected, setSelected] = useState(0)
+  const inputRef = useRef<HTMLInputElement>(null)
+  const listRef = useRef<HTMLUListElement>(null)
+  const results = useMemo(
+    () =>
+      query.trim() === ''
+        ? emptyQueryPaths(names?.paths ?? [], names?.truncated ?? false, open, recent)
+        : rankPaths(query, names?.paths ?? []),
+    [query, names, open, recent],
+  )
+  // Back to the top match on every keystroke — the palette's pattern, adjusted
+  // during render rather than in an effect.
+  const [prevQuery, setPrevQuery] = useState(query)
+  if (query !== prevQuery) {
+    setPrevQuery(query)
+    setSelected(0)
+  }
+  const current = Math.min(selected, Math.max(results.length - 1, 0))
+
+  useEffect(() => {
+    inputRef.current?.focus()
+  }, [])
+
+  useEffect(() => {
+    const el = listRef.current?.children[current]
+    if (el instanceof HTMLElement) el.scrollIntoView({ block: 'nearest' })
+  }, [current])
+
+  function onKeyDown(e: ReactKeyboardEvent) {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      setSelected(Math.min(current + 1, results.length - 1))
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault()
+      setSelected(Math.max(current - 1, 0))
+    } else if (e.key === 'Enter') {
+      e.preventDefault()
+      const path = results[current]
+      if (path !== undefined) onPick(path, e.metaKey || e.ctrlKey)
+    } else if (e.key === 'Escape') {
+      // Stopped, the palette's rule: the find bar binds Escape on `document`,
+      // and a key aimed at this box must not also close that.
+      e.preventDefault()
+      e.stopPropagation()
+      onClose()
+    } else if ((e.key === 'p' || e.key === 'P') && isQuickOpenChord(e)) {
+      // The chord again, from inside the box: "let me retype that". Claimed
+      // here because the tab's listener stands down under this backdrop, and
+      // the browser would otherwise open Print over it.
+      e.preventDefault()
+      inputRef.current?.select()
+    }
+  }
+
+  const status = error ?? (busy && names === null ? 'Listing files…' : null)
+  return (
+    <div className="command-palette-backdrop files-quick-open-backdrop" onClick={onClose}>
+      <div
+        className="command-palette files-quick-open"
+        role="dialog"
+        aria-label="Go to file"
+        onClick={(e) => e.stopPropagation()}
+        // The keys live on the input, so a click on the note, the padding or
+        // the scrollbar must not take focus from it — Escape would then reach
+        // nothing. Rows still get their click.
+        onMouseDown={(e) => {
+          if (e.target !== inputRef.current) e.preventDefault()
+        }}
+      >
+        <input
+          ref={inputRef}
+          className="command-palette-input files-quick-open-input"
+          type="text"
+          value={query}
+          placeholder="Go to file…"
+          aria-label="Go to file"
+          spellCheck={false}
+          autoCapitalize="off"
+          autoCorrect="off"
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={onKeyDown}
+        />
+        {openError !== null && <p className="error files-quick-open-note">{openError}</p>}
+        {names?.truncated && (
+          <p className="muted files-quick-open-note">
+            This project has more files than the box lists — some may not appear.
+          </p>
+        )}
+        <ul className="command-palette-list" ref={listRef}>
+          {results.length === 0 ? (
+            <li className="command-palette-empty muted">
+              {status ?? (query.trim() === '' ? 'No files.' : 'No matching files.')}
+            </li>
+          ) : (
+            results.map((path, i) => (
+              <li
+                key={path}
+                className={`command-palette-item files-quick-open-item${
+                  i === current ? ' active' : ''
+                }`}
+                title={path}
+                onMouseEnter={() => setSelected(i)}
+                onClick={(e) => onPick(path, e.metaKey || e.ctrlKey)}
+              >
+                <span className="files-quick-open-name">{basename(path)}</span>
+                <span className="files-quick-open-dir">{dirname(path)}</span>
+              </li>
+            ))
+          )}
+        </ul>
+      </div>
+    </div>
+  )
+}
+
 /**
  * The project-wide search panel (mesa task 813) — Cmd/Ctrl+Shift+F.
  *
@@ -4169,6 +4333,18 @@ export function FilesView({ projectId }: { projectId: number }) {
     if (path != null) setFocusReq({ path, seq: ++focusSeq.current })
   }
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
+  // The "Go to file" box (naru task 2744): whether it is up, the project's
+  // file listing it ranks, and the two sequence counters that drop late
+  // answers — a listing for an older open, a pick the person has moved past.
+  const [quickOpen, setQuickOpen] = useState(false)
+  const [quickOpenRecent, setQuickOpenRecent] = useState<string[]>([])
+  const [quickOpenError, setQuickOpenError] = useState<string | null>(null)
+  const [names, setNames] = useState<ProjectFileNames | null>(null)
+  const [namesBusy, setNamesBusy] = useState(false)
+  const [namesError, setNamesError] = useState<string | null>(null)
+  const namesSeq = useRef(0)
+  const pickSeq = useRef(0)
+  const quickOpenReturn = useRef<HTMLElement | null>(null)
   // Fetched-directory cache (mesa task 410's lazy per-directory walk):
   // populated on first expand, kept for the component's lifetime so
   // collapsing and re-expanding a directory never re-fetches it.
@@ -4545,6 +4721,114 @@ export function FilesView({ projectId }: { projectId: number }) {
     return () => document.removeEventListener('keydown', onKey)
   })
 
+  // Remember what was looked at, for the "Go to file" box's empty query
+  // (naru task 2744). Written straight to storage rather than held as state:
+  // the box reads it fresh each time it opens, and nothing else renders it.
+  useEffect(() => {
+    if (focusedPath === null) return
+    const recent = loadRecentFiles(projectId)
+    if (recent[0] !== focusedPath) saveRecentFiles(projectId, recordRecent(recent, focusedPath))
+  }, [projectId, focusedPath])
+
+  // Cmd/Ctrl+P — the "Go to file" box (naru task 2744). Claimed only while
+  // this tab is mounted *and* has a tree to list (a placeholder leaves Print
+  // alone, as it hides the button), and from the editor and every one of the
+  // tab's own boxes (`'open'` in `keyboardScope.ts`). No dependency array, for
+  // the reason the tab chords' listener above states.
+  const canQuickOpen = data?.path != null && data.tree !== null
+  // Memoized so the box's ranking is not redone on every render of this tab.
+  const openList = useMemo(() => openPaths(tabs), [tabs])
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!isQuickOpenChord(e) || e.shiftKey) return
+      if (e.key !== 'p' && e.key !== 'P') return
+      if (!canQuickOpen || shouldIgnoreFilesShortcut(e, 'open')) return
+      e.preventDefault()
+      openQuickOpen()
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  })
+
+  /** Open the box and (re)list the project's files. The last listing stays on
+   *  screen while the new one is fetched, so a reopen is instant; `namesSeq`
+   *  drops an answer that lands after a newer request, the search panel's
+   *  rule. */
+  function openQuickOpen() {
+    quickOpenReturn.current =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null
+    setQuickOpenRecent(loadRecentFiles(projectId))
+    setQuickOpenError(null)
+    setQuickOpen(true)
+    const seq = ++namesSeq.current
+    setNamesBusy(true)
+    setNamesError(null)
+    listProjectFileNames(projectId).then(
+      (res) => {
+        if (seq !== namesSeq.current) return
+        setNamesBusy(false)
+        setNames(res)
+      },
+      (e) => {
+        if (seq !== namesSeq.current) return
+        setNamesBusy(false)
+        setNamesError(e instanceof ApiError ? e.message : 'Could not list files.')
+      },
+    )
+  }
+
+  /** Close the box; Escape and the backdrop hand the caret back to wherever it
+   *  was (the editor, the find bar, the tree), a pick sends it to the file. */
+  function closeQuickOpen(restoreFocus: boolean) {
+    pickSeq.current++
+    setQuickOpen(false)
+    const back = quickOpenReturn.current
+    quickOpenReturn.current = null
+    if (restoreFocus && back?.isConnected) back.focus()
+  }
+
+  /** A row picked. The listing can be older than the disk, so the file is read
+   *  first: gone is an inline message in the box, never a tab that cannot
+   *  load. `beside` (Cmd/Ctrl+Enter or -click) opens it in the other pane. */
+  function pickQuickOpen(path: string, beside: boolean) {
+    const seq = ++pickSeq.current
+    setQuickOpenError(null)
+    getProjectFilesContent(projectId, path).then(
+      () => {
+        if (seq !== pickSeq.current) return
+        closeQuickOpen(false)
+        commit((prev) => (beside ? openFileBeside(prev, path, !narrow) : openFile(prev, path)))
+        focusEditor(path)
+        revealInTree(path)
+        // The tree click's reason: on the phone tier the tree stacks over the
+        // file. Inert above 600px.
+        setTreeOpen(false)
+      },
+      (e) => {
+        if (seq !== pickSeq.current) return
+        if (e instanceof ApiError && e.status === 404) {
+          setQuickOpenError(`${path} no longer exists — it was moved or deleted.`)
+          setNames((prev) =>
+            prev === null ? prev : { ...prev, paths: prev.paths.filter((p) => p !== path) },
+          )
+        } else {
+          setQuickOpenError(e instanceof ApiError ? e.message : 'Could not open the file.')
+        }
+      },
+    )
+  }
+
+  /** Expand every folder above `path`, loading any level not fetched yet. */
+  function revealInTree(path: string) {
+    const dirs: string[] = []
+    for (let i = path.indexOf('/'); i >= 0; i = path.indexOf('/', i + 1)) {
+      dirs.push(path.slice(0, i))
+    }
+    if (dirs.length === 0) return
+    setExpanded((prev) => new Set([...prev, ...dirs]))
+    dirs.forEach(ensureChildren)
+  }
+
   // Select the query on a fresh open, the same reflex — and for the same
   // reason — as the find bar's twin of this effect: the input does not exist
   // until React has rendered the panel, and a re-open keeps the last query,
@@ -4599,6 +4883,14 @@ export function FilesView({ projectId }: { projectId: number }) {
     setSearchBusy(false)
     setSearchError(null)
     setLanding(null)
+    // The box and its listing are one project's too.
+    namesSeq.current++
+    pickSeq.current++
+    setQuickOpen(false)
+    setNames(null)
+    setNamesBusy(false)
+    setNamesError(null)
+    setQuickOpenError(null)
   }
 
   // Drop a pending close whose reason has gone — the file was saved from the
@@ -5378,6 +5670,20 @@ export function FilesView({ projectId }: { projectId: number }) {
           </button>
         </div>
       )}
+      {quickOpen &&
+        createPortal(
+          <QuickOpenBox
+            names={names}
+            busy={namesBusy}
+            error={namesError}
+            openError={quickOpenError}
+            open={openList}
+            recent={quickOpenRecent}
+            onPick={pickQuickOpen}
+            onClose={() => closeQuickOpen(true)}
+          />,
+          document.body,
+        )}
       {data.truncated && (
         <p className="muted files-truncated-note">
           This folder is larger than what's shown here — the tree was capped.
@@ -5442,6 +5748,17 @@ export function FilesView({ projectId }: { projectId: number }) {
               onClick={() => (search.open ? closeSearch() : openSearch())}
             >
               ⌕
+            </button>
+            {/* The mouse and touch route to Cmd/Ctrl+P (naru task 2744) — the
+                only one on a phone, and the way to learn the chord exists. */}
+            <button
+              type="button"
+              className="files-tree-search-toggle files-tree-quick-open"
+              aria-label="Go to file"
+              title="Go to file (Cmd/Ctrl+P)"
+              onClick={openQuickOpen}
+            >
+              ⇢
             </button>
             <button
               type="button"

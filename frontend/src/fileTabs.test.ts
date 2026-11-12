@@ -17,6 +17,7 @@ import {
   focusPane,
   moveTab,
   openFile,
+  openFileBeside,
   openPaths,
   renameSubtree,
   setRatio,
@@ -520,5 +521,32 @@ describe('clampMenu', () => {
     expect(clampMenu(300, 10, 180, 150, 375, 667)).toEqual({ x: 191, y: 10 })
     // Wider than the viewport: pinned to the left margin rather than off-screen.
     expect(clampMenu(10, 10, 400, 150, 375, 667).x).toBe(4)
+  })
+})
+
+describe('openFileBeside', () => {
+  it('opens a split with just that file when there is room', () => {
+    const s = openFileBeside(three(), 'd.py', true)
+    expect(s.left.tabs).toEqual(['a.rs', 'b.ts', 'c.md'])
+    expect(s.right).toEqual({ tabs: ['d.py'], active: 'd.py' })
+    expect(s.focused).toBe('right')
+    assertWellFormed(s)
+  })
+
+  it('falls back to an ordinary open when it cannot split, or nothing is open', () => {
+    expect(openFileBeside(three(), 'd.py', false)).toEqual(openFile(three(), 'd.py'))
+    const empty = openFileBeside(emptyTabsState(), 'd.py', true)
+    expect(empty.right).toBeNull()
+    expect(empty.left.tabs).toEqual(['d.py'])
+  })
+
+  it('opens into the unfocused pane of a split, and focuses it', () => {
+    // split(): right pane focused, holding c.md.
+    const s = openFileBeside(split(), 'd.py', true)
+    expect(s.focused).toBe('left')
+    expect(s.left.tabs).toEqual(['a.rs', 'b.ts', 'c.md', 'd.py'])
+    expect(s.left.active).toBe('d.py')
+    expect(s.right!.tabs).toEqual(['c.md'])
+    assertWellFormed(s)
   })
 })

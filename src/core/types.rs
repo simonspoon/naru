@@ -4319,6 +4319,22 @@ pub struct ProjectFileSearch {
     pub truncated: bool,
 }
 
+/// `GET /api/projects/{id}/files/names` response (naru task 2744, see
+/// `core::files::list_file_names`): every file the Files tab's tree could
+/// list, by root-relative path, for the Cmd/Ctrl+P "Go to file" box to rank.
+/// No `local_path` / dead folder is 404 `not_found`, the search route's
+/// precedent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct ProjectFileNames {
+    /// Root-relative paths in walk order — the same `/`-separated form
+    /// [`FileTreeEntry`] uses, so one opens through the content route as is.
+    pub paths: Vec<String>,
+    /// True iff the walk stopped at the cap with files still unlisted. The box
+    /// says so rather than implying a missing file does not exist.
+    pub truncated: bool,
+}
+
 /// One subdirectory entry in a [`DirListing`] (see `core::files::list_dir`).
 /// Directories only — this endpoint never lists files (see arch.md #4).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]

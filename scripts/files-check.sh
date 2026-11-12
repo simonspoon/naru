@@ -21,6 +21,9 @@
 #      binary are skipped server-side, not filtered by the client), the two
 #      option toggles, a miss as a 200, and the `?q=` contract (missing, empty
 #      or over-long is 422 `validation`);
+#   5b. `GET /api/projects/{id}/files/names` (naru task 2744) — every file
+#      name over the same tree (node_modules absent, binaries listed by name),
+#      `truncated: false`, and 404 for an unknown project;
 #   6. `PATCH`/`DELETE /api/projects/{id}/files/entry` (task 877) — renaming
 #      and deleting one entry of the tree: the echoed `FileTreeEntry` for a
 #      file and a folder (whose contents stay readable under the new name), the
@@ -34,7 +37,7 @@
 #      `overwrite` is sent, the 422s (unusable name, a folder's name, bad
 #      base64, over the cap, over the body limit — all JSON), and the 404s for
 #      a traversal, absolute, missing or non-directory `dir`;
-#   7. both serve modes — raw and search are reads, reachable in default AND
+#   7. both serve modes — raw, search and names are reads, reachable in default AND
 #      `--lan`, while the content PATCH, both entry writes and the upload keep their
 #      `require_agent_access` + Content-Type gates in both.
 #
@@ -382,6 +385,22 @@ api 422 GET "/api/projects/$PROJ/files/search?q=$LONG"
 ok "GET .../files/search with a missing, empty or over-long ?q=: 422 validation"
 
 # =====================================================================
+# 5b. file names for "Go to file" (naru task 2744) — the same walk
+# =====================================================================
+
+api 200 GET "/api/projects/$PROJ/files/names"
+[ "$(jqb .truncated)" = "false" ] || fail "names: nothing here hits the cap"
+[ "$(jqb '.paths | index("src/main.rs") != null')" = "true" ] ||
+  fail "names: src/main.rs must be listed ($BODY)"
+[ "$(jqb '.paths | index("blob.dat") != null')" = "true" ] ||
+  fail "names: a binary file is listed by name like any other"
+grep -q 'node_modules' <<<"$BODY" && fail "names: an EXCLUDED_DIRS file must never appear"
+ok "GET .../files/names: the tree's files by path, node_modules absent"
+
+api 404 GET "/api/projects/999999/files/names"
+ok "GET .../files/names for an unknown project: 404"
+
+# =====================================================================
 # 6. rename + delete one tree entry (task 877)
 # =====================================================================
 
@@ -593,6 +612,10 @@ check_modes() { # check_modes <label>
   api 200 GET "/api/projects/$PROJ/files/search?q=needle"
   [ "$(jqb '.files | length')" = "1" ] || fail "$label: search must be reachable"
   ok "$label: GET .../files/search is reachable (a read on the standard guard)"
+
+  api 200 GET "/api/projects/$PROJ/files/names"
+  [ "$(jqb '.paths | length > 0')" = "true" ] || fail "$label: names must be reachable"
+  ok "$label: GET .../files/names is reachable (a read on the standard guard)"
 
   curl -sN --max-time 3 "$BASE/api/projects/$PROJ/files/watch" >"$TMP/watch-mode.out" 2>/dev/null || true
   head -1 "$TMP/watch-mode.out" | jq -e '.type == "ready"' >/dev/null ||
