@@ -48,6 +48,9 @@ create, on its own stricter gate (`docs/fs-browse.md`).
   mirrors the Git tab's `DIFF_CAP`) bytes with the same char-boundary
   truncation as `git.rs::capped`, `truncated: true`. Every view carries
   `edit_limit` (`FILE_EDIT_CAP` in bytes). See "Large files" below.
+  `not_utf8` (naru task 2804) is true iff a whole-sent file's bytes are not
+  valid UTF-8 (e.g. Latin-1): `content` is a lossy decode, so the pane shows
+  it read-only under a "Not UTF-8" notice and `write_file` refuses it.
   `language` is an extension→tag lookup (e.g. `rs`→`rust`) set in both
   branches — it describes the file, not the content. `.xml` and .NET's
   `.csproj`/`.xaml` — XML documents wearing a bespoke extension — all tag as
@@ -76,7 +79,9 @@ create, on its own stricter gate (`docs/fs-browse.md`).
   target, a target whose `read_file` view was itself `truncated` (its true
   on-disk size exceeds `FILE_EDIT_CAP`, so the capped view the pane
   showed wasn't the whole file — saving it back would silently truncate it),
-  or new `content` that itself exceeds `FILE_EDIT_CAP`. Everything
+  a target whose view is `not_utf8` (saving the lossy decode back would
+  replace the real bytes with U+FFFD — the check is the server's, not only
+  the pane's), or new `content` that itself exceeds `FILE_EDIT_CAP`. Everything
   `read_file` itself collapses to `None` (traversal, absolute path,
   unlisted/nonexistent path, a directory) — plus an `fs::write` I/O failure —
   collapses the same way here, to `WriteFileError::NotFound`.
@@ -263,7 +268,7 @@ create, on its own stricter gate (`docs/fs-browse.md`).
   *inside* the pane (the API's own `error.message`, in the existing
   `saveError` slot) instead of navigating the SPA away to a JSON error page;
   the button is disabled while a download is in flight, mirroring Save. A
-  non-binary, non-truncated text file **opens in** a
+  non-binary, non-truncated, UTF-8 text file **opens in** a
   full-height code editor (`.files-editor-stack`, one CodeMirror 6 `EditorView`
   whose contenteditable `.cm-content` carries `.files-content-editor`) holding
   the current content — no Edit button and no mode to enter or leave (naru task

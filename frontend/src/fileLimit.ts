@@ -27,3 +27,8 @@ export function limitLabel(bytes: number): string {
 export function tooLargeNotice(editLimit: number): string {
   return `Too large to edit here (${limitLabel(editLimit)} limit). This is the start of the file, read-only; Download saves all of it.`
 }
+
+/** Why a `not_utf8` file is read-only (naru task 2804): what is shown is a
+ * lossy decode, and saving it would overwrite the real bytes. */
+export const NOT_UTF8_NOTICE =
+  'Not UTF-8, so it cannot be edited here. Characters that did not decode show as \uFFFD; Download saves the original bytes.'

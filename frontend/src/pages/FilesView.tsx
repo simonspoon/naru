@@ -100,7 +100,7 @@ import { SideBySideDiff } from '../components/SideBySideDiff'
 import { splitFrontmatter } from '../frontmatter'
 import { delimiterFor, parseDelimited, type DelimitedTable } from '../fileCsv'
 import { isHtmlDocumentPath } from '../fileHtml'
-import { previewsAt, tooLargeNotice } from '../fileLimit'
+import { NOT_UTF8_NOTICE, previewsAt, tooLargeNotice } from '../fileLimit'
 import { isImagePath } from '../fileImage'
 import { setDragOutData } from '../fileDragOut'
 import {
@@ -590,7 +590,8 @@ interface SearchLanding {
  * file (one past the server's edit cap, `edit_limit`; naru task 2803) says so
  * under its header. Its displayed bytes aren't its full content, so saving
  * them back would corrupt it (the same reason the API itself refuses that
- * write); it and a binary stay read-only. The rendered types (markdown, HTML, a delimited
+ * write); it, a binary and a non-UTF-8 file (`not_utf8`, naru task 2804) stay
+ * read-only. The rendered types (markdown, HTML, a delimited
  * table, an SVG) open as their preview, with the editor one toggle away. */
 function ContentPane({
   projectId,
@@ -754,7 +755,8 @@ function ContentPane({
   // What may be typed in: text the server sent whole. Unsaved work keeps the
   // editor even if the file on disk has since become something that would not
   // have opened in one — the draft is the person's, and hiding it is losing it.
-  const editable = data != null && ((!data.is_binary && !data.truncated) || dirtyNow)
+  const editable =
+    data != null && ((!data.is_binary && !data.truncated && !data.not_utf8) || dirtyNow)
   // The delimiter this file's language tag calls for, or null when it is not
   // one of the tabular kinds — server-derived, never sniffed (`fileCsv.ts`).
   const csvDelimiter = delimiterFor(data?.language ?? null)
@@ -1596,6 +1598,11 @@ function ContentPane({
         {data.truncated && (
           <p className="files-too-large" role="note">
             {tooLargeNotice(data.edit_limit)}
+          </p>
+        )}
+        {data.not_utf8 && (
+          <p className="files-too-large" role="note">
+            {NOT_UTF8_NOTICE}
           </p>
         )}
         {/* Under the header rather than over the file, for the reason the

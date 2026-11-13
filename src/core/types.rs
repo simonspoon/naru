@@ -4581,6 +4581,11 @@ pub struct FileContentView {
     /// `core::files::FILE_EDIT_CAP` in bytes — the largest file sent whole
     /// and accepted back, so the client can name the limit it hit.
     pub edit_limit: u32,
+    /// True iff the file was read whole and its bytes are not valid UTF-8
+    /// (naru task 2804): `content` is then a lossy decode, read-only, and a
+    /// write over the file is refused so the lossy text never reaches disk.
+    /// Always false for a binary or truncated file, which are read-only anyway.
+    pub not_utf8: bool,
 }
 
 /// One hit in a project-wide file search (mesa task 813, see

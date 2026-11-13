@@ -601,8 +601,9 @@ pub fn create_dir(parent: &str, name: &str) -> Result<DirEntry, CreateDirError> 
 ///     `Some(FileContentView{is_binary: true, content: "", truncated: false,
 ///     language})`.
 ///   - else, a file of at most [`FILE_EDIT_CAP`] bytes: all of it (lossy
-///     UTF-8), `truncated: false` — the only shape [`write_file`] accepts
-///     back.
+///     UTF-8), `truncated: false`, `not_utf8` true iff those bytes are not
+///     valid UTF-8 — the only shape [`write_file`] accepts back is this one
+///     with `not_utf8: false`.
 ///   - else: its first [`FILE_CONTENT_CAP`] bytes (lossy UTF-8, same
 ///     `capped` char-boundary truncation as `git.rs`), `truncated: true`.
 ///     Not the first `FILE_EDIT_CAP`: nothing can be done with a cut file
@@ -640,16 +641,22 @@ pub fn read_file(root: &str, rel: &str) -> Option<FileContentView> {
             truncated: false,
             language: language.map(str::to_string),
             edit_limit: FILE_EDIT_CAP as u32,
+            not_utf8: false,
         });
     }
 
-    let (content, truncated) = if bytes.len() > FILE_EDIT_CAP {
+    let (content, truncated, not_utf8) = if bytes.len() > FILE_EDIT_CAP {
         // A few bytes past the view cap, so `capped` sees that there is more
         // and cuts on a char boundary rather than mid-sequence.
         let (content, _) = capped(&bytes[..FILE_CONTENT_CAP + 4]);
-        (content, true)
+        (content, true, false)
     } else {
-        (String::from_utf8_lossy(&bytes).into_owned(), false)
+        let not_utf8 = std::str::from_utf8(&bytes).is_err();
+        (
+            String::from_utf8_lossy(&bytes).into_owned(),
+            false,
+            not_utf8,
+        )
     };
     Some(FileContentView {
         path: rel.to_string(),
@@ -658,6 +665,7 @@ pub fn read_file(root: &str, rel: &str) -> Option<FileContentView> {
         truncated,
         language: language.map(str::to_string),
         edit_limit: FILE_EDIT_CAP as u32,
+        not_utf8,
     })
 }
 
@@ -726,7 +734,8 @@ pub fn read_file_download(root: &str, rel: &str) -> Result<(String, Vec<u8>), Do
 ///     safely edited from the capped, possibly-lossy view the editor showed
 ///     — binary content, a truncated read (the true file is bigger than
 ///     [`FILE_EDIT_CAP`], so what was displayed wasn't the whole file),
-///     or new content that itself exceeds the cap.
+///     a file that is not valid UTF-8 (the view was a lossy decode), or new
+///     content that itself exceeds the cap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WriteFileError {
     NotFound,
@@ -746,6 +755,13 @@ pub fn write_file(root: &str, rel: &str, content: &str) -> Result<(), WriteFileE
     if view.truncated {
         return Err(WriteFileError::Validation(
             "file is larger than mesa can safely edit",
+        ));
+    }
+    // The editor was shown a lossy decode; writing anything back would
+    // replace the file's real bytes with that guess (naru task 2804).
+    if view.not_utf8 {
+        return Err(WriteFileError::Validation(
+            "file is not UTF-8 and cannot be edited here",
         ));
     }
     if content.len() > FILE_EDIT_CAP {
@@ -2761,6 +2777,45 @@ mod tests {
             fs::read_to_string(dir.path().join("small.txt")).unwrap(),
             "hi"
         );
+    }
+
+    #[test]
+    fn write_file_refuses_a_non_utf8_file_leaving_its_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_str().unwrap();
+        // "café\n" in Latin-1: 0xE9 is not valid UTF-8, and there is no NUL.
+        let latin1: &[u8] = b"caf\xe9\n";
+        fs::write(dir.path().join("latin1.txt"), latin1).unwrap();
+
+        let v = read_file(root, "latin1.txt").unwrap();
+        assert!(!v.is_binary);
+        assert!(!v.truncated);
+        assert!(v.not_utf8);
+
+        // Saving the lossy view back, or anything else, is refused.
+        for content in [v.content.as_str(), "café\n"] {
+            assert_eq!(
+                write_file(root, "latin1.txt", content),
+                Err(WriteFileError::Validation(
+                    "file is not UTF-8 and cannot be edited here"
+                ))
+            );
+        }
+        assert!(fs::read(dir.path().join("latin1.txt")).unwrap() == latin1);
+    }
+
+    #[test]
+    fn write_file_round_trips_multibyte_utf8_byte_exact() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let text = "café — naïve 日本語 🦀\n";
+        fs::write(dir.path().join("u.txt"), text).unwrap();
+
+        let v = read_file(root, "u.txt").unwrap();
+        assert!(!v.not_utf8);
+        assert_eq!(v.content, text);
+        assert_eq!(write_file(root, "u.txt", &v.content), Ok(()));
+        assert!(fs::read(dir.path().join("u.txt")).unwrap() == text.as_bytes());
     }
 
     // --- create_file --------------------------------------------------------

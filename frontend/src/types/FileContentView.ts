@@ -22,4 +22,11 @@ language: string | null,
  * `core::files::FILE_EDIT_CAP` in bytes — the largest file sent whole
  * and accepted back, so the client can name the limit it hit.
  */
-edit_limit: number, };
+edit_limit: number, 
+/**
+ * True iff the file was read whole and its bytes are not valid UTF-8
+ * (naru task 2804): `content` is then a lossy decode, read-only, and a
+ * write over the file is refused so the lossy text never reaches disk.
+ * Always false for a binary or truncated file, which are read-only anyway.
+ */
+not_utf8: boolean, };
