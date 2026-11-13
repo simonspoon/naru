@@ -118,3 +118,40 @@ export function segments(text: string, indices: number[]): Segment[] {
   }
   return out
 }
+
+export interface PanelTarget {
+  /** The tab's route segment, or `create-task` for the command. */
+  key: string
+  label: string
+  hash: string
+  /** True for the Create task command, which is not a panel. */
+  command: boolean
+}
+
+/**
+ * What a project drills into in the palette (naru task 2806): its panels in
+ * tab-strip order with Board, the default, first, then the Create task
+ * command. `tabs` is the project's real tab list (`PANE_TABS`), passed in so
+ * this stays a pure function of what the tab strip shows.
+ */
+export function projectPanelTargets(
+  projectId: number,
+  tabs: readonly string[],
+  label: (tab: string) => string,
+): PanelTarget[] {
+  const ordered = [...tabs.filter((t) => t === 'board'), ...tabs.filter((t) => t !== 'board')]
+  return [
+    ...ordered.map((tab) => ({
+      key: tab,
+      label: label(tab),
+      hash: tab === 'board' ? `#/projects/${projectId}` : `#/projects/${projectId}/${tab}`,
+      command: false,
+    })),
+    {
+      key: 'create-task',
+      label: 'Create task',
+      hash: `#/projects/${projectId}/create-task`,
+      command: true,
+    },
+  ]
+}

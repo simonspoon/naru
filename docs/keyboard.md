@@ -119,14 +119,24 @@ was nowhere to *state* what Naru binds and nothing to rebind.
   would be worse than none.
 - The palette (naru task 2805) fuzzy-matches (`paletteSearch.ts`: subsequence,
   prefix / word-start / contiguous beat scattered, matched characters in
-  `<mark>`) over pages, every project (archived ones last, tagged `ARCHIVED`),
+  `<mark>`) over panels, every project (archived ones last, tagged `ARCHIVED`),
   and commands (Show/Hide sidebar on desktop tiers, New project, Live
-  conversation, per-project sub-views and Create task, which rank below the
-  project row and appear only once something is typed). An empty query lists
-  pages, recent projects, then commands. Focus returns to the opener on close.
+  conversation, flat per-project "<name> — <panel>" rows and Create task, which
+  rank below the project row and appear only once something is typed, so
+  "naru git" finds naru's Git). An empty query lists Panels, Recent projects,
+  then Commands, each under its heading. Focus returns to the opener on close.
   The header's "Go to" hint and the project switcher's "Search all…" row show
   the palette's shortest chord (`shortestChord`). The switcher's dropdown
   claims its own arrows/Home/End/Escape before the window listeners.
+- **Tab drills into a project** (naru task 2806). Tab on a project row turns
+  the project into a chip before the input, clears the query and lists that
+  project's panels — its tab strip (`PANE_TABS`, Board first) — then Create
+  task, filtered by what is typed next (`projectPanelTargets` in
+  `paletteSearch.ts`). Enter opens the panel in that project; Backspace on an
+  empty input pops the chip back to the full list; Enter on a project row
+  without Tab still opens the project; Escape closes. Tab never leaves the
+  modal. A footer shows the Tab / Enter / Backspace / Escape hints (hidden on
+  the phone tier).
 
 Unit tests: `frontend/src/keymap.test.ts` (defaults, matching, recording,
 conflicts, the resolve fallback) and `frontend/src/keymapDraft.test.ts` (the

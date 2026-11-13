@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { fuzzyMatch, rankItems, segments } from './paletteSearch'
+import { fuzzyMatch, projectPanelTargets, rankItems, segments } from './paletteSearch'
 
 describe('fuzzyMatch', () => {
   it('matches a subsequence case-insensitively and returns its indices', () => {
@@ -58,5 +58,30 @@ describe('segments', () => {
     ])
     expect(segments('abc', [])).toEqual([{ text: 'abc', hit: false }])
     expect(segments('', [])).toEqual([])
+  })
+})
+
+describe('projectPanelTargets', () => {
+  const tabs = ['dashboard', 'board', 'git', 'settings']
+  const label = (t: string) => t[0].toUpperCase() + t.slice(1)
+  const targets = projectPanelTargets(7, tabs, label)
+  it('lists Board first, then the tabs in order, then Create task', () => {
+    expect(targets.map((t) => t.label)).toEqual([
+      'Board',
+      'Dashboard',
+      'Git',
+      'Settings',
+      'Create task',
+    ])
+    expect(targets.map((t) => t.command)).toEqual([false, false, false, false, true])
+  })
+  it('routes Board to the bare project and the rest to their segment', () => {
+    expect(targets.map((t) => t.hash)).toEqual([
+      '#/projects/7',
+      '#/projects/7/dashboard',
+      '#/projects/7/git',
+      '#/projects/7/settings',
+      '#/projects/7/create-task',
+    ])
   })
 })

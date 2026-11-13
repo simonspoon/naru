@@ -7490,10 +7490,71 @@ body.live-panel-ratio-resizing {
 }
 
 .command-palette-input {
+  flex: 1;
+  min-width: 0;
   border: none;
-  border-bottom: 1px solid var(--hairline);
   font-size: 1.15rem;
   padding: 0.75rem 1rem;
+}
+
+/* The input's line: a drilled-in project's chip, then the field (naru task
+   2806). The rule under it is the row's, so it spans the chip too. */
+.command-palette-input-row {
+  display: flex;
+  align-items: center;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.command-palette-chip {
+  flex: none;
+  max-width: 50%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-left: 1rem;
+  padding: 0.15rem 0.6rem;
+  border: 1px solid var(--cyan);
+  border-radius: var(--r-sm);
+  background: rgba(var(--cyan-rgb), 0.15);
+  font-weight: 700;
+}
+
+.command-palette-crumb {
+  flex: none;
+  margin-left: 0.5rem;
+  margin-right: -0.5rem;
+  color: var(--muted);
+}
+
+/* A grouped list's section label: Panels, Recent projects, Commands. */
+.command-palette-head {
+  padding: 0.5rem 0.6rem 0.2rem;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+/* The key hints. */
+.command-palette-foot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  padding: 0.5rem 1rem;
+  border-top: 1px solid var(--hairline);
+  font-size: 0.8rem;
+}
+
+.command-palette-foot kbd {
+  margin-right: 0.35rem;
+  padding: 0.05rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
 }
 
 .command-palette-input:focus {
@@ -11212,6 +11273,11 @@ body.live-panel-ratio-resizing .live-panel-divider {
 
   .command-palette-backdrop {
     padding-top: 4vh;
+  }
+
+  /* No keyboard to hint at on a phone. */
+  .command-palette-foot {
+    display: none;
   }
 
   .command-palette-item {
