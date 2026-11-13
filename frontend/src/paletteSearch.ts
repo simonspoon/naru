@@ -155,3 +155,35 @@ export function projectPanelTargets(
     },
   ]
 }
+
+/**
+ * A drilled-in project's direct sub-projects (naru task 2807), from the flat
+ * server-ordered list via the real `parent_id` relation: live ones in server
+ * order, then archived ones (`hidden`), so a forgotten branch stays reachable
+ * but never crowds the live ones.
+ */
+export function subProjects<T extends { id: number; parent_id: number | null }>(
+  projects: T[],
+  parentId: number,
+  hidden: ReadonlySet<number>,
+): T[] {
+  const kids = projects.filter((p) => p.parent_id === parentId && p.id !== parentId)
+  return [...kids.filter((p) => !hidden.has(p.id)), ...kids.filter((p) => hidden.has(p.id))]
+}
+
+/** How many direct sub-projects each project has (absent = none). */
+export function childCounts(projects: { parent_id: number | null }[]): Map<number, number> {
+  const out = new Map<number, number>()
+  for (const p of projects) if (p.parent_id !== null) out.set(p.parent_id, (out.get(p.parent_id) ?? 0) + 1)
+  return out
+}
+
+/**
+ * The breadcrumb chips to draw for a drill path: all of it when it fits in
+ * `max`, else the first one, a collapsed marker (`null`), and the last
+ * `max - 2`, so the innermost project — what the list shows — is always whole.
+ */
+export function breadcrumb<T>(path: T[], max: number): (T | null)[] {
+  if (path.length <= max) return path
+  return [path[0], null, ...path.slice(path.length - (max - 2))]
+}

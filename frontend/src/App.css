@@ -7491,23 +7491,52 @@ body.live-panel-ratio-resizing {
 
 .command-palette-input {
   flex: 1;
-  min-width: 0;
+  min-width: 8rem;
   border: none;
   font-size: 1.15rem;
   padding: 0.75rem 1rem;
 }
 
-/* The input's line: a drilled-in project's chip, then the field (naru task
-   2806). The rule under it is the row's, so it spans the chip too. */
+/* The input's line: a drilled-in project's breadcrumb of chips, then the
+   field (naru tasks 2806, 2807). The rule under it is the row's, so it spans
+   the chips too; on a narrow phone a deep path clips rather than spills. */
 .command-palette-input-row {
   display: flex;
   align-items: center;
+  overflow: hidden;
   border-bottom: 1px solid var(--hairline);
 }
 
-.command-palette-chip {
+/* One breadcrumb step: a chip and its "›" (naru task 2807). Earlier steps
+   shrink to an ellipsis first; the innermost keeps more room, and the input
+   always keeps enough to type in. */
+.command-palette-step {
+  display: flex;
+  align-items: center;
+  flex: 0 1 auto;
+  min-width: 5.5rem;
+}
+
+.command-palette-step:last-of-type {
+  flex-shrink: 0;
+  max-width: 45%;
+}
+
+/* The collapsed middle of a long path; its title holds the whole path. */
+.command-palette-step.more {
   flex: none;
-  max-width: 50%;
+  min-width: 0;
+}
+
+.command-palette-more {
+  margin-left: 0.5rem;
+  color: var(--muted);
+}
+
+.command-palette-chip {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -7524,6 +7553,13 @@ body.live-panel-ratio-resizing {
   margin-left: 0.5rem;
   margin-right: -0.5rem;
   color: var(--muted);
+}
+
+/* A sub-project row's "has sub-projects" hint (naru task 2807). */
+.command-palette-kids {
+  flex: none;
+  color: var(--muted);
+  font-size: 0.75rem;
 }
 
 /* A grouped list's section label: Panels, Recent projects, Commands. */
@@ -11282,6 +11318,14 @@ body.live-panel-ratio-resizing .live-panel-divider {
 
   .command-palette-item {
     min-height: 2.75rem;
+  }
+
+  /* A deep breadcrumb shrinks every chip, the innermost too, so the input
+     keeps its room on a narrow screen (naru task 2807). */
+  .command-palette-step,
+  .command-palette-step:last-of-type {
+    min-width: 0;
+    flex-shrink: 1;
   }
 
   /* `flex: none` (the desktop rule) makes this box as wide as its content, so

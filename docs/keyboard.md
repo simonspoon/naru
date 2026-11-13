@@ -137,6 +137,15 @@ was nowhere to *state* what Naru binds and nothing to rebind.
   without Tab still opens the project; Escape closes. Tab never leaves the
   modal. A footer shows the Tab / Enter / Backspace / Escape hints (hidden on
   the phone tier).
+- **Tab drills through sub-projects** (naru task 2807). With a chip present
+  the list leads with a "Sub-projects" group — the chip project's direct
+  children by `parent_id` (`subProjects` in `paletteSearch.ts`; archived ones
+  last), drawn like project rows with their status chips and an "N sub ›" hint
+  when they have children — then Panels as above; no children, no group.
+  Typing filters both groups within that project only. Tab on a sub-project
+  row adds its chip (a breadcrumb, any depth; past four chips the middle
+  collapses to "…", `breadcrumb`), Enter opens it, and Backspace on an empty
+  input pops one chip per press.
 
 Unit tests: `frontend/src/keymap.test.ts` (defaults, matching, recording,
 conflicts, the resolve fallback) and `frontend/src/keymapDraft.test.ts` (the

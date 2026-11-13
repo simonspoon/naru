@@ -2,7 +2,15 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { ccHref, projectHref } from '../lastView'
 import { chordLabel, type KeymapAction } from '../keymap'
 import { useKeymap } from '../keymapStore'
-import { projectPanelTargets, rankItems, segments, type Rankable } from '../paletteSearch'
+import {
+  breadcrumb,
+  childCounts,
+  projectPanelTargets,
+  rankItems,
+  segments,
+  subProjects,
+  type Rankable,
+} from '../paletteSearch'
 import { paneLabel, PANE_TABS, type PaneTab } from '../projectPanes'
 import { NO_STATUS, type ProjectStatus } from '../projectStatus'
 import { effectivelyArchivedIds } from '../projectTree'
@@ -26,10 +34,13 @@ interface Entry extends Rankable {
   status?: ProjectStatus
   // Project rows: what Tab drills into (naru task 2806).
   project?: { id: number; name: string }
+  // Sub-project rows: how many sub-projects of its own it has (naru task
+  // 2807), drawn as a hint that Tab goes deeper.
+  children?: number
 }
 
 // A grouped list's section (the empty query, and a drilled-in project).
-type Group = 'Panels' | 'Recent projects' | 'Commands'
+type Group = 'Sub-projects' | 'Panels' | 'Recent projects' | 'Commands'
 
 interface Row {
   item: Entry
@@ -43,6 +54,8 @@ const panelLabel = (tab: string) => paneLabel(tab as PaneTab)
 const SUBVIEW_PENALTY = 400
 // Archived projects stay reachable but sort after every live hit.
 const ARCHIVED_PENALTY = 1_000_000
+// Breadcrumb chips drawn before the deeper ones collapse to "…".
+const MAX_CRUMBS = 4
 // A query over hundreds of sub-view rows would paint them all; the best few
 // dozen are what anyone reads.
 const MAX_ROWS = 60
@@ -163,6 +176,30 @@ function drillEntries(
 }
 
 /**
+ * A drilled-in project's direct sub-projects as rows (naru task 2807), drawn
+ * like project rows elsewhere: status chips, and a hint when they have
+ * sub-projects of their own. Enter opens one; Tab drills into it.
+ */
+function subProjectEntries(
+  projects: Project[],
+  parentId: number,
+  statuses: Map<number, ProjectStatus>,
+): Entry[] {
+  const hiddenIds = effectivelyArchivedIds(projects)
+  const counts = childCounts(projects)
+  return subProjects(projects, parentId, hiddenIds).map((p) => ({
+    id: `sub-${p.id}`,
+    label: p.name,
+    tag: hiddenIds.has(p.id) ? 'ARCHIVED' : 'PROJECT',
+    penalty: hiddenIds.has(p.id) ? ARCHIVED_PENALTY : 0,
+    status: statuses.get(p.id) ?? NO_STATUS,
+    project: { id: p.id, name: p.name },
+    children: counts.get(p.id) ?? 0,
+    run: () => navigate(projectHref(p.id)),
+  }))
+}
+
+/**
  * Obsidian/VS-Code-style command palette: a centered modal opened by the
  * `command-palette` chords (App.tsx) that fuzzy-matches panels, projects and
  * commands, highlighting what matched. Escape and a backdrop click close it;
@@ -171,8 +208,10 @@ function drillEntries(
  *
  * Tab on a project row drills into it (naru task 2806): the project becomes a
  * chip before the input, the query clears and the list is that project's
- * panels and Create task, filtered by what is typed next. Backspace on an
- * empty input pops the chip back to the full list.
+ * sub-projects, then its panels and Create task, filtered by what is typed
+ * next. Tab on a sub-project row drills further (naru task 2807), the chips
+ * becoming a breadcrumb; Backspace on an empty input pops one chip at a time
+ * back to the full list.
  */
 export function CommandPalette({
   onClose,
@@ -192,7 +231,9 @@ export function CommandPalette({
 }) {
   const keymap = useKeymap()
   const [query, setQuery] = useState('')
-  const [drill, setDrill] = useState<{ id: number; name: string } | null>(null)
+  // The drill path, outermost first; the list shows the last one's contents.
+  const [path, setPath] = useState<{ id: number; name: string }[]>([])
+  const drill = path.length > 0 ? path[path.length - 1] : null
   const [selected, setSelected] = useState(0)
   const inputRef = useRef<HTMLInputElement>(null)
   // Captured once, at open, so close can hand focus back to it.
@@ -205,12 +246,14 @@ export function CommandPalette({
   const rows = useMemo((): Row[] => {
     if (drill) {
       const all = drillEntries(drill, statuses)
-      const ranked = query.trim() === '' ? all.map((item) => ({ item, indices: [] })) : rankItems(all, query)
-      // Panels before Create task whatever the ranking, so each heading
-      // appears once.
+      const ranked = rankItems(all, query)
+      // Sub-projects, then panels, then Create task whatever the ranking, so
+      // each heading appears once.
+      const subs = rankItems(subProjectEntries(projects, drill.id, statuses), query)
       const panels = ranked.filter((r) => r.item.tag !== 'COMMAND')
       const commands = ranked.filter((r) => r.item.tag === 'COMMAND')
       return [
+        ...subs.map((r): Row => ({ ...r, group: 'Sub-projects' })),
         ...panels.map((r): Row => ({ ...r, group: 'Panels' })),
         ...commands.map((r): Row => ({ ...r, group: 'Commands' })),
       ]
@@ -242,7 +285,7 @@ export function CommandPalette({
   // Adjust state during render off the changed query rather than in an
   // effect (avoids a cascading render), matching ProjectTasksPage's
   // `prevTaskId` pattern.
-  const listKey = `${drill?.id ?? ''}\u0000${query}`
+  const listKey = `${path.map((p) => p.id).join('/')}\u0000${query}`
   const [prevListKey, setPrevListKey] = useState(listKey)
   if (listKey !== prevListKey) {
     setPrevListKey(listKey)
@@ -283,16 +326,17 @@ export function CommandPalette({
       e.preventDefault()
       setSelected((s) => Math.max(s - 1, 0))
     } else if (e.key === 'Tab') {
-      // Tab never leaves the modal; on a project row it drills in.
+      // Tab never leaves the modal; on a project or sub-project row it drills
+      // in, one level deeper.
       e.preventDefault()
       const project = rows[selected]?.item.project
-      if (!drill && project && !e.shiftKey) {
-        setDrill(project)
+      if (project && !e.shiftKey) {
+        setPath((p) => [...p, project])
         setQuery('')
       }
     } else if (e.key === 'Backspace' && drill && query === '') {
       e.preventDefault()
-      setDrill(null)
+      setPath((p) => p.slice(0, -1))
     } else if (e.key === 'Enter') {
       e.preventDefault()
       run(selected)
@@ -310,14 +354,22 @@ export function CommandPalette({
     <div className="command-palette-backdrop" onClick={onClose}>
       <div className="command-palette" onClick={(e) => e.stopPropagation()}>
         <div className="command-palette-input-row">
-          {drill && (
-            <>
-              <span className="command-palette-chip">{drill.name}</span>
+          {breadcrumb(path, MAX_CRUMBS).map((p) => (
+            <span key={p ? p.id : 'more'} className={`command-palette-step${p ? '' : ' more'}`}>
+              {p ? (
+                <span className="command-palette-chip" title={p.name}>
+                  {p.name}
+                </span>
+              ) : (
+                <span className="command-palette-more" title={path.map((q) => q.name).join(' › ')}>
+                  …
+                </span>
+              )}
               <span className="command-palette-crumb" aria-hidden="true">
                 ›
               </span>
-            </>
-          )}
+            </span>
+          ))}
           <input
             ref={inputRef}
             className="command-palette-input"
@@ -327,8 +379,14 @@ export function CommandPalette({
             aria-controls="command-palette-list"
             aria-activedescendant={rows[selected] ? `command-palette-${rows[selected].item.id}` : undefined}
             value={query}
-            aria-label={drill ? `Panels of ${drill.name}` : undefined}
-            placeholder={drill ? 'panel…' : 'Jump to a project, panel, or command…'}
+            aria-label={drill ? `Sub-projects and panels of ${drill.name}` : undefined}
+            placeholder={
+              drill
+                ? rows.some((r) => r.group === 'Sub-projects')
+                  ? 'sub-project or panel…'
+                  : 'panel…'
+                : 'Jump to a project, panel, or command…'
+            }
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={onKeyDown}
           />
@@ -360,6 +418,11 @@ export function CommandPalette({
                   )}
                 </span>
                 {c.status && <ProjectChips status={c.status} />}
+                {c.children ? (
+                  <span className="command-palette-kids" title="Tab to see its sub-projects">
+                    {c.children} sub ›
+                  </span>
+                ) : null}
                 {c.action && (
                   <span className="command-palette-chord">
                     {(keymap[c.action] ?? []).map(chordLabel).join(' or ')}
@@ -378,7 +441,8 @@ export function CommandPalette({
             <kbd>↵</kbd>open
           </span>
           <span>
-            <kbd>⌫</kbd>back to all
+            <kbd>⌫</kbd>
+            {path.length > 1 ? 'up a level' : 'back to all'}
           </span>
           <span>
             <kbd>esc</kbd>close

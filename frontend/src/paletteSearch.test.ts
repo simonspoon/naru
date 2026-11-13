@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest'
-import { fuzzyMatch, projectPanelTargets, rankItems, segments } from './paletteSearch'
+import {
+  breadcrumb,
+  childCounts,
+  fuzzyMatch,
+  projectPanelTargets,
+  rankItems,
+  segments,
+  subProjects,
+} from './paletteSearch'
 
 describe('fuzzyMatch', () => {
   it('matches a subsequence case-insensitively and returns its indices', () => {
@@ -83,5 +91,36 @@ describe('projectPanelTargets', () => {
       '#/projects/7/settings',
       '#/projects/7/create-task',
     ])
+  })
+})
+
+describe('subProjects', () => {
+  const projects = [
+    { id: 1, parent_id: null },
+    { id: 2, parent_id: 1 },
+    { id: 3, parent_id: 2 },
+    { id: 4, parent_id: 1 },
+    { id: 5, parent_id: 1 },
+  ]
+  it('lists only direct children, in server order', () => {
+    expect(subProjects(projects, 1, new Set()).map((p) => p.id)).toEqual([2, 4, 5])
+    expect(subProjects(projects, 2, new Set()).map((p) => p.id)).toEqual([3])
+    expect(subProjects(projects, 3, new Set())).toEqual([])
+  })
+  it('puts archived children after the live ones', () => {
+    expect(subProjects(projects, 1, new Set([2])).map((p) => p.id)).toEqual([4, 5, 2])
+  })
+  it('counts direct children per project', () => {
+    const c = childCounts(projects)
+    expect([c.get(1), c.get(2), c.get(3)]).toEqual([3, 1, undefined])
+  })
+})
+
+describe('breadcrumb', () => {
+  it('keeps a short path whole', () => {
+    expect(breadcrumb(['a', 'b', 'c'], 4)).toEqual(['a', 'b', 'c'])
+  })
+  it('collapses the middle of a long one, keeping the first and the innermost', () => {
+    expect(breadcrumb(['a', 'b', 'c', 'd', 'e', 'f'], 4)).toEqual(['a', null, 'e', 'f'])
   })
 })
