@@ -104,6 +104,7 @@ import type { ProjectGitView } from './types/ProjectGitView'
 import type { ProjectVersion } from './types/ProjectVersion'
 import type { Priority } from './types/Priority'
 import type { Project } from './types/Project'
+import type { ProjectCounts } from './types/ProjectCounts'
 import type { Script } from './types/Script'
 import type { ScriptArg } from './types/ScriptArg'
 import type { ScriptRunEvent } from './types/ScriptRunEvent'
@@ -195,6 +196,12 @@ export function listProjects(includeArchived = false): Promise<Project[]> {
   return request(
     `/api/projects${includeArchived ? '?include_archived=true' : ''}`,
   )
+}
+
+/** Every project's task counts, open questions and bounces, archived
+ *  included, for the Projects panel (naru task 2808). */
+export function getProjectCounts(): Promise<ProjectCounts[]> {
+  return request('/api/projects/counts')
 }
 
 export function getProject(id: number): Promise<Project> {

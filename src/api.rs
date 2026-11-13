@@ -3937,6 +3937,7 @@ fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/projects", get(list_projects).post(create_project))
         .route("/api/projects/resolve", get(resolve_project))
+        .route("/api/projects/counts", get(project_counts))
         .route(
             "/api/projects/{id}",
             get(show_project)
@@ -4991,6 +4992,12 @@ async fn list_projects(
     } else {
         Ok(Json(store.list_projects()?).into_response())
     }
+}
+
+/// Every project's task counts for the Projects panel (naru task 2808).
+async fn project_counts(State(state): State<AppState>) -> ApiResult<Response> {
+    let store = state.store.lock().unwrap();
+    Ok(Json(store.project_counts()?).into_response())
 }
 
 async fn create_project(

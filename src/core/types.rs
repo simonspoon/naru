@@ -2107,6 +2107,31 @@ pub struct TaskDigestEntry {
     pub at: String,
 }
 
+/// One project's task counts for the web UI's Projects panel (naru task
+/// 2808). Built by `Store::project_counts`, one row per project (archived
+/// included); a project with no tasks has all zeros. `questions` is the open
+/// `naru ask` questions on its tasks (notices never count); `bounced` is its
+/// tasks sitting in `backlog` whose newest status change was
+/// `in_progress` -> `backlog` (a session gave up on them).
+#[derive(Debug, Clone, PartialEq, Serialize, TS)]
+#[ts(export, export_to = "../frontend/src/types/")]
+pub struct ProjectCounts {
+    #[ts(type = "number")]
+    pub project_id: i64,
+    #[ts(type = "number")]
+    pub backlog: i64,
+    #[ts(type = "number")]
+    pub todo: i64,
+    #[ts(type = "number")]
+    pub in_progress: i64,
+    #[ts(type = "number")]
+    pub done: i64,
+    #[ts(type = "number")]
+    pub questions: i64,
+    #[ts(type = "number")]
+    pub bounced: i64,
+}
+
 /// An append-only record of a task's status change. `from_status` is null for
 /// the row written when the task is created.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]

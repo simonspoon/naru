@@ -92,6 +92,7 @@ function buildEntries(
     panel('inbox', 'Inbox', () => '#/inbox'),
     panel('terminal', 'Terminal', () => '#/terminal', 'shell'),
     panel('watcher', 'Agent watcher', () => '#/agent-watcher', 'agents running'),
+    panel('projects-panel', 'Projects', () => '#/projects', 'tree counts backlog queued'),
     panel('workflows', 'Workflows', () => '#/workflows', 'runs schedule overview'),
     panel('library', 'Library', () => '#/library', 'agents skills hooks prompts claude'),
     panel('kb', 'Knowledge base', () => '#/kb', 'kb notes'),

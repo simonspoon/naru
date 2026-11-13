@@ -14,9 +14,9 @@ use super::types::{
     LibraryItem, LibraryKind, LibraryScope, LibraryVersion, LiveAction, LiveBoard, LiveBoardKind,
     LiveBoardSummary, LiveContext, LiveMemoryHit, LiveNotebookEntry, LiveNotice, LiveResult,
     LiveRole, LiveSession, LiveStatus, LiveSummary, LiveTurn, LiveWindow, Priority, Project,
-    RetroFinding, RetroRun, RetroStatus, RunProfile, Script, ScriptArg, ScriptArgKind,
-    ScriptRunRecord, ScriptRunStatus, Status, Task, TaskDigestEntry, TaskEvent, TaskNote,
-    TaskReceipt, Workflow, WorkflowBranch, WorkflowEdge, WorkflowEdgeKind, WorkflowGate,
+    ProjectCounts, RetroFinding, RetroRun, RetroStatus, RunProfile, Script, ScriptArg,
+    ScriptArgKind, ScriptRunRecord, ScriptRunStatus, Status, Task, TaskDigestEntry, TaskEvent,
+    TaskNote, TaskReceipt, Workflow, WorkflowBranch, WorkflowEdge, WorkflowEdgeKind, WorkflowGate,
     WorkflowGateStatus, WorkflowLogEntry, WorkflowNode, WorkflowNodeKind, WorkflowRun,
     WorkflowRunStatus, WorkflowStep, WorkflowStepStatus, WorkflowTrigger, WorkflowType,
     WorkflowView, is_valid_artifact_content_type, task_name,
@@ -5139,6 +5139,45 @@ impl Store {
                 project_name: r.get(3)?,
                 status: r.get(4)?,
                 at: r.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Per-project task counts for the Projects panel (naru task 2808): every
+    /// project, archived included, in `list_projects` order. Counts a
+    /// project's own tasks only (subtasks included), never its children's;
+    /// the panel rolls those up itself. See [`ProjectCounts`] for `questions`
+    /// and `bounced`.
+    pub fn project_counts(&self) -> Result<Vec<ProjectCounts>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT p.id, \
+                    COALESCE(SUM(t.status = 'backlog'), 0), \
+                    COALESCE(SUM(t.status = 'todo'), 0), \
+                    COALESCE(SUM(t.status = 'in_progress'), 0), \
+                    COALESCE(SUM(t.status = 'done'), 0), \
+                    (SELECT COUNT(*) FROM agent_questions q JOIN tasks qt ON qt.id = q.task_id \
+                      WHERE qt.project_id = p.id AND q.status = 'open' AND q.kind = 'question'), \
+                    COALESCE(SUM(t.status = 'backlog' AND b.task_id IS NOT NULL), 0) \
+             FROM projects p \
+             LEFT JOIN tasks t ON t.project_id = p.id \
+             LEFT JOIN (SELECT e.task_id FROM task_events e \
+                        JOIN (SELECT task_id, MAX(id) AS mid FROM task_events GROUP BY task_id) l \
+                          ON e.id = l.mid \
+                        WHERE e.from_status = 'in_progress' AND e.to_status = 'backlog') b \
+               ON b.task_id = t.id \
+             GROUP BY p.id \
+             ORDER BY p.sort_order, p.id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(ProjectCounts {
+                project_id: r.get(0)?,
+                backlog: r.get(1)?,
+                todo: r.get(2)?,
+                in_progress: r.get(3)?,
+                done: r.get(4)?,
+                questions: r.get(5)?,
+                bounced: r.get(6)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -14300,6 +14339,83 @@ mod tests {
         assert_eq!(p("/execute-todo ##Task Info no id here"), None);
         assert_eq!(p("/refine-mesa-task 12"), None);
         assert_eq!(p("Drive naru live session 4"), None);
+    }
+
+    #[test]
+    fn project_counts_counts_own_statuses_open_questions_and_bounces() {
+        let (mut store, _dir) = temp_store();
+        let a = store.create_project("a", None, None, None, None).unwrap();
+        let empty = store
+            .create_project("empty", None, None, None, None)
+            .unwrap();
+        let set = |s: &mut Store, id: i64, status: Status| {
+            s.update_task(
+                id,
+                &TaskPatch {
+                    status: Some(status),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        };
+        // A new task is `todo`.
+        let queued = add_task(&mut store, a.id, "queued").id;
+        let running = add_task(&mut store, a.id, "running").id;
+        set(&mut store, running, Status::InProgress);
+        let done = add_task(&mut store, a.id, "done").id;
+        set(&mut store, done, Status::Done);
+        let parked = add_task(&mut store, a.id, "parked by a person").id;
+        set(&mut store, parked, Status::Backlog);
+        let bounced = add_task(&mut store, a.id, "bounced").id;
+        set(&mut store, bounced, Status::InProgress);
+        set(&mut store, bounced, Status::Backlog);
+        // Bounced once, then queued again: no longer a bounce.
+        let requeued = add_task(&mut store, a.id, "requeued").id;
+        set(&mut store, requeued, Status::InProgress);
+        set(&mut store, requeued, Status::Backlog);
+        set(&mut store, requeued, Status::Todo);
+        // Back to `todo` from in_progress is a retry, not a bounce.
+        let retried = add_task(&mut store, a.id, "retried").id;
+        set(&mut store, retried, Status::InProgress);
+        set(&mut store, retried, Status::Todo);
+        store
+            .add_question("which?", Some(queued), None, "question", &[])
+            .unwrap();
+        store
+            .add_question("a report", Some(queued), None, "notice", &[])
+            .unwrap();
+        let answered = store
+            .add_question("answered", Some(running), None, "question", &[])
+            .unwrap();
+        store.answer_question(answered.id, "yes").unwrap();
+        store
+            .add_question("no task", None, None, "question", &[])
+            .unwrap();
+
+        let counts = store.project_counts().unwrap();
+        assert_eq!(
+            counts,
+            vec![
+                ProjectCounts {
+                    project_id: a.id,
+                    backlog: 2,
+                    todo: 3,
+                    in_progress: 1,
+                    done: 1,
+                    questions: 1,
+                    bounced: 1,
+                },
+                ProjectCounts {
+                    project_id: empty.id,
+                    backlog: 0,
+                    todo: 0,
+                    in_progress: 0,
+                    done: 0,
+                    questions: 0,
+                    bounced: 0,
+                },
+            ]
+        );
     }
 
     #[test]

@@ -14,6 +14,7 @@ or Rust surface.
 | `terminal` | the global `TerminalPage` |
 | `workflows` | `WorkflowsPanel`: the workflows of the project the route is on, opened in place (a saved layout naming the old `diagrams` id is renamed on load) |
 | `watcher` | `AgentWatcherView` (the Agent watcher timeline; polls only while the panel is visible; starts closed in every preset) |
+| `projects` | `ProjectsPanel`: the project tree with task counts (naru task 2808, [`projects-panel.md`](projects-panel.md)); starts closed in every preset |
 | `audio` | `AudioAdminPanel` (naru task 2676): naru-audio's own admin page (`<daemon>/admin`) in an iframe; Naru rebuilds none of it. Starts closed in every preset; reopen it from the `⋯` menu. See "Audio panel" below |
 
 The live orb is **not** a panel (naru task 1798; it was one, `orb`, from mesa

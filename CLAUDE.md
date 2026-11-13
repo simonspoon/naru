@@ -170,6 +170,7 @@ Each doc is authoritative. The longer summaries that used to sit here are in
 | Agent watcher | `docs/agent-watcher.md` |
 | Project panes | `docs/project-panes.md` |
 | Dock | `docs/dock.md` |
+| Projects panel | `docs/projects-panel.md` |
 | Keyboard (`keyboardScope.ts` is the suppression chokepoint) | `docs/keyboard.md` |
 | Mobile | `docs/mobile.md` |
 | Queue watcher | `docs/queue-watcher.md` |

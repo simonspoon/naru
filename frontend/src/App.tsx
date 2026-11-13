@@ -5,6 +5,7 @@ import { getCcUsage, getGitStatus, getNaruVersion, getTask, listInbox, listProje
 import { AgentSidebar } from './components/AgentSidebar'
 import { CustomPanel } from './components/CustomPanel'
 import { AudioAdminPanel } from './components/AudioAdminPanel'
+import { ProjectsPanel } from './components/ProjectsPanel'
 import { CommandPalette } from './components/CommandPalette'
 import { CreateProjectModal } from './components/CreateProjectModal'
 import { ProjectSwitcher } from './components/ProjectSwitcher'
@@ -199,6 +200,18 @@ function useCommandPaletteShortcut(onOpen: () => void, keymap: Keymap) {
   }, [onOpen, keymap])
 }
 
+// Hashes that reveal a dock panel and then put the hash back (docs/dock.md
+// "Live behaviours"): the panel is not a page on the dock tiers.
+const PANEL_VERBS: Record<string, 'terminal' | 'watcher' | 'projects'> = {
+  '/terminal': 'terminal',
+  '/agent-watcher': 'watcher',
+  '/projects': 'projects',
+}
+
+function isPanelVerb(hash: string): boolean {
+  return Object.hasOwn(PANEL_VERBS, hash)
+}
+
 function App() {
   const hash = useHashPath()
   // A CC session drill-down carries the dashboard it was reached from as a
@@ -282,6 +295,7 @@ function App() {
   const terminalVisible = isVisible(dock.state, 'terminal', navOff)
   const watcherVisible = isVisible(dock.state, 'watcher', navOff)
   const audioVisible = isVisible(dock.state, 'audio', navOff)
+  const projectsVisible = isVisible(dock.state, 'projects', navOff)
   const chatVisible = isVisible(dock.state, 'chat', navOff)
   const boardVisible = isVisible(dock.state, 'board', navOff)
   const agentTabs = useMemo(
@@ -364,7 +378,7 @@ function App() {
   // terminal panel and the hash goes back to where the person was, since the
   // terminal is a panel here, not a page. `bounced` stops the put-back, which
   // is itself a path change, from pulling main back over the terminal.
-  const prevHash = useRef(hash === '/terminal' || hash === '/agent-watcher' ? '#/' : `#${hash}`)
+  const prevHash = useRef(isPanelVerb(hash) ? '#/' : `#${hash}`)
   const bounced = useRef(false)
   // `null` until the first run: the mount keeps the remembered layout (a
   // closed main stays closed over a reload), except that a page loaded *on*
@@ -374,16 +388,12 @@ function App() {
     if (!docked || dockSeenPath.current === path) return
     const first = dockSeenPath.current === null
     dockSeenPath.current = path
-    const verb = path === '/terminal' ? 'terminal' : path === '/agent-watcher' ? 'watcher' : null
+    const verb = PANEL_VERBS[path] ?? null
     if (first && !verb) return
     if (verb) {
       bounced.current = true
       reveal(verb)
-      window.location.replace(
-        prevHash.current === '#/terminal' || prevHash.current === '#/agent-watcher'
-          ? '#/'
-          : prevHash.current,
-      )
+      window.location.replace(isPanelVerb(prevHash.current.slice(1)) ? '#/' : prevHash.current)
       return
     }
     prevHash.current = `#${hash}`
@@ -526,6 +536,8 @@ function App() {
   // that visibility toggle and the nav's active-link highlight.
   const terminalMatch = /^\/terminal$/.exec(path)
   const agentWatcherMatch = /^\/agent-watcher$/.exec(path)
+  // The Projects panel (naru task 2808): a verb on the dock tiers, a page on the phone.
+  const projectsPanelMatch = /^\/projects$/.exec(path)
   // Knowledge base viewer (naru task 1928): #/kb, and #/kb/<note path>.
   const kbMatch = /^\/kb(?:\/.+)?$/.exec(path)
   // What ambient hears (naru task 2375): the nav's listening badge opens it.
@@ -639,6 +651,8 @@ function App() {
     page = <AmbientView />
   } else if (templatesMatch) {
     page = <TemplatesView />
+  } else if (projectsPanelMatch && !docked) {
+    page = <ProjectsPanel active projects={allProjects ?? []} activeProjectId={null} />
   } else if (agentWatcherMatch && !docked) {
     // Global full-page timeline of every running agent: no project frame.
     page = <AgentWatcherView />
@@ -1124,6 +1138,15 @@ function App() {
         {docked &&
           createPortal(<AgentWatcherView active={watcherVisible} />, hostFor('watcher'))}
         {docked && createPortal(<AudioAdminPanel active={audioVisible} />, hostFor('audio'))}
+        {docked &&
+          createPortal(
+            <ProjectsPanel
+              active={projectsVisible}
+              projects={allProjects ?? []}
+              activeProjectId={activeProjectId}
+            />,
+            hostFor('projects'),
+          )}
         {/* Single always-mounted owner of every open leaf's PtyTerminal
             (mesa task 399, .scratch/arch.md §6.2), across BOTH AgentSidebar
             and TerminalPage — a permanent sibling, never inside `page` or

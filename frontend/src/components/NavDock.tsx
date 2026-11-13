@@ -113,6 +113,7 @@ const RAIL_GLYPH: Record<BasePanelId, string> = {
   workflows: '◇',
   watcher: '◔',
   audio: '♪',
+  projects: '☰',
 }
 
 /** The permanent orb at the top of the expanded nav (naru task 1798): no panel
