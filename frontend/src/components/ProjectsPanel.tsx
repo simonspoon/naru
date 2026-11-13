@@ -298,6 +298,15 @@ function Row({
   const label = !loaded
     ? project.name
     : `${project.name}: ${counts.backlog} backlog, ${counts.todo} queued, ${counts.in_progress} running, ${counts.done} done${row.rolledUp ? ', including sub-projects' : ''}${row.needsYou ? ', needs you' : ''}`
+  const nameRef = useRef<HTMLSpanElement>(null)
+  const [tip, setTip] = useState<{ x: number; y: number } | null>(null)
+  // The name is clipped (ellipsis, or the second line cut): show it whole.
+  const showTip = () => {
+    const el = nameRef.current
+    if (!el || (el.scrollWidth <= el.clientWidth && el.scrollHeight <= el.clientHeight)) return
+    const r = el.getBoundingClientRect()
+    setTip({ x: r.left, y: r.bottom + 4 })
+  }
   const n = (v: number, c: string, what: string) =>
     loaded ? (
       <span className={`${c}${v === 0 ? ' zero' : ''}`} title={`${v} ${what}`}>
@@ -316,8 +325,14 @@ function Row({
       aria-expanded={caret ? !row.collapsed : undefined}
       aria-current={current ? 'page' : undefined}
       aria-label={label}
-      style={{ paddingLeft: `${0.25 + row.depth * 1.25}rem` }}
-      onFocus={onFocus}
+      style={{ paddingLeft: `${0.25 + row.depth * 0.9}rem` }}
+      onFocus={() => {
+        onFocus()
+        showTip()
+      }}
+      onBlur={() => setTip(null)}
+      onMouseEnter={showTip}
+      onMouseLeave={() => setTip(null)}
       onClick={() => openProject(project.id)}
     >
       {caret ? (
@@ -338,7 +353,14 @@ function Row({
         <span className="projects-panel-caret" aria-hidden="true" />
       )}
       {row.running && <span className="projects-panel-dot" aria-hidden="true" title="Running" />}
-      <span className="projects-panel-name">{project.name}</span>
+      <span className="projects-panel-name" ref={nameRef}>
+        {project.name}
+      </span>
+      {tip && (
+        <span className="projects-panel-tip" role="tooltip" aria-hidden="true" style={{ left: tip.x, top: tip.y }}>
+          {project.name}
+        </span>
+      )}
       {row.needsYou && (
         <span className="projects-panel-needs" title="Needs you: a question is waiting or a task bounced">
           <span className="projects-panel-needs-long">Needs you</span>

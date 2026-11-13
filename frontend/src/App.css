@@ -17500,11 +17500,33 @@ button.projects-panel-caret:hover {
   flex: 1;
   min-width: 3.5rem;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  /* Up to two lines, so a long name reads further before it is cut. */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow-wrap: anywhere;
+  line-height: 1.25;
   font-size: 1rem;
   font-weight: 600;
   color: var(--text-h);
+}
+/* The full name of a clipped one, on hover and keyboard focus (fixed: the
+   row clips its own overflow). */
+.projects-panel-tip {
+  position: fixed;
+  z-index: 50;
+  max-width: min(22rem, 90vw);
+  padding: 0.4rem 0.65rem;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--hairline);
+  background: var(--panel-raised);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text-h);
+  overflow-wrap: anywhere;
+  pointer-events: none;
 }
 .projects-panel-needs {
   flex: none;
@@ -17521,7 +17543,7 @@ button.projects-panel-caret:hover {
 }
 .projects-panel-pin {
   flex: none;
-  width: 1.6rem;
+  width: 1.4rem;
   height: 1.6rem;
   padding: 0;
   border: none;
@@ -17577,7 +17599,7 @@ button.projects-panel-caret:hover {
 @container (max-width: 480px) {
   .projects-panel-legend,
   .projects-panel-scroll {
-    --pp-col: 2.5rem;
+    --pp-col: 2.1rem;
   }
   .projects-panel-counts {
     font-size: 0.9rem;

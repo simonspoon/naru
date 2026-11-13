@@ -12,6 +12,11 @@ and puts the hash back; on the phone tier it is a page).
 - The name, then **Back / Queue / Run / Done**: the project's tasks in
   `backlog`, `todo`, `in_progress` and `done` (subtasks included; cancelled
   not shown). Zeros are faded.
+- **Long names** wrap to two lines (then an ellipsis); the indent is 0.9rem a
+  level and the narrow count columns 2.1rem, so the name keeps its room. A name
+  still clipped shows in full in a tooltip (`projects-panel-tip`, fixed so the
+  row's overflow can't clip it) on hover and on keyboard focus; one that fits
+  shows none (naru task 2809).
 - **Counts on parents.** An open parent shows only its own counts (its
   children are on screen with theirs). A collapsed parent shows its own plus
   every descendant the panel lists, in italics, so collapsing never hides
