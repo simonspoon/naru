@@ -59,7 +59,7 @@ export const ACTIONS: KeymapActionSpec[] = [
     id: 'command-palette',
     label: 'Command palette',
     blurb: 'Jump to a project, a view, or create a task',
-    defaults: ['Mod+Shift+P'],
+    defaults: ['Mod+Shift+P', 'Mod+K'],
   },
   {
     id: 'focus-left',
@@ -335,6 +335,15 @@ export function formatChord(chord: string): string[] {
 /** A chord as one readable string, for a title attribute or a palette row. */
 export function chordLabel(chord: string): string {
   return formatChord(chord).join('+')
+}
+
+/** The chord with the fewest keys (ties: the shorter string), for a hint that
+ *  has room for one — `Mod+K` over `Mod+Shift+P`. Null for an empty list. */
+export function shortestChord(chords: string[]): string | null {
+  const keys = (c: string) => formatChord(c).length
+  return (
+    [...chords].sort((a, b) => keys(a) - keys(b) || a.length - b.length)[0] ?? null
+  )
 }
 
 /** Every chord two or more actions would both answer to. Empty is the only

@@ -206,6 +206,31 @@ function SortableProject({
   )
 }
 
+/**
+ * The "Ambient is listening" badge (naru task 2375): whether the audio server
+ * reports ambient on, on every page, linking to what it hears. It polls for
+ * itself so it can sit in the nav or — with the nav hidden (naru task 2805) —
+ * in the header. The turns after a huge cursor are none, so the poll carries
+ * the session alone.
+ */
+export function AmbientBadge({ compact, active }: { compact: boolean; active: boolean }) {
+  const { data: live } = useFetch(() => getLive(Number.MAX_SAFE_INTEGER), 'ambient-nav', {
+    pollMs: 2000,
+  })
+  if (live?.session?.ambient !== true) return null
+  return (
+    <a
+      className={`nav-item ambient-badge${active ? ' active' : ''}`}
+      href="#/ambient"
+      title="Ambient is listening — open what it hears"
+      aria-label="Ambient is listening"
+    >
+      <span className="live-dot on" />
+      {!compact && <span className="nav-item-label">Listening</span>}
+    </a>
+  )
+}
+
 export function Sidebar({
   activeProjectId,
   inboxFilter,
@@ -325,25 +350,6 @@ export function Sidebar({
       if (p) activeAgentProjectIds.add(p.id)
     }
   }
-  // Whether the audio server reports ambient on (naru task 2375): the
-  // listening badge below, on every page. The turns after a huge cursor are
-  // none, so the poll carries the session alone.
-  const { data: live } = useFetch(() => getLive(Number.MAX_SAFE_INTEGER), 'ambient-nav', {
-    pollMs: 2000,
-  })
-  const listening = live?.session?.ambient === true
-  const ambientBadge = (compact: boolean) =>
-    listening && (
-      <a
-        className={`nav-item ambient-badge${ambientActive ? ' active' : ''}`}
-        href="#/ambient"
-        title="Ambient is listening — open what it hears"
-        aria-label="Ambient is listening"
-      >
-        <span className="live-dot on" />
-        {!compact && <span className="nav-item-label">Listening</span>}
-      </a>
-    )
   const [creatingProject, setCreatingProject] = useState(false)
   // Ephemeral collapse of the Projects subnav (persistence is a nice-to-have;
   // `navCollapse.ts` localStorage is reserved for the project subtrees the
@@ -562,7 +568,7 @@ export function Sidebar({
   if (collapsed) {
     return (
       <nav className={`sidebar collapsed${rail ? ' has-rail' : ''}`}>
-        {ambientBadge(true)}
+        <AmbientBadge compact active={ambientActive} />
         {rail ?? (
           <button
             type="button"
@@ -616,7 +622,7 @@ export function Sidebar({
             toggle
           )
         })()}
-        {ambientBadge(false)}
+        <AmbientBadge compact={false} active={ambientActive} />
         {dockZone}
         {/* The href is the user's remembered CC tab (task 694); the tabs
             themselves live on the page (mesa task 1159). */}

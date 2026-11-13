@@ -140,7 +140,8 @@ touch-sized handle or control as a known gap rather than a verified one.
 |---|---|
 | Bottom nav | four-slot tab bar; the only nav chrome on a phone |
 | Board (kanban) | single column; touch-scroll + long-press drag both work |
-| Sidebars | overlay drawers with scrim + tap-to-dismiss; rails hidden, opened from the tab bar |
+| Sidebars | overlay drawers with scrim + tap-to-dismiss; rails hidden, opened from the tab bar. The desktop-only hidden-nav preference (`navHidden.ts`) never applies here |
+| Header | brand + a compact project-name chip (status chips hidden) + the live controls; the "Go to" hint and Inbox link are hidden (the tab bar has the Inbox badge); the palette is full width with 44px rows |
 | Git tab | `.git-layout` stacks; diff pane keeps a viewport-bound box |
 | CC Dashboard | grids collapse to 1 column; wide tables scroll inside `.cc-table-wrap` behind a frozen identity column — see *CC Dashboard tables* |
 | History rows | wrap instead of holding fixed timestamp/actor columns |

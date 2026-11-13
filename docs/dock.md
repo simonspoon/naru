@@ -20,6 +20,23 @@ The live orb is **not** a panel (naru task 1798; it was one, `orb`, from mesa
 task 1574): see "The nav's orb" below. Each panel appears at most once. The phone tier (`usePhoneTier()`) is **not**
 docked and keeps its drawers, tab bar and the old live aside unchanged.
 
+## The nav is hidden by default on the desktop tiers (naru task 2805)
+
+On the dock tiers the left nav is either fully shown or not rendered at all —
+no rail, no handle; the dock area takes the full width. Hidden is the default
+and persists per browser (`navHidden.ts`, key `naru-nav-shown`; only the
+literal `shown` shows it). `App` reads one flag, `navOff` (`navHidden` on the
+dock tiers, the phone drawer's `navCollapsed` otherwise), everywhere it used
+`navCollapsed`: `isVisible`/`revealNeedsNav`, the orb, `reveal`, LiveHub's
+collapse/expand-sidebars, the « toggle and the palette's Show/Hide sidebar
+command. The `Sidebar` is not mounted while hidden, so its polls stop; the
+header carries the project switcher, the Inbox link with its unread badge, the
+"Go to ⌘K" hint and — nav hidden — the compact Ambient badge (`AmbientBadge`,
+shared with the nav). The rail code (`NavRail`, `.has-rail`) is kept but
+unreachable on the dock tiers. A panel docked in the nav is parked (not
+mounted) until the nav is shown or the panel is revealed. The phone tier is
+unchanged, and crossing tiers leaves the desktop preference alone.
+
 ## The nav zone and the rail (mesa task 1574)
 
 `DockState.nav` is an ordered stack of panels docked into the left nav, above

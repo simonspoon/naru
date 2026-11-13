@@ -13,6 +13,7 @@ import {
   matchesShortcut,
   resolveKeymap,
   sameChords,
+  shortestChord,
   type Keymap,
 } from './keymap'
 import type { ConfigKeymap } from './types/ConfigKeymap'
@@ -50,7 +51,7 @@ describe('the shipped keymap', () => {
   // `config::tests::the_shipped_keymap_is_todays_behaviour`.
   it('is exactly what the app answered to before it was rebindable', () => {
     expect(DEFAULT_KEYMAP).toEqual({
-      'command-palette': ['Mod+Shift+P'],
+      'command-palette': ['Mod+Shift+P', 'Mod+K'],
       'focus-left': ['h', 'ArrowLeft'],
       'focus-down': ['j', 'ArrowDown'],
       'focus-up': ['k', 'ArrowUp'],
@@ -374,5 +375,15 @@ describe('live-cancel (mesa task 1354)', () => {
   it('fires on the page itself', () => {
     expect(matchesShortcut('live-cancel', dispatch('Escape'))).toBe(true)
     expect(matchesShortcut('live-cancel', dispatch('Escape', { shift: true }))).toBe(false)
+  })
+})
+
+describe('shortestChord', () => {
+  it('prefers the chord with fewest keys', () => {
+    expect(shortestChord(['Mod+Shift+P', 'Mod+K'])).toBe('Mod+K')
+    expect(shortestChord(['Mod+K', 'Mod+Shift+P'])).toBe('Mod+K')
+  })
+  it('is null for no chords', () => {
+    expect(shortestChord([])).toBeNull()
   })
 })

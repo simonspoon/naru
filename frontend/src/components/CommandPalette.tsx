@@ -1,17 +1,19 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { listProjects } from '../api'
+import { ccHref, projectHref } from '../lastView'
 import { chordLabel, type KeymapAction } from '../keymap'
 import { useKeymap } from '../keymapStore'
+import { rankItems, segments, type Rankable } from '../paletteSearch'
+import { NO_STATUS, type ProjectStatus } from '../projectStatus'
+import { effectivelyArchivedIds } from '../projectTree'
+import { loadRecent, recentProjects } from '../recentProjects'
 import type { Project } from '../types/Project'
-import { useFetch } from '../useFetch'
+import { ProjectChips } from './ProjectChips'
 
-interface Command {
+type Tag = 'PAGE' | 'PROJECT' | 'COMMAND' | 'ARCHIVED'
+
+interface Entry extends Rankable {
   id: string
-  label: string
-  // Lowercased "keyword" string matched against the query — deliberately
-  // separate from `label` so filler words in the label ("Go to", "Create
-  // task in") never cause a false match.
-  search: string
+  tag: Tag
   run: () => void
   // The keymap action this row *is*, when it is one (mesa task 1079). The row
   // then shows the chord that action is bound to, read from the same keymap
@@ -19,131 +21,176 @@ interface Command {
   // Most rows are navigation with no shortcut of their own and leave it unset
   // — an invented chord would be worse than none.
   action?: KeymapAction
+  // Project rows carry their status chips.
+  status?: ProjectStatus
 }
+
+// Rows ranked below the plain project row / page they hang off.
+const SUBVIEW_PENALTY = 400
+// Archived projects stay reachable but sort after every live hit.
+const ARCHIVED_PENALTY = 1_000_000
+// A query over hundreds of sub-view rows would paint them all; the best few
+// dozen are what anyone reads.
+const MAX_ROWS = 60
 
 function navigate(hash: string) {
   window.location.hash = hash
 }
 
 /**
- * Fixed top-level destinations plus, per project: "Go to <name>" (the
- * board), the git/files/terminal/dashboard/workflows/settings sub-views,
- * and
+ * The palette's rows. Pages first (everything the left nav offers, plus
+ * Ambient), then every project — "Go to" the project via its remembered tab
+ * (`projectHref`, the sidebar link) — then commands. Per project there are
+ * also the git/files/terminal/dashboard/workflows/settings sub-views and
  * "Create task in <name>" (which lands on the create-task route —
- * ProjectTasksPage opens the form with its description field focused).
+ * ProjectTasksPage opens the form with its description field focused); those
+ * rank below the project row and are hidden until something is typed.
  */
-function buildCommands(projects: Project[]): Command[] {
-  const commands: Command[] = [
-    { id: 'cc', label: 'CC Dashboard', search: 'cc dashboard', run: () => navigate('#/cc') },
-    { id: 'inbox', label: 'Inbox', search: 'inbox', run: () => navigate('#/inbox') },
+function buildEntries(
+  projects: Project[],
+  statuses: Map<number, ProjectStatus>,
+  nav: { hidden: boolean; toggle: (() => void) | null },
+  onNewProject: () => void,
+): { pages: Entry[]; projects: Entry[]; commands: Entry[]; subviews: Entry[] } {
+  const page = (id: string, label: string, hash: () => string, keywords?: string): Entry => ({
+    id,
+    label,
+    keywords,
+    tag: 'PAGE',
+    run: () => navigate(hash()),
+  })
+  const pages: Entry[] = [
+    page('cc', 'CC Dashboard', ccHref, 'cc claude code telemetry'),
+    page('inbox', 'Inbox', () => '#/inbox'),
+    page('terminal', 'Terminal', () => '#/terminal', 'shell'),
+    page('watcher', 'Agent watcher', () => '#/agent-watcher', 'agents running'),
+    page('workflows', 'Workflows', () => '#/workflows', 'runs schedule overview'),
+    page('library', 'Library', () => '#/library', 'agents skills hooks prompts claude'),
+    page('kb', 'Knowledge base', () => '#/kb', 'kb notes'),
+    page('ambient', 'Ambient', () => '#/ambient', 'listening hears'),
+    page('settings', 'Settings', () => '#/settings', 'config keyboard shortcuts'),
+    page('scripts', 'Scripts', () => '#/library/scripts', 'shell run library'),
+  ]
+  const hiddenIds = effectivelyArchivedIds(projects)
+  const projectEntries: Entry[] = []
+  const subviews: Entry[] = []
+  for (const p of projects) {
+    const archived = hiddenIds.has(p.id)
+    projectEntries.push({
+      id: `go-${p.id}`,
+      label: p.name,
+      tag: archived ? 'ARCHIVED' : 'PROJECT',
+      penalty: archived ? ARCHIVED_PENALTY : 0,
+      status: statuses.get(p.id) ?? NO_STATUS,
+      run: () => navigate(projectHref(p.id)),
+    })
+    if (archived) continue
+    const sub = (id: string, label: string, hash: string, action?: KeymapAction): Entry => ({
+      id: `${id}-${p.id}`,
+      label,
+      tag: 'COMMAND',
+      penalty: SUBVIEW_PENALTY,
+      action,
+      run: () => navigate(hash),
+    })
+    for (const [seg, name] of [
+      ['git', 'Git'],
+      ['files', 'Files'],
+      ['terminal', 'Terminal'],
+      ['dashboard', 'Dashboard'],
+      ['workflows', 'Workflows'],
+      ['settings', 'Settings'],
+    ])
+      subviews.push(sub(seg, `${p.name} — ${name}`, `#/projects/${p.id}/${seg}`))
+    subviews.push(
+      sub('create', `Create task in ${p.name}`, `#/projects/${p.id}/create-task`, 'create-task'),
+    )
+  }
+  const commands: Entry[] = []
+  if (nav.toggle) {
+    commands.push({
+      id: 'toggle-nav',
+      label: nav.hidden ? 'Show sidebar' : 'Hide sidebar',
+      keywords: 'nav navigation menu left toggle',
+      tag: 'COMMAND',
+      run: nav.toggle,
+    })
+  }
+  commands.push(
+    {
+      id: 'new-project',
+      label: 'New project',
+      keywords: 'create add',
+      tag: 'COMMAND',
+      run: onNewProject,
+    },
     {
       id: 'live',
       // `#/live` is a verb now (mesa task 857): the header's LiveHub
       // intercepts it, opens the conversation panel and puts the hash back.
       label: 'Live conversation',
-      search: 'live talk speak voice dictate',
+      keywords: 'live talk speak voice dictate',
+      tag: 'COMMAND',
       run: () => navigate('#/live'),
     },
-    {
-      id: 'scripts',
-      label: 'Scripts',
-      search: 'scripts shell run library',
-      run: () => navigate('#/library/scripts'),
-    },
-    {
-      id: 'workflows',
-      label: 'Workflows',
-      search: 'workflows runs schedule overview',
-      run: () => navigate('#/workflows'),
-    },
-    {
-      id: 'library',
-      label: 'Library',
-      search: 'library agents skills hooks prompts claude',
-      run: () => navigate('#/library'),
-    },
-  ]
-  for (const p of projects) {
-    const name = p.name.toLowerCase()
-    commands.push({
-      id: `go-${p.id}`,
-      label: `Go to ${p.name}`,
-      search: `${name} board`,
-      run: () => navigate(`#/projects/${p.id}`),
-    })
-    commands.push({
-      id: `git-${p.id}`,
-      label: `${p.name} — Git`,
-      search: `${name} git`,
-      run: () => navigate(`#/projects/${p.id}/git`),
-    })
-    commands.push({
-      id: `files-${p.id}`,
-      label: `${p.name} — Files`,
-      search: `${name} files`,
-      run: () => navigate(`#/projects/${p.id}/files`),
-    })
-    commands.push({
-      id: `terminal-${p.id}`,
-      label: `${p.name} — Terminal`,
-      search: `${name} terminal shell`,
-      run: () => navigate(`#/projects/${p.id}/terminal`),
-    })
-    commands.push({
-      id: `dashboard-${p.id}`,
-      label: `${p.name} — Dashboard`,
-      search: `${name} dashboard`,
-      run: () => navigate(`#/projects/${p.id}/dashboard`),
-    })
-    commands.push({
-      id: `workflows-${p.id}`,
-      label: `${p.name} — Workflows`,
-      search: `${name} workflows`,
-      run: () => navigate(`#/projects/${p.id}/workflows`),
-    })
-    commands.push({
-      id: `settings-${p.id}`,
-      label: `${p.name} — Settings`,
-      search: `${name} settings`,
-      run: () => navigate(`#/projects/${p.id}/settings`),
-    })
-    commands.push({
-      id: `create-${p.id}`,
-      label: `Create task in ${p.name}`,
-      search: `${name} create task new`,
-      run: () => navigate(`#/projects/${p.id}/create-task`),
-      action: 'create-task',
-    })
-  }
-  return commands
-}
-
-// Word-AND: every whitespace-separated token in the query must appear
-// somewhere in the command's search string.
-function matches(command: Command, query: string): boolean {
-  const tokens = query.trim().toLowerCase().split(/\s+/).filter(Boolean)
-  return tokens.every((t) => command.search.includes(t))
+  )
+  return { pages, projects: projectEntries, commands, subviews }
 }
 
 /**
- * Obsidian/VS-Code-style command palette: a centered modal opened by
- * Cmd/Ctrl+Shift+P (App.tsx) that fuzzy/substring-filters a combined list
- * of navigation + create-task commands. Escape and a backdrop click close
- * it; Up/Down move the selection, Enter runs it.
+ * Obsidian/VS-Code-style command palette: a centered modal opened by the
+ * `command-palette` chords (App.tsx) that fuzzy-matches pages, projects and
+ * commands, highlighting what matched. Escape and a backdrop click close it;
+ * Up/Down move the selection, Enter runs it, and focus goes back to where it
+ * was. An empty query lists the pages, then recent projects, then commands.
  */
-export function CommandPalette({ onClose }: { onClose: () => void }) {
-  const { data: projects } = useFetch(() => listProjects(), 'command-palette-projects')
+export function CommandPalette({
+  onClose,
+  projects,
+  statuses,
+  navHidden,
+  onToggleNav,
+  onNewProject,
+}: {
+  onClose: () => void
+  projects: Project[]
+  statuses: Map<number, ProjectStatus>
+  navHidden: boolean
+  // Null on the phone tier, which has no hide/show-sidebar command.
+  onToggleNav: (() => void) | null
+  onNewProject: () => void
+}) {
   const keymap = useKeymap()
   const [query, setQuery] = useState('')
   const [selected, setSelected] = useState(0)
   const inputRef = useRef<HTMLInputElement>(null)
   const listRef = useRef<HTMLUListElement>(null)
+  // Captured once, at open, so close can hand focus back to it.
+  const [opener] = useState(() => document.activeElement)
 
-  const commands = useMemo(() => buildCommands(projects ?? []), [projects])
-  const filtered = useMemo(
-    () => commands.filter((c) => matches(c, query)),
-    [commands, query],
+  const entries = useMemo(
+    () => buildEntries(projects, statuses, { hidden: navHidden, toggle: onToggleNav }, onNewProject),
+    [projects, statuses, navHidden, onToggleNav, onNewProject],
   )
+  const rows = useMemo(() => {
+    if (query.trim() === '') {
+      const hiddenIds = effectivelyArchivedIds(projects)
+      const live = entries.projects.filter((e) => e.tag === 'PROJECT')
+      const byId = new Map(live.map((e) => [e.id, e]))
+      const recent = recentProjects(
+        projects.filter((p) => !hiddenIds.has(p.id)),
+        loadRecent(),
+      ).flatMap((p) => byId.get(`go-${p.id}`) ?? [])
+      return [...entries.pages, ...recent, ...entries.commands].map((item) => ({
+        item,
+        indices: [] as number[],
+      }))
+    }
+    return rankItems(
+      [...entries.pages, ...entries.projects, ...entries.commands, ...entries.subviews],
+      query,
+    ).slice(0, MAX_ROWS)
+  }, [entries, projects, query])
 
   // Re-filtering drops stale selections (e.g. index 8 selected, next
   // keystroke leaves only 3 results) — always reset to the top match.
@@ -158,7 +205,13 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
 
   useEffect(() => {
     inputRef.current?.focus()
-  }, [])
+    return () => {
+      // Back to where it was — unless something else has taken focus since
+      // (the New project modal's field, say).
+      const now = document.activeElement
+      if ((now === null || now === document.body) && opener instanceof HTMLElement) opener.focus()
+    }
+  }, [opener])
 
   // Keep the selected row in view as Up/Down moves past the visible window.
   useEffect(() => {
@@ -167,16 +220,16 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
   }, [selected])
 
   function run(index: number) {
-    const command = filtered[index]
-    if (!command) return
-    command.run()
+    const row = rows[index]
+    if (!row) return
+    row.item.run()
     onClose()
   }
 
   function onKeyDown(e: React.KeyboardEvent) {
     if (e.key === 'ArrowDown') {
       e.preventDefault()
-      setSelected((s) => Math.min(s + 1, filtered.length - 1))
+      setSelected((s) => Math.min(s + 1, rows.length - 1))
     } else if (e.key === 'ArrowUp') {
       e.preventDefault()
       setSelected((s) => Math.max(s - 1, 0))
@@ -200,28 +253,41 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
           ref={inputRef}
           className="command-palette-input"
           type="text"
+          role="combobox"
+          aria-expanded="true"
+          aria-controls="command-palette-list"
+          aria-activedescendant={rows[selected] ? `command-palette-${rows[selected].item.id}` : undefined}
           value={query}
-          placeholder="Jump to a project, view, or create a task…"
+          placeholder="Jump to a project, page, or command…"
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={onKeyDown}
         />
-        <ul className="command-palette-list" ref={listRef}>
-          {filtered.length === 0 ? (
+        <ul className="command-palette-list" id="command-palette-list" role="listbox" ref={listRef}>
+          {rows.length === 0 ? (
             <li className="command-palette-empty muted">No matches.</li>
           ) : (
-            filtered.map((c, i) => (
+            rows.map(({ item: c, indices }, i) => (
               <li
                 key={c.id}
-                className={`command-palette-item${i === selected ? ' active' : ''}`}
+                id={`command-palette-${c.id}`}
+                role="option"
+                aria-selected={i === selected}
+                className={`command-palette-item${i === selected ? ' active' : ''}${c.tag === 'ARCHIVED' ? ' archived' : ''}`}
                 onMouseEnter={() => setSelected(i)}
                 onClick={() => run(i)}
               >
-                <span className="command-palette-label">{c.label}</span>
+                <span className="command-palette-label">
+                  {segments(c.label, indices).map((s, k) =>
+                    s.hit ? <mark key={k}>{s.text}</mark> : <span key={k}>{s.text}</span>,
+                  )}
+                </span>
+                {c.status && <ProjectChips status={c.status} />}
                 {c.action && (
                   <span className="command-palette-chord">
                     {(keymap[c.action] ?? []).map(chordLabel).join(' or ')}
                   </span>
                 )}
+                <span className="command-palette-tag">{c.tag}</span>
               </li>
             ))
           )}

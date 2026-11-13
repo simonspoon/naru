@@ -1806,7 +1806,7 @@ Settings that Naru's own Rust reads nothing from.
 - **An absent action ⇒ the chords Naru ships**, so defaults are never written:
   only overrides live in the file, and `PUT null` removes an entry rather than
   storing the default back. The shipped table is
-  `config::KEYMAP_ACTIONS` — `Mod+Shift+P`; `h`/`ArrowLeft`, `j`/`ArrowDown`,
+  `config::KEYMAP_ACTIONS` — `Mod+Shift+P` and `Mod+K`; `h`/`ArrowLeft`, `j`/`ArrowDown`,
   `k`/`ArrowUp`, `l`/`ArrowRight`; `a`; `Mod+Shift+L`; `Escape` — the first
   seven exactly what the app answered to before the section existed.
 - A **chord** is written modifiers-then-key, `Mod+Alt+Shift+<key>`, and stored

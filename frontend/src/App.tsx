@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { createPortal } from 'react-dom'
 import './App.css'
-import { getCcUsage, getNaruVersion, getTask, listInbox } from './api'
+import { getCcUsage, getGitStatus, getNaruVersion, getTask, listInbox, listProjects, listTasks } from './api'
 import { AgentSidebar } from './components/AgentSidebar'
 import { CustomPanel } from './components/CustomPanel'
 import { AudioAdminPanel } from './components/AudioAdminPanel'
 import { CommandPalette } from './components/CommandPalette'
+import { CreateProjectModal } from './components/CreateProjectModal'
+import { ProjectSwitcher } from './components/ProjectSwitcher'
 import { WorkflowsPanel } from './components/WorkflowsPanel'
 import { DockBar, DockLayout } from './components/DockLayout'
 import { DockSlot } from './components/DockSlot'
@@ -27,11 +29,11 @@ import { currentNavMark, subscribeNavMark } from './navMark'
 import { DoneToasts } from './components/DoneToasts'
 import { PhoneTabBar } from './components/PhoneTabBar'
 import { PtyPool } from './components/PtyPool'
-import { Sidebar } from './components/Sidebar'
+import { AmbientBadge, Sidebar } from './components/Sidebar'
 import { ccOriginFromHash, splitHashQuery } from './ccOrigin'
 import { inboxFilterFor } from './inboxFilter'
 import { unreadCount } from './inboxRead'
-import { matchesShortcut, type Keymap } from './keymap'
+import { chordLabel, matchesShortcut, shortestChord, type Keymap } from './keymap'
 import { useKeymap } from './keymapStore'
 import { rememberView } from './lastView'
 import { CCDashboardView } from './pages/CCDashboardView'
@@ -55,6 +57,9 @@ import { settingsTabFromPath } from './settingsTab'
 import { detectNativeHost } from './nativeHost'
 import { TerminalPage } from './pages/TerminalPage'
 import { isNavLinkClick, loadMainCollapsed, saveMainCollapsed } from './mainCollapse'
+import { loadNavHidden, saveNavHidden } from './navHidden'
+import { buildStatuses } from './projectStatus'
+import { recordRecent } from './recentProjects'
 import { isPhone, onPhoneTierChange, usePhoneTier } from './phoneTier'
 import { useSpatialNav } from './spatialNav'
 import { useFetch } from './useFetch'
@@ -174,8 +179,8 @@ function HeaderUsage() {
   )
 }
 
-// Cmd+Shift+P (Mac) / Ctrl+Shift+P (elsewhere) opens the command palette,
-// wherever the app is mounted — the `command-palette` action in `keymap.ts`,
+// Cmd+K or Cmd+Shift+P (Mac) / Ctrl+K or Ctrl+Shift+P (elsewhere) opens the
+// command palette, wherever the app is mounted — the `command-palette` action in `keymap.ts`,
 // which is what makes it rebindable from Settings (mesa task 1079) and folds
 // the two platforms' modifiers into one `Mod`. Always preventDefault so the
 // browser's own binding for whatever chord this is never fires underneath it.
@@ -183,6 +188,9 @@ function useCommandPaletteShortcut(onOpen: () => void, keymap: Keymap) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!matchesShortcut('command-palette', e, keymap)) return
+      // A surface that already used the key keeps it: CodeMirror's Ctrl-K
+      // (delete to line end) on a Mac, for one.
+      if (e.defaultPrevented) return
       e.preventDefault()
       onOpen()
     }
@@ -251,40 +259,57 @@ function App() {
   // The nav sidebar starts collapsed on phones (it is an overlay drawer
   // there); the agents sidebar defaults to collapsed at every width.
   const [navCollapsed, setNavCollapsed] = useState(isPhone)
-  // A panel docked in a collapsed nav is not mounted (the rail shows only the
-  // orb), so it counts as hidden there.
-  const agentsVisible = isVisible(dock.state, 'agents', navCollapsed)
-  const terminalVisible = isVisible(dock.state, 'terminal', navCollapsed)
-  const watcherVisible = isVisible(dock.state, 'watcher', navCollapsed)
-  const audioVisible = isVisible(dock.state, 'audio', navCollapsed)
-  const chatVisible = isVisible(dock.state, 'chat', navCollapsed)
-  const boardVisible = isVisible(dock.state, 'board', navCollapsed)
-  const agentTabs = useMemo(
-    () => agentPanels(dock.state).map((id) => ({ id, visible: isVisible(dock.state, id, navCollapsed) })),
-    [dock.state, navCollapsed],
+  // The desktop tiers have no rail any more (naru task 2805): the nav is
+  // either shown or gone, and gone is the default (`navHidden.ts`). That
+  // choice is its own persisted flag so the phone drawer's `navCollapsed`
+  // above, and the tier crossings that reset it, never touch it. `navOff` is
+  // the flag every desktop behaviour below reads — one name for "the nav is
+  // not on screen" on either tier — and `setNavOff` writes whichever backs it.
+  const [navHidden, setNavHiddenState] = useState(loadNavHidden)
+  const navOff = docked ? navHidden : navCollapsed
+  const setNavOff = useCallback(
+    (off: boolean) => {
+      if (docked) {
+        saveNavHidden(off)
+        setNavHiddenState(off)
+      } else setNavCollapsed(off)
+    },
+    [docked],
   )
-  // The nav's permanent orb (naru task 1798) shows in an expanded nav on the
+  // A panel docked in a hidden nav is not mounted, so it counts as hidden
+  // there.
+  const agentsVisible = isVisible(dock.state, 'agents', navOff)
+  const terminalVisible = isVisible(dock.state, 'terminal', navOff)
+  const watcherVisible = isVisible(dock.state, 'watcher', navOff)
+  const audioVisible = isVisible(dock.state, 'audio', navOff)
+  const chatVisible = isVisible(dock.state, 'chat', navOff)
+  const boardVisible = isVisible(dock.state, 'board', navOff)
+  const agentTabs = useMemo(
+    () => agentPanels(dock.state).map((id) => ({ id, visible: isVisible(dock.state, id, navOff) })),
+    [dock.state, navOff],
+  )
+  // The nav's permanent orb (naru task 1798) shows in a shown nav on the
   // dock tiers only; the phone tier keeps its floating orb. The Appearance
   // setting (naru task 2607) removes it — slot, mark and animation loop.
   const navMark = useSyncExternalStore(subscribeNavMark, currentNavMark)
-  const orbPanelShown = docked && !navCollapsed && navMark
-  // Revealing a panel that would stay hidden in a collapsed nav expands it —
+  const orbPanelShown = docked && !navOff && navMark
+  // Revealing a panel that would stay hidden in a hidden nav shows it —
   // and only then (`revealNeedsNav`), so a board push or a route change never
-  // re-expands a nav the person collapsed. The refs are the latest dock state
+  // re-shows a nav the person hid. The refs are the latest dock state
   // and collapse, so the callback below stays stable for LiveHub's effects.
   const dockStateRef = useRef(dock.state)
-  const navCollapsedRef = useRef(navCollapsed)
+  const navOffRef = useRef(navOff)
   useEffect(() => {
     dockStateRef.current = dock.state
-    navCollapsedRef.current = navCollapsed
-  }, [dock.state, navCollapsed])
+    navOffRef.current = navOff
+  }, [dock.state, navOff])
   const dockReveal = dock.reveal
   const reveal = useCallback(
     (p: PanelId) => {
-      if (revealNeedsNav(dockStateRef.current, p, navCollapsedRef.current)) setNavCollapsed(false)
+      if (revealNeedsNav(dockStateRef.current, p, navOffRef.current)) setNavOff(false)
       dockReveal(p)
     },
-    [dockReveal],
+    [dockReveal, setNavOff],
   )
   const liveDock = useMemo<LiveDock | null>(
     () =>
@@ -408,6 +433,32 @@ function App() {
     pollMs: 5000,
   })
   const unread = unreadCount(inbox)
+  // The projects and their status chips for the palette and the header's
+  // project switcher (naru task 2805), fetched here once for both — the
+  // sidebar keeps its own polls, at the same intervals. Archived projects are
+  // included: the palette keeps them reachable.
+  const { data: allProjects } = useFetch(
+    () => listProjects(true),
+    `projects-app-${navVersion}`,
+    { pollMs: 5000 },
+  )
+  const { data: statusTasks } = useFetch(
+    () =>
+      Promise.all([listTasks({ status: 'todo' }), listTasks({ status: 'in_progress' })]).then(
+        ([todo, running]) => [...todo, ...running],
+      ),
+    'status-app-tasks',
+    { pollMs: 5000 },
+  )
+  const { data: statusGit } = useFetch(() => getGitStatus(), 'status-app-git', { pollMs: 10000 })
+  const statuses = useMemo(
+    () => buildStatuses(statusTasks ?? [], statusGit ?? []),
+    [statusTasks, statusGit],
+  )
+  const [creatingProject, setCreatingProject] = useState(false)
+  const openNewProject = useCallback(() => setCreatingProject(true), [])
+  const toggleNav = useCallback(() => setNavOff(!navOff), [setNavOff, navOff])
+  const openPalette = useCallback(() => setPaletteOpen(true), [])
   // Which build am I looking at? No `pollMs`: a running server's version
   // cannot change, only a restarted one's. Pure decoration: no error branch,
   // and nothing renders until it lands (a placeholder would be noise).
@@ -557,6 +608,12 @@ function App() {
                       : projectMatch
                         ? Number(projectMatch[1])
                         : null
+
+  // Remember the project route as the latest recent one for the header's
+  // switcher (naru task 2805); ids that vanish later are skipped on read.
+  useEffect(() => {
+    if (activeProjectId !== null) recordRecent(activeProjectId)
+  }, [activeProjectId])
 
   let page
   if (settingsMatch) {
@@ -841,6 +898,7 @@ function App() {
         </div>
       )}
       <header>
+        <div className="header-left">
         <a className="brand" href="#/">
           <svg className="brand-mark" viewBox="0 0 64 64" role="img" aria-hidden="true">
             <g strokeLinecap="round">
@@ -880,6 +938,14 @@ function App() {
             )}
           </span>
         </a>
+        <ProjectSwitcher
+          projects={allProjects ?? []}
+          statuses={statuses}
+          activeProjectId={activeProjectId}
+          searchChord={chordLabel(shortestChord(keymap['command-palette']) ?? '')}
+          onSearchAll={openPalette}
+        />
+        </div>
         {/* The right cluster (mesa task 857): the live conversation's controls
             sit beside the plan-limit chips, on every page. */}
         {docked && <DockBar dock={dock} locked={locked} />}
@@ -896,6 +962,31 @@ function App() {
             {mainCollapsed ? '▣' : '◧'}
           </button>
           )}
+          {/* The header carries what the nav did, so a hidden nav loses
+              nothing (naru task 2805): the Ambient "listening" badge while it
+              is hidden, and always the Inbox with its unread count and the
+              way into the palette. The Inbox link is hidden on the phone
+              tier, where the tab bar has the badge. */}
+          {docked && navOff && <AmbientBadge compact active={ambientMatch !== null} />}
+          <a
+            className={`header-inbox${inboxMatch !== null ? ' active' : ''}`}
+            href="#/inbox"
+            title="Inbox"
+          >
+            Inbox
+            {unread > 0 && <span className="inbox-badge">{unread}</span>}
+          </a>
+          <button
+            type="button"
+            className="header-hint"
+            title="Go to a project, page or command"
+            onClick={openPalette}
+          >
+            Go to
+            <span className="header-hint-kbd">
+              {chordLabel(shortestChord(keymap['command-palette']) ?? '')}
+            </span>
+          </button>
           {/* A `collapse-sidebars` turn moves both panels at once (task 859):
               the conversation asked for room, and "the sidebars" is the pair.
               Both flags live here already — the phone tab bar writes the same
@@ -903,11 +994,11 @@ function App() {
           <LiveHub
             slot={docked ? null : liveSlot}
             dock={liveDock}
-            navCollapsed={navCollapsed}
+            navCollapsed={navOff}
             agentsCollapsed={docked ? !agentsVisible : agentsCollapsed}
             activeProjectId={activeProjectId}
             onSidebars={(collapsed) => {
-              setNavCollapsed(collapsed)
+              setNavOff(collapsed)
               if (!docked) setAgentsCollapsed(collapsed)
               // Docked, "closing the agents panel" is closing the panel, which
               // remembers its spot for the expand that follows.
@@ -924,6 +1015,10 @@ function App() {
           if (!docked && mainCollapsed && isNavLinkClick(e.target)) setMainCollapsed(false)
         }}
       >
+        {/* Not rendered at all while hidden on a desktop tier, so its four
+            polls stop with it (naru task 2805). The phone tier always mounts
+            it: the drawer is a CSS toggle there. */}
+        {!(docked && navHidden) && (
         <Sidebar
           activeProjectId={activeProjectId}
           inboxFilter={inboxFilter}
@@ -937,18 +1032,19 @@ function App() {
           ccTab={ccTab}
           version={navVersion}
           unread={unread}
-          collapsed={navCollapsed}
-          onCollapsedChange={setNavCollapsed}
+          collapsed={navOff}
+          onCollapsedChange={setNavOff}
           orb={docked && navMark ? <NavOrb /> : undefined}
           dockZone={
             docked ? <NavZone state={dock.state} update={dock.update} locked={locked} /> : undefined
           }
           rail={
             docked ? (
-              <NavRail state={dock.state} navCollapsed={navCollapsed} unread={unread} onReveal={reveal} onExpand={() => setNavCollapsed(false)} />
+              <NavRail state={dock.state} navCollapsed={navOff} unread={unread} onReveal={reveal} onExpand={() => setNavOff(false)} />
             ) : undefined
           }
         />
+        )}
         {docked ? (
           <div className="dock-area">
             <DockLayout state={dock.state} update={dock.update} locked={locked} />
@@ -1047,7 +1143,27 @@ function App() {
         onNavOpenChange={(open) => setNavCollapsed(!open)}
         onAgentsOpenChange={(open) => setAgentsCollapsed(!open)}
       />
-      {paletteOpen && <CommandPalette onClose={() => setPaletteOpen(false)} />}
+      {paletteOpen && (
+        <CommandPalette
+          onClose={() => setPaletteOpen(false)}
+          projects={allProjects ?? []}
+          statuses={statuses}
+          navHidden={navOff}
+          onToggleNav={docked ? toggleNav : null}
+          onNewProject={openNewProject}
+        />
+      )}
+      {/* Hosted here, not in the sidebar, so "New project" works with the
+          sidebar hidden; the sidebar refetches off `navVersion`. */}
+      {creatingProject && (
+        <CreateProjectModal
+          onClose={() => setCreatingProject(false)}
+          onCreated={() => {
+            setCreatingProject(false)
+            setNavVersion((v) => v + 1)
+          }}
+        />
+      )}
     </>
   )
 }

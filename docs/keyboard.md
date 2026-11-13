@@ -16,7 +16,7 @@ page's.
 | `h` `j` `k` `l` | `focus-*` | global | Move native DOM focus left / down / up / right |
 | `←` `↓` `↑` `→` | `focus-*` | global | Same as `hjkl` |
 | `Enter` | — | global | Activates the focused element (native browser behavior) |
-| `Cmd/Ctrl+Shift+P` | `command-palette` | global | Command palette |
+| `Cmd/Ctrl+K`, `Cmd/Ctrl+Shift+P` | `command-palette` | global | Command palette (naru task 2805: two shipped chords; a rebind replaces both, so a keymap that stored only the old chord keeps just that one; a chord whose keydown a surface already `preventDefault`ed — CodeMirror's Ctrl-K on a Mac — is left to it) |
 | `Cmd/Ctrl+Shift+L` | `live-listen` | global | Opens and shuts the microphone during a live conversation (task 887) |
 | `Escape` | `live-cancel` | live conversation, joined | Drops what the microphone heard and has not sent, and mutes it; again to resume its own mute (task 1354, `docs/live.md`) — any other Escape owner wins |
 | `Cmd/Ctrl+F` | — | Files tab, focused pane, findable file | Opens find-in-file, selecting the remembered query (task 809) |
@@ -117,6 +117,16 @@ was nowhere to *state* what Naru binds and nothing to rebind.
   read from the same store — so the palette and the keyboard can never
   disagree. Rows that are plain navigation show nothing; an invented chord
   would be worse than none.
+- The palette (naru task 2805) fuzzy-matches (`paletteSearch.ts`: subsequence,
+  prefix / word-start / contiguous beat scattered, matched characters in
+  `<mark>`) over pages, every project (archived ones last, tagged `ARCHIVED`),
+  and commands (Show/Hide sidebar on desktop tiers, New project, Live
+  conversation, per-project sub-views and Create task, which rank below the
+  project row and appear only once something is typed). An empty query lists
+  pages, recent projects, then commands. Focus returns to the opener on close.
+  The header's "Go to" hint and the project switcher's "Search all…" row show
+  the palette's shortest chord (`shortestChord`). The switcher's dropdown
+  claims its own arrows/Home/End/Escape before the window listeners.
 
 Unit tests: `frontend/src/keymap.test.ts` (defaults, matching, recording,
 conflicts, the resolve fallback) and `frontend/src/keymapDraft.test.ts` (the

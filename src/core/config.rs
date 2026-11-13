@@ -4693,7 +4693,7 @@ fn validate_guard(key: &str, value: &serde_json::Value) -> Result<(), String> {
 /// to one surface that is on screen, which is a different thing from a binding
 /// the whole app answers to.
 pub const KEYMAP_ACTIONS: &[(&str, &[&str])] = &[
-    ("command-palette", &["Mod+Shift+P"]),
+    ("command-palette", &["Mod+Shift+P", "Mod+K"]),
     ("focus-left", &["h", "ArrowLeft"]),
     ("focus-down", &["j", "ArrowDown"]),
     ("focus-up", &["k", "ArrowUp"]),
@@ -9112,7 +9112,7 @@ mod tests {
     fn the_shipped_keymap_is_todays_behaviour() {
         assert_eq!(
             keymap_default("command-palette"),
-            Some(&["Mod+Shift+P"][..])
+            Some(&["Mod+Shift+P", "Mod+K"][..])
         );
         assert_eq!(keymap_default("focus-left"), Some(&["h", "ArrowLeft"][..]));
         assert_eq!(keymap_default("focus-down"), Some(&["j", "ArrowDown"][..]));
@@ -9155,7 +9155,10 @@ mod tests {
             assert!(view.actions.iter().all(|a| a.value.is_none()));
             let palette = &view.actions[0];
             assert_eq!(palette.action, "command-palette");
-            assert_eq!(palette.default, vec!["Mod+Shift+P".to_string()]);
+            assert_eq!(
+                palette.default,
+                vec!["Mod+Shift+P".to_string(), "Mod+K".to_string()]
+            );
         }
 
         let path = write_config(dir.path(), r#"{"commands": {}}"#);

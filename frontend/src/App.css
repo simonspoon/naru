@@ -104,6 +104,253 @@ header {
   margin-top: 0.2rem;
 }
 
+/* The brand and the project switcher (naru task 2805) sit together on the
+   left; `min-width: 0` lets a long project name truncate instead of pushing
+   the right cluster off the screen. */
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  min-width: 0;
+}
+
+/* Project status chips (naru task 2805): queued (outlined) and running
+   (filled) counts, a non-default branch, and a dot for unsaved work. Shared by
+   the palette rows, the switcher chip and its dropdown. */
+.pstat {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex: none;
+}
+
+.pstat-chip {
+  min-width: 1.5rem;
+  padding: 0 0.45rem;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 700;
+  line-height: 1.4rem;
+  text-align: center;
+  text-shadow: none;
+}
+
+.pstat-q {
+  border: 1.5px solid var(--cyan);
+  color: var(--cyan);
+}
+
+.pstat-run {
+  background: var(--green);
+  color: var(--on-accent);
+}
+
+.pstat-br {
+  max-width: 9rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 0 0.35rem;
+  border: 1.5px solid var(--amber);
+  border-radius: 6px;
+  color: var(--amber);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  line-height: 1.2rem;
+  text-shadow: none;
+}
+
+.pstat-dot {
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 50%;
+  background: var(--amber);
+  flex: none;
+}
+
+.project-switcher {
+  position: relative;
+  min-width: 0;
+}
+
+.project-switcher-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+  max-width: 24rem;
+  min-height: 2.2rem;
+  padding: 0 0.7rem;
+  border: 1.5px solid var(--cyan);
+  border-radius: 10px;
+  clip-path: none;
+  background: rgba(var(--cyan-rgb), 0.12);
+  box-shadow: none;
+  color: var(--text-h);
+  font-family: var(--font-sans);
+  font-size: 1rem;
+  font-weight: 700;
+  text-transform: none;
+  letter-spacing: normal;
+  cursor: pointer;
+}
+
+.project-switcher-chip:hover,
+.project-switcher-chip.open {
+  background: rgba(var(--cyan-rgb), 0.2);
+  box-shadow: none;
+}
+
+.project-switcher-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-switcher-caret {
+  flex: none;
+  color: var(--cyan);
+  font-size: 0.8rem;
+}
+
+.project-switcher-menu {
+  position: absolute;
+  top: calc(100% + 0.4rem);
+  left: 0;
+  z-index: 1100;
+  width: 20rem;
+  max-width: 90vw;
+  padding: 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: var(--panel);
+  border: 1.5px solid var(--cyan);
+  border-radius: var(--r-md);
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.5);
+}
+
+.project-switcher-heading {
+  padding: 0.2rem 0.5rem;
+  color: var(--cyan);
+  font-size: 0.75rem;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+}
+
+.project-switcher-empty {
+  padding: 0.3rem 0.5rem;
+  margin: 0;
+}
+
+.project-switcher-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  width: 100%;
+  min-height: 2.3rem;
+  padding: 0 0.6rem;
+  border: none;
+  border-left: 3px solid transparent;
+  border-radius: 9px;
+  clip-path: none;
+  background: none;
+  box-shadow: none;
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 1rem;
+  font-weight: 650;
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.project-switcher-row:hover,
+.project-switcher-row:focus-visible {
+  background: var(--surface-hover);
+  box-shadow: none;
+  color: var(--cyan);
+}
+
+.project-switcher-row.active {
+  border-left-color: var(--cyan);
+  background: rgba(var(--cyan-rgb), 0.12);
+}
+
+.project-switcher-row-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-switcher-search {
+  margin-top: 0.2rem;
+  color: var(--muted);
+}
+
+.project-switcher-kbd,
+.header-hint-kbd {
+  padding: 0.05rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+}
+
+/* Header-right, nav hidden (naru task 2805): the Inbox link with its unread
+   badge, and the "Go to ⌘K" hint that opens the palette. */
+.header-inbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-height: 2.2rem;
+  padding: 0 0.5rem;
+  color: var(--text);
+  font-size: 0.95rem;
+  font-weight: 650;
+  text-decoration: none;
+}
+
+.header-inbox:hover,
+.header-inbox.active {
+  color: var(--cyan);
+}
+
+.header-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 2.2rem;
+  padding: 0 0.7rem;
+  border: 1.5px solid var(--border);
+  border-radius: 10px;
+  clip-path: none;
+  background: var(--bg);
+  box-shadow: none;
+  color: var(--muted);
+  font-family: var(--font-sans);
+  font-size: 0.95rem;
+  font-weight: 650;
+  text-transform: none;
+  letter-spacing: normal;
+  cursor: pointer;
+}
+
+.header-hint:hover {
+  color: var(--cyan);
+  box-shadow: none;
+}
+
+/* The ambient badge reuses the nav's markup; in the header it is just a dot. */
+.header-right .ambient-badge {
+  width: auto;
+  padding: 0 0.4rem;
+}
+
 /* App shell: header on top, then sidebar + full-width main. Fills the
    viewport-locked `#root` (index.css) and never scrolls itself — `main`
    scrolls internally instead, so the two sticky sidebars are height-bounded
@@ -7217,7 +7464,7 @@ body.live-panel-ratio-resizing {
   }
 }
 
-/* Command palette (Cmd/Ctrl+Shift+P): a centered modal above every other
+/* Command palette (Cmd/Ctrl+K or Cmd/Ctrl+Shift+P): a centered modal above every other
    overlay in the app — higher than the full-window takeovers (1000)
    and the phone sidebar drawer (1200). */
 .command-palette-backdrop {
@@ -7232,7 +7479,7 @@ body.live-panel-ratio-resizing {
 }
 
 .command-palette {
-  width: min(32rem, 90vw);
+  width: min(40rem, 90vw);
   max-height: 70vh;
   background: var(--panel);
   border: 1px solid var(--border);
@@ -7245,7 +7492,7 @@ body.live-panel-ratio-resizing {
 .command-palette-input {
   border: none;
   border-bottom: 1px solid var(--hairline);
-  font-size: 1rem;
+  font-size: 1.15rem;
   padding: 0.75rem 1rem;
 }
 
@@ -7262,12 +7509,13 @@ body.live-panel-ratio-resizing {
 
 .command-palette-item {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   gap: 0.75rem;
+  min-height: 2.4rem;
   padding: 0.4rem 0.6rem;
   cursor: pointer;
-  font-size: 0.9rem;
+  font-size: 1.05rem;
 }
 
 /* The chord this row is also reachable by (mesa task 1079), right-aligned so
@@ -7278,6 +7526,36 @@ body.live-panel-ratio-resizing {
   color: var(--muted);
   font-family: var(--font-mono);
   font-size: 0.72rem;
+}
+
+/* Right-hand kind of the row (naru task 2805). */
+.command-palette-tag {
+  flex: none;
+  min-width: 4.5rem;
+  text-align: right;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+}
+
+.command-palette-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The matched characters. */
+.command-palette-label mark {
+  background: none;
+  color: var(--cyan);
+  font-weight: 850;
+}
+
+.command-palette-item.archived {
+  opacity: 0.65;
 }
 
 .command-palette-item.active {
@@ -10888,6 +11166,56 @@ body.live-panel-ratio-resizing .live-panel-divider {
     flex-wrap: wrap;
     row-gap: 0.3rem;
     padding: 0.5rem 0.75rem;
+  }
+
+  /* The hint and the Inbox link are desktop furniture: the tab bar has the
+     Inbox badge, and the palette is not a thumb gesture (naru task 2805). The
+     switcher keeps a compact name chip without its status chips. */
+  .header-hint,
+  .header-inbox {
+    display: none;
+  }
+
+  .header-left {
+    gap: 0.6rem;
+    flex: 1 1 auto;
+  }
+
+  .project-switcher-chip {
+    max-width: 42vw;
+    min-height: 2rem;
+    font-size: 0.9rem;
+  }
+
+  .project-switcher-chips {
+    display: none;
+  }
+
+  .project-switcher-menu {
+    position: fixed;
+    top: 3.2rem;
+    left: 0.75rem;
+    right: 0.75rem;
+    width: auto;
+    max-width: none;
+  }
+
+  .project-switcher-row {
+    min-height: 2.75rem;
+  }
+
+  /* Full width, rows at least 44px tall. */
+  .command-palette {
+    width: 100vw;
+    max-height: 80vh;
+  }
+
+  .command-palette-backdrop {
+    padding-top: 4vh;
+  }
+
+  .command-palette-item {
+    min-height: 2.75rem;
   }
 
   /* `flex: none` (the desktop rule) makes this box as wide as its content, so
