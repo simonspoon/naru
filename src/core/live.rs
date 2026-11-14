@@ -400,7 +400,8 @@ const RECOVERY_TURNS_MAX: usize = 200;
 /// session, oldest first, inside a `<<<DATA … DATA>>>` fence as untrusted data
 /// (naru task 2012). Bounded to [`RECOVERY_TURNS_MAX`] turns, and the whole
 /// prompt to `llm::AGENT_PROMPT_MAX` bytes (naru task 2811), dropping the
-/// oldest.
+/// oldest with an "(N earlier turns omitted)" line (naru task 2813); a newest
+/// turn over the whole budget keeps its tail, marked as cut.
 pub fn recovery_note_prompt(turns: &[crate::core::LiveTurn], what: &str) -> String {
     let frame = |log: &str| {
         format!(
@@ -414,28 +415,55 @@ pub fn recovery_note_prompt(turns: &[crate::core::LiveTurn], what: &str) -> Stri
     };
     let budget = crate::core::llm::AGENT_PROMPT_MAX.saturating_sub(frame("").len());
     let start = turns.len().saturating_sub(RECOVERY_TURNS_MAX);
-    let mut kept: Vec<String> = Vec::new();
-    let mut used = 0;
-    for t in turns[start..].iter().rev() {
-        let mut line = format!("#{} {}", t.id, turn_line(t)).replace("DATA>>>", "DATA >>>");
-        // Every kept line but the first costs its "\n" separator.
-        let sep = usize::from(!kept.is_empty());
-        if used + sep + line.len() > budget {
-            if !kept.is_empty() {
-                break;
+    let lines: Vec<String> = turns[start..]
+        .iter()
+        .map(|t| format!("#{} {}", t.id, turn_line(t)).replace("DATA>>>", "DATA >>>"))
+        .collect();
+    // Newest first until the budget is spent. A newest turn over the whole
+    // budget keeps its tail (where a promise sits), marked as cut.
+    let fit = |budget: usize| {
+        let mut kept: Vec<String> = Vec::new();
+        let mut used = 0;
+        for line in lines.iter().rev() {
+            let mut line = line.clone();
+            // Every kept line but the first costs its "\n" separator.
+            let sep = usize::from(!kept.is_empty());
+            if used + sep + line.len() > budget {
+                if !kept.is_empty() {
+                    break;
+                }
+                let id_len = line.find(' ').map_or(0, |i| i + 1);
+                let head = format!("{}{CUT_MARK}", &line[..id_len]);
+                let room = budget.saturating_sub(head.len());
+                let from = (line.len().saturating_sub(room)..=line.len())
+                    .find(|i| line.is_char_boundary(*i) && *i >= id_len)
+                    .unwrap_or(line.len());
+                line = format!("{head}{}", &line[from..]);
             }
-            let cut = (0..=budget.min(line.len()))
-                .rev()
-                .find(|i| line.is_char_boundary(*i))
-                .unwrap_or(0);
-            line.truncate(cut);
+            used += sep + line.len();
+            kept.push(line);
         }
-        used += sep + line.len();
-        kept.push(line);
+        kept.reverse();
+        kept
+    };
+    let mut kept = fit(budget);
+    // Anything missing (turns past the window count too) or cut is said so,
+    // inside the byte budget: the notice is reserved, then the fit redone.
+    let missing = |kept: &[String]| turns.len() - kept.len();
+    if missing(&kept) > 0 || kept.iter().any(|l| l.contains(CUT_MARK)) {
+        let notice_room = format!("({} earlier turns omitted)\n", turns.len()).len();
+        kept = fit(budget.saturating_sub(notice_room));
     }
-    kept.reverse();
-    frame(&kept.join("\n"))
+    let mut log = String::new();
+    if missing(&kept) > 0 {
+        log = format!("({} earlier turns omitted)\n", missing(&kept));
+    }
+    log.push_str(&kept.join("\n"));
+    frame(&log)
 }
+
+/// Marks a recovery-note turn whose start was cut to fit the prompt budget.
+const CUT_MARK: &str = "[start of this turn cut] ";
 
 /// The one tool-less haiku call behind a crash-recovery note. Takes the prompt
 /// ([`recovery_note_prompt`]), not a store, so the caller holds no store lock
@@ -3128,6 +3156,49 @@ question is a task, not a note",
         )];
         let p = recovery_note_prompt(&huge, RECYCLE_WHAT);
         assert!(p.len() <= crate::core::llm::AGENT_PROMPT_MAX && p.contains("#7 "));
+        assert!(p.contains(CUT_MARK) && !p.contains("earlier turns omitted"));
+    }
+
+    #[test]
+    fn recovery_note_prompt_says_what_it_dropped_and_stays_in_budget() {
+        use crate::core::llm::AGENT_PROMPT_MAX as MAX;
+        let t = |id, text: &str| sample_turn(id, crate::core::LiveRole::User, text);
+        // Nothing dropped: no notice.
+        let p = recovery_note_prompt(&[t(1, "a"), t(2, "b")], "crashed");
+        assert!(!p.contains("omitted") && !p.contains(CUT_MARK));
+        // 2000 short turns: only the window survives, and it says so.
+        let short: Vec<_> = (1..=2000).map(|i| t(i, "ok")).collect();
+        let p = recovery_note_prompt(&short, "crashed");
+        assert!(
+            p.len() <= MAX && p.contains("(1800 earlier turns omitted)"),
+            "{p}"
+        );
+        // Oversize newest turns (ASCII and emoji) keep their tail.
+        for unit in ["x", "😀"] {
+            let mut text = unit.repeat(200_000);
+            text.push_str("TAILEND");
+            let p = recovery_note_prompt(&[t(9, &text)], "crashed");
+            assert!(p.len() <= MAX && p.contains("TAILEND\n"), "{}", p.len());
+            assert!(p.contains(CUT_MARK) && !p.contains("earlier turns omitted"));
+        }
+        // Exactly at the limit nothing is dropped; one byte over drops the older turn.
+        let probe = recovery_note_prompt(&[t(2, "")], "crashed");
+        let line_len = format!("#2 {}", turn_line(&t(2, ""))).len();
+        let fill = MAX - probe.len();
+        let at = t(2, &"y".repeat(fill));
+        assert_eq!(format!("#2 {}", turn_line(&at)).len(), line_len + fill);
+        let p = recovery_note_prompt(std::slice::from_ref(&at), "crashed");
+        assert_eq!(p.len(), MAX);
+        assert!(!p.contains("omitted") && !p.contains(CUT_MARK));
+        let over = t(2, &"y".repeat(fill + 1));
+        let p = recovery_note_prompt(std::slice::from_ref(&over), "crashed");
+        assert!(p.len() <= MAX && p.contains(CUT_MARK));
+        let p = recovery_note_prompt(&[t(1, "older"), at], "crashed");
+        assert!(
+            p.len() <= MAX && p.contains("(1 earlier turns omitted)"),
+            "{}",
+            p.len()
+        );
     }
 
     #[test]
