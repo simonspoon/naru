@@ -5849,6 +5849,20 @@ fn did_you_mean(err: &clap::Error, args: &[std::ffi::OsString]) -> Option<String
         [best, next, ..] if distance(best) < distance(next) => best.clone(),
         _ => return None,
     };
+    // clap's similarity score is loose (`retire` -> `restore`, the opposite
+    // command), so only a near miss is offered: one wrong, missing or extra
+    // character, a cut-short word (`--desc`), or swapped letters (`shwo`).
+    let sorted = |s: &str| {
+        let mut c: Vec<char> = s.chars().collect();
+        c.sort_unstable();
+        c
+    };
+    if edit_distance(&invalid, &suggested) > 1
+        && !suggested.starts_with(&invalid)
+        && sorted(&invalid) != sorted(&suggested)
+    {
+        return None;
+    }
     // clap does not report where on the command line the bad token sat, so the
     // first word equal to it is the one replaced.
     let mut swapped = false;
@@ -10629,6 +10643,58 @@ mod tests {
     };
     use crate::core::{DiffStat, GitCommit, LiveContext, LiveContextKind, LiveWindow};
     use crate::core::{RetroFinding, RetroRun, RetroStatus};
+
+    /// `did_you_mean` offers a near miss and drops a far or opposite guess.
+    #[test]
+    fn did_you_mean_only_near_misses() {
+        let suggest = |line: &str| {
+            let args: Vec<std::ffi::OsString> = std::iter::once("naru")
+                .chain(line.split(' '))
+                .map(Into::into)
+                .collect();
+            let err = parse_args(&args).err().unwrap();
+            did_you_mean(&err, &args)
+        };
+        let kept = [
+            ("task creat 2 x", "naru task create 2 x"),
+            ("task lst", "naru task list"),
+            ("task serch x", "naru task search x"),
+            ("task shwo 1", "naru task show 1"),
+            ("task udpate 1", "naru task update 1"),
+            ("taks list", "naru task list"),
+            ("projects list", "naru project list"),
+            ("memory restor 5", "naru memory restore 5"),
+            ("memory delet 5", "naru memory delete 5"),
+            ("task list --stat todo", "naru task list --status todo"),
+            ("task list --sttaus todo", "naru task list --status todo"),
+            ("task list --proj 2", "naru task list --project 2"),
+            (
+                "task create 2 x --desc y",
+                "naru task create 2 x --description y",
+            ),
+            (
+                "task list --project=2 --stat=todo",
+                "naru task list --project=2 --status=todo",
+            ),
+            ("task show 1 --quit", "naru task show 1 --quiet"),
+        ];
+        for (line, want) in kept {
+            assert_eq!(suggest(line).as_deref(), Some(want), "{line}");
+        }
+        for line in [
+            "memory retire 5",
+            "memory retir 5",
+            "memory remove 5",
+            "memory forget 5",
+            "task complete 1",
+            "task start 1",
+            "task edit 1",
+            "task remove 1",
+            "task list --priorty high",
+        ] {
+            assert_eq!(suggest(line), None, "{line}");
+        }
+    }
 
     /// Parse `naru task create <args>` and resolve its positionals.
     fn create_resolved(args: &[&str]) -> Result<(String, Option<String>)> {
