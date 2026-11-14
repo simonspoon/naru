@@ -485,7 +485,7 @@ export function SettingsView({ tab }: { tab: SettingsTab }) {
       )}
       <div hidden={tab !== 'system'}>
         <ServeSection />
-        <SystemSection />
+        {tab === 'system' && <SystemSection />}
       </div>
     </div>
   )
