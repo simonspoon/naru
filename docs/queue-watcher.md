@@ -341,7 +341,12 @@ because someone ran `mesa serve`.
       answer), and its `in_progress` would otherwise hold the project's queue
       slot. The task goes to `backlog` with its claim dropped and a task note
       saying why, one alert per job id says the same, and the next pass stops
-      the idle session as for any task that left `in_progress`. If the task
+      the idle session as for any task that left `in_progress`. When the
+      task has an open `question` ask (naru task 2818), the note and alert
+      also name it — its id, the first line of its body cut to 120
+      characters, and `naru ask answer <id>` then re-queue — and, when a live
+      session is current, one live result says the task was parked (waiting
+      on a question, or with nothing running); both happen once, at the park. If the task
       moved meanwhile or the write fails, the old alert (the agent looks
       stalled, `claude attach <id>`) is filed instead and the entry kept.
     - **Stall watchdog** (naru task 1953). The same silence clock, but at

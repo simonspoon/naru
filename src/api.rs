@@ -2629,9 +2629,12 @@ fn requeue_abandoned(state: &AppState, task_id: i64, job_id: &str) -> Abandoned 
 /// `backlog` (naru task 2400): an agent that finished its work and waits on
 /// the person — a release tag, an answer — would otherwise hold the project's
 /// queue slot until someone moved it by hand. The move drops the claim
-/// (`update_task`) and a note says why. Re-checked under the store lock; `false` (the task moved
-/// meanwhile, or a write failed) leaves the plain stalled alert to be filed.
-fn park_stalled(state: &AppState, task_id: i64, job_id: &str) -> bool {
+/// (`update_task`) and a note says why. Re-checked under the store lock.
+/// Returns the note and alert body, or `None` (the task moved meanwhile, or a
+/// write failed) to leave the plain stalled alert to be filed. On a park the
+/// body names the task's open question, if any (naru task 2818), and one
+/// live result tells the live agent; a park happens once, so this does too.
+fn park_stalled(state: &AppState, task_id: i64, job_id: &str) -> Option<String> {
     let mut store = match state.store.lock() {
         Ok(s) => s,
         Err(e) => e.into_inner(),
@@ -2640,17 +2643,54 @@ fn park_stalled(state: &AppState, task_id: i64, job_id: &str) -> bool {
         .get_task(task_id)
         .is_ok_and(|t| t.status == Status::InProgress)
     {
-        return false;
+        return None;
     }
     let patch = TaskPatch {
         status: Some(Status::Backlog),
         ..Default::default()
     };
     if store.update_task(task_id, &patch).is_err() {
-        return false;
+        return None;
     }
-    let _ = store.add_task_note(task_id, &reaper_parked_idle_body(job_id, task_id), None);
-    true
+    let question = store
+        .list_questions(Some("open"), Some("question"), false)
+        .unwrap_or_default()
+        .into_iter()
+        .find(|q| q.task_id == Some(task_id));
+    let mut body = reaper_parked_idle_body(job_id, task_id);
+    if let Some(q) = &question {
+        body.push(' ');
+        body.push_str(&reaper_open_question_sentence(q));
+    }
+    let _ = store.add_task_note(task_id, &body, None);
+    if matches!(store.current_live_session(), Ok(Some(_))) {
+        let tail = if question.is_some() {
+            "it is waiting on your answer to a question"
+        } else {
+            "with nothing running"
+        };
+        let _ = store.add_live_result(&format!(
+            "Task {task_id} was parked in backlog after an hour idle; {tail}."
+        ));
+    }
+    Some(body)
+}
+
+/// The sentence a park appends when the task has an open question.
+fn reaper_open_question_sentence(q: &crate::core::AgentQuestion) -> String {
+    let first = q.body.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+    let first = first.trim();
+    let shown: String = first.chars().take(120).collect();
+    let dots = if first.chars().count() > 120 {
+        "…"
+    } else {
+        ""
+    };
+    format!(
+        "The task has an open question, ask {}: \"{shown}{dots}\". Answer it with \
+         `naru ask answer {} \"<answer>\"`, then queue the task again.",
+        q.id, q.id
+    )
 }
 
 /// The note and alert for a task [`park_stalled`] moved to `backlog`.
@@ -2968,12 +3008,12 @@ fn todo_reaper_tick(state: &AppState) {
                 }
             }
             ReapVerdict::AlertStalled => {
-                let body = if park_stalled(state, task_id, &job_id) {
+                let body = if let Some(body) = park_stalled(state, task_id, &job_id) {
                     eprintln!(
                         "queue-watcher: session {job_id} idle for an hour on task {task_id}; \
                          parked it in backlog"
                     );
-                    reaper_parked_idle_body(&job_id, task_id)
+                    body
                 } else {
                     reaper_stalled_body(&job_id, task_id)
                 };
@@ -22465,6 +22505,196 @@ exit 2
             unsafe { std::env::remove_var("MESA_WATCH_TODO_STALL_MS") };
             unsafe { std::env::remove_var("MESA_CLAUDE_BIN") };
         });
+    }
+
+    /// Drains the live results of the current live session (naru task 2818).
+    fn live_results(state: &AppState) -> Vec<String> {
+        let mut store = state.store.lock().unwrap();
+        let Some(session) = store.current_live_session().unwrap() else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        while let Some(r) = store.next_live_result(session.id).unwrap() {
+            out.push(r.text);
+        }
+        out
+    }
+
+    /// Parks an hour-idle task through the reaper after `setup` ran against
+    /// it; returns the task, its park note, and the inbox body (naru task 2818).
+    fn park_idle_task(
+        setup: impl FnOnce(&AppState, i64),
+        live: bool,
+        check: impl FnOnce(&AppState, i64, String, String, Vec<String>),
+    ) {
+        // SAFETY: ENV_LOCK, as above.
+        let _env = attachments::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::core::library::test_home::with_home_dir(|_| {
+            let stub_dir = tempfile::tempdir().unwrap();
+            let agents_file = stub_dir.path().join("agents.json");
+            let stop_log = stub_dir.path().join("stops.log");
+            let bin = stub_claude_reaper(stub_dir.path(), &agents_file, &stop_log);
+            unsafe { std::env::set_var("MESA_CLAUDE_BIN", &bin) };
+            unsafe { std::env::set_var("MESA_WATCH_TODO_STALL_MS", "864000000") };
+
+            let (_dir, state) = test_state();
+            let project = new_project(&state, None);
+            let task = new_task(&state, project);
+            set_status(&state, task, Status::InProgress);
+            state
+                .store
+                .lock()
+                .unwrap()
+                .claim_task(task, "agent-1", false)
+                .unwrap();
+            if live {
+                state
+                    .store
+                    .lock()
+                    .unwrap()
+                    .start_live_session(None)
+                    .unwrap();
+            }
+            setup(&state, task);
+            seed_dispatch(&state, "job0001", task);
+            std::fs::write(
+                &agents_file,
+                agents_listing("job0001", Some(4242), Some("idle")),
+            )
+            .unwrap();
+            backdate(&state, "job0001", REAP_STALL_AFTER, |d, then| {
+                d.idle_since = Some(then)
+            });
+            todo_reaper_tick(&state);
+            todo_reaper_tick(&state);
+            let (note, inbox) = {
+                let store = state.store.lock().unwrap();
+                let note = store
+                    .list_task_notes(task)
+                    .unwrap()
+                    .into_iter()
+                    .find(|n| n.body.contains("moved to backlog"))
+                    .map(|n| n.body)
+                    .unwrap_or_default();
+                let inbox = store.list_inbox_items(None).unwrap()[0].body.clone();
+                (note, inbox)
+            };
+            let results = live_results(&state);
+            check(&state, task, note, inbox, results);
+
+            unsafe { std::env::remove_var("MESA_WATCH_TODO_STALL_MS") };
+            unsafe { std::env::remove_var("MESA_CLAUDE_BIN") };
+        });
+    }
+
+    #[test]
+    fn reaper_park_names_the_tasks_open_question_and_tells_the_live_agent() {
+        let long = format!(
+            "Which release channel should this ship on?\nsecond line\n{}",
+            "x".repeat(200)
+        );
+        park_idle_task(
+            move |state, task| {
+                // Not named: another task's, an answered one, a notice.
+                let project = state
+                    .store
+                    .lock()
+                    .unwrap()
+                    .get_task(task)
+                    .unwrap()
+                    .project_id;
+                let other = new_task(state, project);
+                let mut store = state.store.lock().unwrap();
+                store
+                    .add_question("other task question", Some(other), None, "question", &[])
+                    .unwrap();
+                let a = store
+                    .add_question("answered one", Some(task), None, "question", &[])
+                    .unwrap();
+                store.answer_question(a.id, "yes").unwrap();
+                store
+                    .add_question("just a notice", Some(task), None, "notice", &[])
+                    .unwrap();
+                store
+                    .add_question(&long, Some(task), None, "question", &[])
+                    .unwrap();
+            },
+            true,
+            |state, task, note, inbox, results| {
+                let qid = state
+                    .store
+                    .lock()
+                    .unwrap()
+                    .list_questions(Some("open"), Some("question"), false)
+                    .unwrap()
+                    .into_iter()
+                    .find(|q| q.task_id == Some(task))
+                    .unwrap()
+                    .id;
+                for body in [&note, &inbox] {
+                    assert!(body.contains(&format!("ask {qid}")), "{body}");
+                    assert!(
+                        body.contains("Which release channel should this ship on?"),
+                        "{body}"
+                    );
+                    assert!(!body.contains("second line"), "{body}");
+                    assert!(!body.contains(&"x".repeat(120)), "{body}");
+                    assert!(body.contains(&format!("naru ask answer {qid}")), "{body}");
+                    assert!(!body.contains("answered one") && !body.contains("just a notice"));
+                    assert!(!body.contains("other task question"));
+                }
+                assert_eq!(note, inbox);
+                assert_eq!(
+                    results,
+                    vec![format!(
+                        "Task {task} was parked in backlog after an hour idle; it is waiting on your answer to a question."
+                    )]
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn reaper_park_without_an_open_question_keeps_the_old_body_and_says_nothing_running() {
+        park_idle_task(
+            |state, task| {
+                let mut store = state.store.lock().unwrap();
+                let a = store
+                    .add_question("answered one", Some(task), None, "question", &[])
+                    .unwrap();
+                store.answer_question(a.id, "yes").unwrap();
+            },
+            true,
+            |_state, task, note, inbox, results| {
+                let expected = reaper_parked_idle_body("job0001", task);
+                assert_eq!(note, expected);
+                assert_eq!(inbox, expected);
+                assert_eq!(
+                    results,
+                    vec![format!(
+                        "Task {task} was parked in backlog after an hour idle; with nothing running."
+                    )]
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn reaper_park_adds_no_live_result_without_a_live_session() {
+        park_idle_task(
+            |_state, _task| {},
+            false,
+            |state, task, note, _inbox, results| {
+                assert!(results.is_empty());
+                assert_eq!(note, reaper_parked_idle_body("job0001", task));
+                assert_eq!(
+                    state.store.lock().unwrap().get_task(task).unwrap().status,
+                    Status::Backlog
+                );
+            },
+        );
     }
 
     #[test]
