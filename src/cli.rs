@@ -6719,31 +6719,56 @@ fn close_guard(task_id: i64, force: Option<&str>) -> Result<()> {
 }
 
 /// Whether a fresh close should warn that a live check was asked for but the
-/// result names none (naru task 2812). Pure, case-insensitive substring
-/// matching; the warning never blocks the close.
+/// result names none (naru tasks 2812, 2815). Pure, case-insensitive matching
+/// with hyphens read as spaces; a negated mention ("no live check needed",
+/// "did not use khora") counts as neither an ask nor evidence. The warning
+/// never blocks the close.
 fn missing_live_check(description: &str, acceptance: Option<&str>, result: Option<&str>) -> bool {
-    const ASKS: [&str; 5] = [
+    const ASKS: [&str; 4] = [
         "live check",
         "live qa",
         "verification: live",
         "browser check",
-        "browser-check",
     ];
-    const SHOWS: [&str; 7] = [
-        "live qa",
+    // Every form that triggers the ask is also accepted as evidence.
+    const SHOWS: [&str; 10] = [
         "live check",
+        "live qa",
+        "verification: live",
         "browser check",
+        "in a browser",
+        "in chrome",
         "khora",
         "qorvex",
         "loki",
-        "ui-verifier",
+        "ui verifier",
     ];
-    let hit = |text: &str, words: &[&str]| {
-        let t = text.to_lowercase();
-        words.iter().any(|w| t.contains(w))
+    // A word counts only when it is not negated: a negation among the `back`
+    // words just before it ("no live check", "did not use khora"), or right
+    // after it ("live check not needed"). A far-off "not" ("do not skip live
+    // QA") leaves it counting.
+    let hit = |text: &str, words: &[&str], back: usize| {
+        let t = text.to_lowercase().replace('-', " ");
+        words.iter().any(|w| {
+            t.match_indices(w).any(|(i, _)| {
+                let clause = t[..i]
+                    .rsplit(['.', ';', ',', ':', '!', '?', '\n'])
+                    .next()
+                    .unwrap_or("");
+                let negated_before =
+                    clause.split_whitespace().rev().take(back).any(|x| {
+                        matches!(x, "no" | "not" | "without" | "never") || x.ends_with("n't")
+                    });
+                let after = t[i + w.len()..].trim_start_matches([':', ' ']);
+                let negated_after = ["not needed", "not required", "skipped", "n/a"]
+                    .iter()
+                    .any(|n| after.starts_with(n));
+                !negated_before && !negated_after
+            })
+        })
     };
-    let asks = hit(description, &ASKS) || acceptance.is_some_and(|a| hit(a, &ASKS));
-    asks && !result.is_some_and(|r| hit(r, &SHOWS))
+    let asks = hit(description, &ASKS, 1) || acceptance.is_some_and(|a| hit(a, &ASKS, 1));
+    asks && !result.is_some_and(|r| hit(r, &SHOWS, 2))
 }
 
 /// The artifact rule for a fresh `--status done` (naru task 2401). `Ok(None)`
@@ -10594,6 +10619,64 @@ mod tests {
             "plain change",
             None,
             Some("done")
+        ));
+    }
+
+    #[test]
+    fn missing_live_check_false_alarms_and_false_pass() {
+        // description negates the ask
+        assert!(!super::missing_live_check(
+            "No live check needed",
+            None,
+            Some("done")
+        ));
+        assert!(!super::missing_live_check(
+            "Live check not required here",
+            None,
+            None
+        ));
+        // result evidence in the accepted forms
+        for r in [
+            "Opened it in a browser, looked fine",
+            "live-check done in Chrome",
+            "browser-check",
+            "Checked in Chrome",
+        ] {
+            assert!(
+                !super::missing_live_check("Live check: open it", None, Some(r)),
+                "{r}"
+            );
+        }
+        // negated tool mention is not evidence
+        for r in ["did not use khora", "Didn't use loki", "no live check done"] {
+            assert!(
+                super::missing_live_check("Live check: open it", None, Some(r)),
+                "{r}"
+            );
+        }
+        // a requirement phrased with a negation still asks; evidence near an unrelated "no" counts
+        for d in [
+            "Don't forget the live check",
+            "Do not skip live QA",
+            "Never close without a live check",
+        ] {
+            assert!(super::missing_live_check(d, None, Some("css")), "{d}");
+        }
+        assert!(!super::missing_live_check(
+            "Live check",
+            None,
+            Some("No console errors in khora")
+        ));
+        assert!(!super::missing_live_check(
+            "Live check: not needed",
+            None,
+            None
+        ));
+        // still warns on a silent result; asked-for browser-check hyphen form
+        assert!(super::missing_live_check(
+            "browser-check it",
+            None,
+            Some("css")
         ));
     }
 

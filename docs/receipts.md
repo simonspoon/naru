@@ -172,7 +172,12 @@ tests `cli::tests::close_artifact_*`, and `scripts/cli-check.sh`.
 
 A fresh close also prints one stderr `warning:` line (never blocking, stdout
 and exit code unchanged) when the description or acceptance asks for a live
-check and the result names none (`cli.rs::missing_live_check`, naru task 2812).
+check and the result names none (`cli.rs::missing_live_check`, naru tasks 2812, 2815).
+Hyphens read as spaces; every asked-for form ("live check", "live qa", "browser check") is
+also accepted as evidence, as are "in a browser", "in Chrome", khora, qorvex, loki, ui-verifier.
+A negated mention ("no live check needed", "did not use khora") is neither an ask nor
+evidence. CLI only: the API close path (`api.rs::update_task`) returns the task unchanged
+and carries no warning, by design like the artifact rule.
 
 ## CLI surface
 
