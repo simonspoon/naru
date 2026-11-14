@@ -1,4 +1,12 @@
-import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
+import {
+  useEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type CSSProperties,
+  type ReactNode,
+} from 'react'
+import { currentLiveAmbient, subscribeLiveAmbient } from '../liveAmbient'
 import {
   closestCenter,
   DndContext,
@@ -16,7 +24,6 @@ import { SortableContext, useSortable, type SortingStrategy } from '@dnd-kit/sor
 import { CSS } from '@dnd-kit/utilities'
 import {
   getGitStatus,
-  getLive,
   listAllAgents,
   listProjects,
   listTasks,
@@ -210,14 +217,12 @@ function SortableProject({
  * The "Ambient is listening" badge (naru task 2375): whether the audio server
  * reports ambient on, on every page, linking to what it hears. It polls for
  * itself so it can sit in the nav or — with the nav hidden (naru task 2805) —
- * in the header. The turns after a huge cursor are none, so the poll carries
- * the session alone.
+ * in the header. It reads the flag `LiveHub` publishes from its own /api/live
+ * poll (naru task 2828) rather than polling again.
  */
 export function AmbientBadge({ compact, active }: { compact: boolean; active: boolean }) {
-  const { data: live } = useFetch(() => getLive(Number.MAX_SAFE_INTEGER), 'ambient-nav', {
-    pollMs: 2000,
-  })
-  if (live?.session?.ambient !== true) return null
+  const ambient = useSyncExternalStore(subscribeLiveAmbient, currentLiveAmbient)
+  if (!ambient) return null
   return (
     <a
       className={`nav-item ambient-badge${active ? ' active' : ''}`}

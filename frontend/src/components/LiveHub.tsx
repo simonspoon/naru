@@ -102,6 +102,7 @@ import { elapsedLabel, endsInHead } from '../liveHead'
 import { headMeta, quietHint, taskHash, taskSegments, turnSegments } from '../liveChat'
 import { headerIndicator } from '../liveIndicator'
 import { setLiveMarkFeed } from '../liveMarkFeed'
+import { setLiveAmbient } from '../liveAmbient'
 import { COMPOSER_HIDE_DELAY_MS, composerShown, inRevealZone } from '../liveComposerReveal'
 import { offerGlows, offerTitle } from '../liveOffer'
 import {
@@ -894,6 +895,12 @@ export function LiveHub({
   // server checking in (naru task 2374): the session's `ambient` is non-null
   // only while a host has reported within 10 s.
   const reportedHostAmbient = session?.ambient ?? null
+  // The nav's "Listening" badge follows this poll rather than polling itself.
+  const hostAmbientOn = session?.ambient === true
+  useEffect(() => {
+    setLiveAmbient(hostAmbientOn)
+    return () => setLiveAmbient(false)
+  }, [hostAmbientOn])
   const hostPresent = ambientHostPresent(native !== null, reportedHostAmbient)
   const glowing = hostPresent && offerGlows(offer, live, ambient)
 
