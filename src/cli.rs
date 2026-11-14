@@ -6718,6 +6718,34 @@ fn close_guard(task_id: i64, force: Option<&str>) -> Result<()> {
     }
 }
 
+/// Whether a fresh close should warn that a live check was asked for but the
+/// result names none (naru task 2812). Pure, case-insensitive substring
+/// matching; the warning never blocks the close.
+fn missing_live_check(description: &str, acceptance: Option<&str>, result: Option<&str>) -> bool {
+    const ASKS: [&str; 5] = [
+        "live check",
+        "live qa",
+        "verification: live",
+        "browser check",
+        "browser-check",
+    ];
+    const SHOWS: [&str; 7] = [
+        "live qa",
+        "live check",
+        "browser check",
+        "khora",
+        "qorvex",
+        "loki",
+        "ui-verifier",
+    ];
+    let hit = |text: &str, words: &[&str]| {
+        let t = text.to_lowercase();
+        words.iter().any(|w| t.contains(w))
+    };
+    let asks = hit(description, &ASKS) || acceptance.is_some_and(|a| hit(a, &ASKS));
+    asks && !result.is_some_and(|r| hit(r, &SHOWS))
+}
+
 /// The artifact rule for a fresh `--status done` (naru task 2401). `Ok(None)`
 /// = close as patched: an artifact is given or already stored, or
 /// `no_artifact` names why there is none. `Ok(Some(sha))` = the newest commit
@@ -7056,6 +7084,17 @@ fn run_task(cmd: TaskCmd) -> Result<()> {
                 )?;
             }
             print_task(&task, quiet);
+            if closing
+                && missing_live_check(
+                    &task.description,
+                    task.acceptance.as_deref(),
+                    task.result.as_deref(),
+                )
+            {
+                eprintln!(
+                    "warning: task {id} asks for a live check but its result names none; add a line such as \"Live QA: <what you opened and saw>\" with naru task update {id} --append --result \"...\""
+                );
+            }
             // mesa task 1339: a close is when an over-budget project notebook
             // gets its dream — best-effort, after the task is printed, and
             // never on stdout or in the exit code.
@@ -10520,6 +10559,7 @@ mod tests {
     //! (derived projections) or silently vanishing (`compact`'s literal).
 
     use super::*;
+
     use crate::core::Theme;
     use crate::core::{
         ArtifactSummary, InboxItem, Project, TaskSummary, WorkflowRunStatus, WorkflowStep,
@@ -10527,6 +10567,35 @@ mod tests {
     };
     use crate::core::{DiffStat, GitCommit, LiveContext, LiveContextKind, LiveWindow};
     use crate::core::{RetroFinding, RetroRun, RetroStatus};
+
+    #[test]
+    fn missing_live_check_cases() {
+        assert!(super::missing_live_check(
+            "Live check: open it",
+            None,
+            Some("changed css")
+        ));
+        assert!(super::missing_live_check(
+            "x",
+            Some("Browser-Check it"),
+            None
+        ));
+        assert!(!super::missing_live_check(
+            "Live check: open it",
+            None,
+            Some("Live QA: opened the page with khora")
+        ));
+        assert!(!super::missing_live_check(
+            "Live check",
+            None,
+            Some("KHORA ok")
+        ));
+        assert!(!super::missing_live_check(
+            "plain change",
+            None,
+            Some("done")
+        ));
+    }
 
     #[test]
     fn status_aliases_queued_and_q_mean_todo() {

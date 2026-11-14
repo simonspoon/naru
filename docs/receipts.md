@@ -170,6 +170,10 @@ note `Closed with no artifact: <reason>`. `--no-artifact` conflicts with
 close as before. `cli.rs::close_artifact`, `git::commit_citing_task`;
 tests `cli::tests::close_artifact_*`, and `scripts/cli-check.sh`.
 
+A fresh close also prints one stderr `warning:` line (never blocking, stdout
+and exit code unchanged) when the description or acceptance asks for a live
+check and the result names none (`cli.rs::missing_live_check`, naru task 2812).
+
 ## CLI surface
 
 ```
