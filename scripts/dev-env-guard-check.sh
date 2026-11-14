@@ -64,6 +64,11 @@ deny "install.sh piped from cat into a shell" "$(bash_in 'cat scripts/install.sh
 deny "install.sh copied then run" "$(bash_in 'cp scripts/install.sh /tmp/x && bash /tmp/x')"
 deny "install.sh via find -exec" "$(bash_in 'find scripts -name install.sh -exec bash {} +')"
 deny "install.sh via an external diff" "$(bash_in 'GIT_EXTERNAL_DIFF=bash git diff scripts/install.sh')"
+# naru task 2710: git expands unique abbreviations of --output/--ext-diff/--textconv
+deny "git show --out= copying install.sh" "$(bash_in 'git show --out=/tmp/x.sh HEAD:scripts/install.sh')"
+deny "git log --outp= copying install.sh" "$(bash_in 'git log -p --outp=/tmp/x.sh scripts/install.sh')"
+deny "git diff --ext on install.sh" "$(bash_in 'git diff --ext scripts/install.sh')"
+deny "git show --textc on install.sh" "$(bash_in 'git show --textc HEAD:scripts/install.sh')"
 
 allow "dev-env.sh" "$(bash_in 'scripts/dev-env.sh')"
 allow "self-deploy.sh" "$(bash_in 'scripts/self-deploy.sh')"

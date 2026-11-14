@@ -112,7 +112,8 @@ case "$tool" in
     # plain path argument of a pure reader (cat less more head tail grep rg
     # ls wc diff touch, find without -exec/-ok/-delete/-fprint) or of git
     # add/commit/diff/log/show/status, with no option that runs or writes
-    # (rg --pre, less +cmd/-o, git --ext-diff/--output ...). Then every
+    # (rg --pre, less +cmd/-o, git --ext-diff/--output ... or an abbreviation
+    # git would expand to one, task 2710). Then every
     # segment must be such a command or a text-only one, with no assignment
     # prefix, so no export, alias, git config or env var set alongside can
     # turn the reader into a runner; the option bans hold in every segment,
@@ -145,7 +146,8 @@ def opts_ok(s):
         if r0 == "find" and v in FIND_BAN: return False
         if r0 == "rg" and v.startswith(("--pre", "--hostname-bin")): return False
         if r0 in ("grep", "egrep", "fgrep") and re.match(r"--(?:filter|pager|view)|-[A-Za-z]*Q", v): return False
-        if r0 == "git" and v.startswith(("--ext-diff", "--textconv", "--output")): return False
+        n = v[2:].split("=")[0]
+        if r0 == "git" and v[:2] == "--" and n and n != "text" and any(b.startswith(n) or n.startswith(b) for b in ("ext-diff", "textconv", "output")): return False
         if r0 in ("less", "more") and re.match(r"\+|-[A-Za-z]*[oOk]|--(?:log|LOG|lesskey)", v): return False
     return True
 if "$\x27" in cmd or "$(" in cmd or "`" in cmd: sys.exit(0)
@@ -435,6 +437,11 @@ mod tests {
             ("git diff scripts/install.sh", false),
             ("git diff -- scripts/install.sh", false),
             ("git log -p -- scripts/install.sh", false),
+            ("git diff --text scripts/install.sh", false),
+            ("git diff --no-ext-diff scripts/install.sh", false),
+            ("git diff --no-textconv scripts/install.sh", false),
+            ("git diff --stat scripts/install.sh", false),
+            ("git log --oneline scripts/install.sh", false),
             ("git status scripts/install.sh", false),
             ("git show HEAD:scripts/install.sh", false),
             ("git commit scripts/install.sh -m \"task 1: fix\"", false),
@@ -488,6 +495,13 @@ mod tests {
             ("git diff --ext-diff scripts/install.sh", true),
             ("git show --textconv HEAD:scripts/install.sh", true),
             ("git log -p --output=/tmp/x.sh scripts/install.sh", true),
+            ("git show --out=/tmp/x.sh HEAD:scripts/install.sh", true),
+            ("git log -p --outp=/tmp/x.sh scripts/install.sh", true),
+            ("git diff --o /tmp/x.sh scripts/install.sh", true),
+            ("git diff --ext scripts/install.sh", true),
+            ("git show --ext-d HEAD:scripts/install.sh", true),
+            ("git show --textc HEAD:scripts/install.sh", true),
+            ("git log -p --textc scripts/install.sh", true),
             ("git -c core.editor=bash commit scripts/install.sh", true),
             ("GIT_EDITOR=bash git commit scripts/install.sh", true),
             ("git x scripts/install.sh", true),
