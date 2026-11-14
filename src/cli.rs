@@ -5936,6 +5936,21 @@ fn error_code(err: &Error) -> &'static str {
     }
 }
 
+/// Reads a `live result --file` report. The report store keeps text only, so
+/// a non-UTF-8 file (a picture) is refused with the alternative named.
+fn read_live_report(path: &str) -> Result<String> {
+    std::fs::read_to_string(path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::InvalidData {
+            Error::Validation(format!(
+                "{path} is not a text file; --file takes a text report. Nothing was posted. \
+                 Show a picture with `naru live board push --image <path>`, or attach it to a task"
+            ))
+        } else {
+            Error::Validation(format!("cannot read {path}: {e}"))
+        }
+    })
+}
+
 pub fn run() -> ExitCode {
     let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
     let cli = match parse_args(&args) {
@@ -7921,8 +7936,7 @@ fn run_live(cmd: LiveCmd) -> Result<()> {
                             crate::core::ARTIFACT_BODY_MAX
                         )));
                     }
-                    let body = std::fs::read_to_string(&path)
-                        .map_err(|e| Error::Validation(format!("cannot read {path}: {e}")))?;
+                    let body = read_live_report(&path)?;
                     let project_id = project.map(|p| resolve_project(&store, &p)).transpose()?;
                     store.add_live_result_with_report(&text, &path, &body, project_id)?
                 }
@@ -11665,6 +11679,26 @@ mod tests {
             report_path: Some("/data/live-reports/2/4-report.md".into()),
             artifact_id: Some(9),
         }
+    }
+
+    #[test]
+    fn live_report_refuses_non_utf8_file_naming_the_alternative() {
+        let dir = std::env::temp_dir().join(format!("naru-lr-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let png = dir.join("shot.png");
+        std::fs::write(&png, [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0xff]).unwrap();
+        let err = read_live_report(png.to_str().unwrap())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("live board push --image"), "{err}");
+        assert!(err.contains("Nothing was posted"), "{err}");
+        let txt = dir.join("r.md");
+        std::fs::write(&txt, "# findings").unwrap();
+        assert_eq!(
+            read_live_report(txt.to_str().unwrap()).unwrap(),
+            "# findings"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
