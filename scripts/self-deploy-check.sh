@@ -55,6 +55,7 @@ backups="$HOME/.naru/backups"
 
 out=$(scripts/self-deploy.sh --dry-run)
 [ "$(echo "$out" | jq -r .status)" = plan ] || fail "dry-run verdict"
+[ "$(echo "$out" | jq -r .restart_cmd)" = "$NARU_DEPLOY_RESTART_CMD" ] && [ "$(echo "$out" | jq -r .health_port)" = 7770 ] || fail "dry-run restart_cmd/health_port: $out"
 [ "$(shasum "$NARU" | cut -d' ' -f1)" = "$before" ] && [ ! -e "$PREFIX/bin/naru.prev" ] && [ ! -d "$backups" ] || fail "dry-run changed something"
 ok "dry-run prints the plan and changes nothing"
 

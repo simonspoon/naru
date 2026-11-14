@@ -77,9 +77,38 @@ verdict() { jq -cn --arg s "$1" --arg r "$2" --arg db "$backup_db" --arg prev "$
 resume_queue() { [ "$paused" -eq 1 ] && "$new_bin" queue resume >>"$LOG" 2>&1 && paused=0; }
 abort() { log "ABORT: $1"; [ -s "$LOG" ] && tail -n 30 "$LOG" >&2; resume_queue; verdict aborted "$1"; exit 1; }
 
+plist_env() { # plist_env <key>: the string under that EnvironmentVariables key
+  local f="${NARU_LAUNCHD_DIR:-$HOME/Library/LaunchAgents}/com.naru.serve.plist"
+  [ -f "$f" ] && awk -v k="$1" '$0 ~ "<key>"k"</key>" {getline; gsub(/.*<string>|<\/string>.*/, ""); print; exit}' "$f"
+}
+# The port the server listens on: NARU_DEPLOY_PORT, else `serve.port` in the config it
+# reads (core::config::config_file: NARU_/MESA_CONFIG_FILE, else ~/.naru or ~/.mesa,
+# the file itself or config.json in it), else the built-in 7770. A bare `naru serve`
+# under launchd carries no port flag, so the config is the only place it can come from.
+if [ -z "$PORT" ]; then
+  cfg="${NARU_CONFIG_FILE:-${MESA_CONFIG_FILE:-}}"
+  [ -n "$cfg" ] || cfg="$(plist_env NARU_CONFIG_FILE)"
+  [ -n "$cfg" ] || cfg="$(plist_env MESA_CONFIG_FILE)"
+  if [ -z "$cfg" ]; then
+    cfg="$HOME/.naru"; [ -e "$cfg" ] || { [ -e "$HOME/.mesa" ] && cfg="$HOME/.mesa"; }
+    [ -d "$cfg" ] && cfg="$cfg/config.json"
+  fi
+  [ -f "$cfg" ] && PORT="$(jq -r '.serve.port // empty' "$cfg" 2>/dev/null)"
+  case "$PORT" in ''|*[!0-9]*) PORT=7770 ;; esac
+  [ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ] || PORT=7770
+fi
+log "health port: $PORT"
+# The restart command: NARU_DEPLOY_RESTART_CMD, else on macOS with the launchd agent
+# installed its kickstart, else none (cannot restart = unhealthy).
+RESTART_CMD="${NARU_DEPLOY_RESTART_CMD:-}"
+if [ -z "$RESTART_CMD" ] && [ "$(uname -s)" = Darwin ] && [ -e "${NARU_LAUNCHD_DIR:-$HOME/Library/LaunchAgents}/com.naru.serve.plist" ]; then
+  RESTART_CMD="${NARU_LAUNCHCTL:-launchctl} kickstart -k gui/$(id -u)/com.naru.serve"
+fi
+
 if [ "$dry" -eq 1 ]; then
   jq -cn --arg checks "$CHECKS" --arg bin "$INSTALLED" --arg dir "$BACKUP_DIR" --argjson skip "$skip" \
-    '{status:"plan",steps:["build release into a temp target dir","cargo test + checks","backup db","pause queue, drain","atomic swap, previous kept as naru.prev","restart server (it installs the managed built-ins on start)","health check","hand the live agent off to the new binary and record other stale runners (NARU_DEPLOY_RUNNERS=0 skips)","resume queue or roll back"],checks:($checks|split(" ")),skip_checks:($skip==1),install:$bin,backup_dir:$dir,restart:true}'
+    --arg rc "$RESTART_CMD" --arg port "$PORT" \
+    '{status:"plan",steps:["build release into a temp target dir","cargo test + checks","backup db","pause queue, drain","atomic swap, previous kept as naru.prev","restart server (it installs the managed built-ins on start)","health check","hand the live agent off to the new binary and record other stale runners (NARU_DEPLOY_RUNNERS=0 skips)","resume queue or roll back"],checks:($checks|split(" ")),skip_checks:($skip==1),install:$bin,backup_dir:$dir,restart:true,restart_cmd:$rc,health_port:($port|tonumber? // $port)}'
   exit 0
 fi
 
@@ -127,10 +156,6 @@ log "queue paused and idle"
 
 # ---- 2b db backup ----------------------------------------------------------------
 # Resolve the db the server really uses, once, before anything is backed up or swapped.
-plist_env() { # plist_env <key>: the string under that EnvironmentVariables key
-  local f="${NARU_LAUNCHD_DIR:-$HOME/Library/LaunchAgents}/com.naru.serve.plist"
-  [ -f "$f" ] && awk -v k="$1" '$0 ~ "<key>"k"</key>" {getline; gsub(/.*<string>|<\/string>.*/, ""); print; exit}' "$f"
-}
 holds_data() { [ -s "$1" ] && command -v sqlite3 >/dev/null && [ "$(sqlite3 -readonly "$1" 'select (select count(*) from projects)+(select count(*) from tasks)' 2>/dev/null || echo 0)" != 0 ]; }
 db="${NARU_DEPLOY_DB:-${NARU_DB:-${MESA_DB:-}}}"
 [ -n "$db" ] || db="$(plist_env NARU_DB)"
@@ -146,23 +171,6 @@ if [ -z "$db" ]; then
   else db="$ndb"; fi
 fi
 [ -e "$db" ] || abort "resolved db $db does not exist; set NARU_DEPLOY_DB"
-# The port the server listens on: NARU_DEPLOY_PORT, else `serve.port` in the config it
-# reads (core::config::config_file: NARU_/MESA_CONFIG_FILE, else ~/.naru or ~/.mesa,
-# the file itself or config.json in it), else the built-in 7770. A bare `naru serve`
-# under launchd carries no port flag, so the config is the only place it can come from.
-if [ -z "$PORT" ]; then
-  cfg="${NARU_CONFIG_FILE:-${MESA_CONFIG_FILE:-}}"
-  [ -n "$cfg" ] || cfg="$(plist_env NARU_CONFIG_FILE)"
-  [ -n "$cfg" ] || cfg="$(plist_env MESA_CONFIG_FILE)"
-  if [ -z "$cfg" ]; then
-    cfg="$HOME/.naru"; [ -e "$cfg" ] || { [ -e "$HOME/.mesa" ] && cfg="$HOME/.mesa"; }
-    [ -d "$cfg" ] && cfg="$cfg/config.json"
-  fi
-  [ -f "$cfg" ] && PORT="$(jq -r '.serve.port // empty' "$cfg" 2>/dev/null)"
-  case "$PORT" in ''|*[!0-9]*) PORT=7770 ;; esac
-  [ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ] || PORT=7770
-fi
-log "health port: $PORT"
 export NARU_DB="$db"
 log "db: $db"
 mkdir -p "$BACKUP_DIR" || abort "cannot create $BACKUP_DIR"
@@ -191,11 +199,8 @@ log "swapped $INSTALLED (previous kept as naru.prev)"
 live_before="$("$NARU" live status 2>/dev/null | jq -r 'select(.status=="live") | .agent_id // "none"')"
 
 restart() {
-  local cmd="${NARU_DEPLOY_RESTART_CMD:-}"
-  if [ -z "$cmd" ] && [ "$(uname -s)" = Darwin ] && [ -e "${NARU_LAUNCHD_DIR:-$HOME/Library/LaunchAgents}/com.naru.serve.plist" ]; then
-    cmd="${NARU_LAUNCHCTL:-launchctl} kickstart -k gui/$(id -u)/com.naru.serve"
-    log "NARU_DEPLOY_RESTART_CMD unset: using the launchd agent ($cmd)"
-  fi
+  local cmd="$RESTART_CMD"
+  [ -z "${NARU_DEPLOY_RESTART_CMD:-}" ] && [ -n "$cmd" ] && log "NARU_DEPLOY_RESTART_CMD unset: using the launchd agent ($cmd)"
   [ -n "$cmd" ] || { log "NARU_DEPLOY_RESTART_CMD unset: cannot restart"; return 1; }
   bash -c "$cmd" >>"$LOG" 2>&1 || return 1
   restarted=true

@@ -268,6 +268,15 @@ fact only what it verified or a delegate reported, speaks as briefly as it
 can, and says no ids unless asked; detail goes on the board. This replaces the
 router of naru task 1711, whose separate agent was deleted by naru task 2407.
 
+### Deploying Naru itself (naru task 2816)
+
+Rule 19: only when the person asks for Naru itself to be deployed or updated
+on this machine, or has okayed deploys, the agent runs `naru self-deploy
+--repo <the naru project's local_path>` in the background (rule 12), never an
+installer or `launchctl` by hand, and says the verdict's `status`, plus its
+`reason` unless it is `swapped`; a release or a push is never part of it
+(`docs/self-deploy.md`).
+
 ## Why the queue lives in SQLite
 
 The turn queue is two tables, not a channel in the server's memory, because

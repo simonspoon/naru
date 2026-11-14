@@ -19,8 +19,14 @@ Unhealthy: `naru.prev` is restored (re-signed), the db backup replaces the db (s
 `-wal`/`-shm` removed), the server is restarted and checked, the queue resumed, verdict
 `rolled_back` (exit 1). If that is unhealthy too: `rollback_failed`, queue left paused.
 Queue verbs run on the NEW binary, since the installed one may predate `queue`.
+`--dry-run` prints the plan, including `restart_cmd` (the resolved restart command, empty if
+none) and `health_port`, resolved exactly as a real run would (naru task 2816).
 Verdict JSON: `status`, `reason`, `db_backup`, `binary_backup`, `restarted`, `healthy`,
 `queue_resumed`, `stale_runners`.
+
+**From the live agent** (naru task 2816): rule 19 of `naru-live` (`docs/live.md`) makes
+`naru self-deploy --repo <naru local_path>`, run in the background, its only deploy path; it
+says the verdict's `status`, and its `reason` unless `swapped`. Never a release or push.
 
 ## Stale runners (naru task 2084)
 
