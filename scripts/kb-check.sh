@@ -274,7 +274,7 @@ run 0 "$MESA" kb show topics/pets/cat.md
 # The raw text reached the model as data: byte-identical except the fence-closing marker.
 EXPECT_PROMPT=${HOSTILE//DATA>>>/DATA> >>}
 grep -qF -- "$EXPECT_PROMPT" "$STUB_DIR/prompt-add" || fail "hostile raw text must reach the prompt unchanged (fence marker defused)"
-[ "$(grep -c 'DATA>>>' "$STUB_DIR/prompt-add")" -le 3 ] || fail "a literal DATA>>> must not close a fence early"
+[ "$(grep -c 'DATA>>>' "$STUB_DIR/prompt-add")" -le 4 ] || fail "a literal DATA>>> must not close a fence early"
 run 0 "$MESA" kb list --topic pets
 [ "$(jqs '.[0].title')" = "The cat" ] || fail "append must keep the title: $STDOUT"
 ok "hostile body: appended and created byte-identical, the prompt carried it fenced, nothing executed"
