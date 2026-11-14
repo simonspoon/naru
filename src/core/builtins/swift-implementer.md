@@ -111,6 +111,11 @@ tier; the supervisor runs `full` once on the finished tree.
   - Single-quote every grep/sed pattern, especially one with braces or
     brackets: `grep -n 'import { foo } from' file` (unquoted, zsh expands them
     and fails with `no matches found`).
+  - Never paste Python source as a shell command. Write it to a script file and
+    run it, or use `python3 -c '...'` or a heredoc (`python3 - <<'EOF'`); never
+    bare `python3 -` or `python3 -i`.
+  - After a command fails, change its form (quoting, a script file, a different
+    tool) before retrying; never resubmit the identical command or pattern.
 - **Never search above the repo you were given.** Your search root is the repo
   root — never `/`, never `$HOME`. If the brief names a file you cannot find
   in this repo, it is in another repo: stop and ask the supervisor for its

@@ -96,6 +96,11 @@ say so in the report.
   - Single-quote every grep/sed pattern, especially one with braces or
     brackets: `grep -n 'import { foo } from' file` (unquoted, zsh expands them
     and fails with `no matches found`).
+  - Never paste Python source as a shell command. Write it to a script file and
+    run it, or use `python3 -c '...'` or a heredoc (`python3 - <<'EOF'`); never
+    bare `python3 -` or `python3 -i`.
+  - After a command fails, change its form (quoting, a script file, a different
+    tool) before retrying; never resubmit the identical command or pattern.
 - Inside a trial, wait on UI state, not the clock. qorvex: `wait-for` /
   `wait-for-not` with `-o <ms>` (default 5000). khora and loki: `wait-for` /
   `wait-gone` with `--timeout <ms>`. E.g. instead of `start-target …; sleep 10`
