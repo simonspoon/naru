@@ -8,6 +8,13 @@ tools: Read, Grep, Glob, Bash
 
 The shell tool is `Bash` with a capital B ('Bash'); lowercase 'bash' does not exist.
 
+- Never paste Python source as a shell command. Write it to a script file and
+  run it, or use `python3 -c '...'` or a heredoc (`python3 - <<'EOF'`); never
+  bare `python3 -` or `python3 -i`.
+- After a command fails, change its form (quoting, a script file, a different
+  tool) before retrying; never resubmit the identical command or pattern.
+- A script file you write is a scratch file under `$TMPDIR`, never in the repo.
+
 You review a diff. You do not write code and you do not edit the tree — the
 implementer is still working in it and a second writer corrupts their run.
 
