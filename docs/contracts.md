@@ -41,7 +41,11 @@ The code is the source of truth. These are the invariants you must not break:
 - **The frontend is embedded at compile time** via rust-embed (`frontend/dist`,
   `Assets` in `src/api.rs`), served at `/` with SPA fallback. Release builds need
   `frontend/dist` to exist before the Rust compile (build.sh orders this); debug
-  builds read the folder from disk at runtime.
+  builds read the folder from disk at runtime. The Vite build writes a `.gz`
+  sibling beside each text file, served with `Content-Encoding: gzip` to a
+  client that accepts it; real files under `/assets/` (hash-named) get a
+  year-long `immutable` lifetime and everything else `no-cache`, so a deploy
+  shows at once (`spa_service` in `src/api.rs`, naru task 2827).
 - **Frontend unit tests cover the pure logic modules, not components.** vitest
   (jsdom) over `frontend/src/*.test.ts` — no React testing library, no component
   rendering. The subject is the side-effect-free modules the components import

@@ -3,10 +3,42 @@
 // plugins/build/server halves are unaffected.
 import { defineConfig } from 'vitest/config'
 import react from '@vitejs/plugin-react'
+import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { gzipSync } from 'node:zlib'
+
+// Writes a `.gz` sibling beside every text file in `dist` (naru task 2827).
+// axum-embed serves `<path>.gz` with `Content-Encoding: gzip` when the client
+// accepts gzip and the sibling is embedded, and the plain file otherwise. Only
+// gzip: axum-embed takes the first encoding the client lists, and browsers
+// list gzip before br, so a `.br` sibling would just grow the binary. Node's
+// own zlib, so no extra dependency and the same on every platform.
+function gzipSiblings() {
+  let outDir = 'dist'
+  return {
+    name: 'naru-gzip-siblings',
+    apply: 'build' as const,
+    configResolved(config: { root: string; build: { outDir: string } }) {
+      outDir = join(config.root, config.build.outDir)
+    },
+    closeBundle() {
+      // Also called after a failed build, which may have left no outDir.
+      if (!existsSync(outDir)) return
+      const text = /\.(js|css|html|svg|json|webmanifest|map|txt)$/
+      for (const name of readdirSync(outDir, { recursive: true, encoding: 'utf8' })) {
+        if (!text.test(name)) continue
+        const file = join(outDir, name)
+        const raw = readFileSync(file)
+        const gz = gzipSync(raw, { level: 9 })
+        if (gz.length < raw.length) writeFileSync(`${file}.gz`, gz)
+      }
+    },
+  }
+}
 
 // https://vite.dev/config/
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), gzipSiblings()],
   build: {
     // Vite's default target (baseline-widely-available) floors out at
     // iOS/Safari 16.4 — a real device on an older iOS gets a silent

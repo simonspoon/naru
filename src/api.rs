@@ -4838,15 +4838,56 @@ fn router(state: AppState) -> Router {
             "/api/config/keymap",
             get(get_config_keymap).put(update_config_keymap),
         )
-        // Everything outside /api is the embedded SPA; unknown paths fall
-        // back to index.html with 200 so client-side routes deep-link.
-        .fallback_service(axum_embed::ServeEmbed::<Assets>::with_parameters(
+        // Everything outside /api is the embedded SPA.
+        .fallback_service(spa_service::<Assets>())
+        .layer(middleware::from_fn_with_state(state.clone(), guard))
+        .with_state(state)
+}
+
+/// The embedded SPA: unknown paths fall back to index.html with 200 so
+/// client-side routes deep-link. Generic so the tests can serve a fixture
+/// folder (`frontend/dist` is empty when `cargo test` runs).
+///
+/// Compression (naru task 2827): the frontend build writes a `.gz` sibling
+/// beside each text file, and axum-embed serves it with
+/// `Content-Encoding: gzip` when the client lists gzip in Accept-Encoding
+/// (the plain file otherwise). `spa_cache_headers` adds what axum-embed does
+/// not: `Vary` and `Cache-Control`.
+fn spa_service<E: rust_embed::RustEmbed + Clone + Send + Sync + 'static>() -> Router {
+    Router::new()
+        .fallback_service(axum_embed::ServeEmbed::<E>::with_parameters(
             Some("index.html".to_owned()),
             axum_embed::FallbackBehavior::Ok,
             Some("index.html".to_owned()),
         ))
-        .layer(middleware::from_fn_with_state(state.clone(), guard))
-        .with_state(state)
+        .layer(middleware::from_fn(spa_cache_headers::<E>))
+}
+
+/// A real file under `/assets/` is Vite output with a content hash in its
+/// name, so it may be cached for a year; everything else — index.html, the
+/// deep-link fallback, the unhashed public files — must revalidate so a
+/// deploy is picked up at once (a direct file's ETag answers 304; axum-embed
+/// never 304s the fallback, which is ~1 KB gzipped).
+async fn spa_cache_headers<E: rust_embed::RustEmbed>(req: Request, next: Next) -> Response {
+    let path = req.uri().path();
+    let hashed = path
+        .strip_prefix("/assets/")
+        .is_some_and(|name| E::get(&format!("assets/{name}")).is_some());
+    let mut resp = next.run(req).await;
+    let headers = resp.headers_mut();
+    headers.insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static(if hashed {
+            "public, max-age=31536000, immutable"
+        } else {
+            "no-cache"
+        }),
+    );
+    headers.insert(
+        header::VARY,
+        header::HeaderValue::from_static("accept-encoding"),
+    );
+    resp
 }
 
 /// Requirement 7 middleware: Host allowlist + Content-Type gate.
@@ -25243,6 +25284,84 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         let mut resp = Vec::new();
         stream.read_to_end(&mut resp).await.unwrap();
         String::from_utf8_lossy(&resp).into_owned()
+    }
+
+    /// The SPA fixture for naru task 2827: a hash-named bundle with its
+    /// `.gz` sibling, as the frontend build writes them, plus index.html.
+    #[derive(rust_embed::RustEmbed, Clone)]
+    #[folder = "src/testdata/spa"]
+    struct SpaFixture;
+
+    /// One raw GET against `spa_service::<SpaFixture>()`; returns the
+    /// lower-cased head and the body bytes.
+    async fn spa_get(path: &str, extra_headers: &str) -> (String, Vec<u8>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, spa_service::<SpaFixture>()).await;
+        });
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let req = format!(
+            "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{extra_headers}Connection: close\r\n\r\n"
+        );
+        stream.write_all(req.as_bytes()).await.unwrap();
+        let mut resp = Vec::new();
+        stream.read_to_end(&mut resp).await.unwrap();
+        let split = resp.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+        let head = String::from_utf8_lossy(&resp[..split]).to_lowercase();
+        (head, resp[split + 4..].to_vec())
+    }
+
+    /// naru task 2827: a hash-named asset is served gzip-compressed when the
+    /// client accepts it, plain when it does not, both with a year-long
+    /// immutable lifetime; index.html (direct, `/`, or as the deep-link
+    /// fallback) is served gzipped but never given that lifetime, and
+    /// `/index.html` revalidates to a 304.
+    #[tokio::test]
+    async fn spa_assets_are_compressed_and_only_hashed_files_cache_long() {
+        let js = "/assets/app-Ab12Cd34.js";
+        let plain = SpaFixture::get("assets/app-Ab12Cd34.js").unwrap().data;
+        let gz = SpaFixture::get("assets/app-Ab12Cd34.js.gz").unwrap().data;
+
+        let (head, body) = spa_get(js, "Accept-Encoding: br, gzip\r\n").await;
+        assert!(head.starts_with("http/1.1 200"), "{head}");
+        assert!(head.contains("content-encoding: gzip"), "{head}");
+        assert!(head.contains("content-type: text/javascript"), "{head}");
+        assert!(
+            head.contains("cache-control: public, max-age=31536000, immutable"),
+            "{head}"
+        );
+        assert!(head.contains("vary: accept-encoding"), "{head}");
+        assert_eq!(body, gz.as_ref());
+
+        let (head, body) = spa_get(js, "").await;
+        assert!(head.starts_with("http/1.1 200"), "{head}");
+        assert!(!head.contains("content-encoding"), "{head}");
+        assert!(
+            head.contains("cache-control: public, max-age=31536000, immutable"),
+            "{head}"
+        );
+        assert_eq!(body, plain.as_ref());
+
+        for path in ["/", "/index.html", "/projects/3", "/assets/missing-Zz99.js"] {
+            let (head, body) = spa_get(path, "Accept-Encoding: gzip\r\n").await;
+            assert!(head.starts_with("http/1.1 200"), "{path}: {head}");
+            assert!(head.contains("cache-control: no-cache"), "{path}: {head}");
+            assert!(!head.contains("immutable"), "{path}: {head}");
+            assert!(head.contains("content-encoding: gzip"), "{path}: {head}");
+            let gz = SpaFixture::get("index.html.gz").unwrap().data;
+            assert_eq!(body, gz.as_ref(), "{path}");
+        }
+
+        let (head, _) = spa_get("/index.html", "").await;
+        let etag = head
+            .lines()
+            .find_map(|l| l.strip_prefix("etag: "))
+            .unwrap()
+            .to_owned();
+        let (head, _) = spa_get("/index.html", &format!("If-None-Match: \"{etag}\"\r\n")).await;
+        assert!(head.starts_with("http/1.1 304"), "{head}");
     }
 
     /// naru task 1889: `POST /api/live/interrupt` refuses a foreign Host and
