@@ -1137,11 +1137,12 @@ EXAMPLES
         /// The task itself, in free text; its first non-empty line is the task's name
         #[arg(
             value_name = "DESCRIPTION",
-            required_unless_present_any = ["description", "description_file"],
+            required_unless_present_any = ["description", "description_file", "project"],
         )]
         description_pos: Option<String>,
-        /// Project, by id or name (flag form of PROJECT)
-        #[arg(long, conflicts_with = "project_pos")]
+        /// Project, by id or name (flag form of PROJECT); with it, a lone
+        /// positional is the DESCRIPTION
+        #[arg(long)]
         project: Option<String>,
         /// The task itself (flag form of DESCRIPTION)
         ///
@@ -6867,6 +6868,24 @@ fn log_close_guard(task_id: i64, session: &str, outcome: &str, still_running: &s
     }
 }
 
+/// `task create`'s PROJECT and DESCRIPTION positionals beside `--project`: with
+/// the flag, a lone positional parsed into the project slot is the description.
+fn create_positionals(
+    project: Option<String>,
+    project_pos: Option<String>,
+    description_pos: Option<String>,
+) -> Result<(String, Option<String>)> {
+    match (project, project_pos, description_pos) {
+        (Some(_), Some(_), Some(_)) => Err(Error::Validation(
+            "give the project once: either positionally or with --project".into(),
+        )),
+        (Some(project), Some(text), None) => Ok((project, Some(text))),
+        (Some(project), None, description) => Ok((project, description)),
+        (None, Some(project), description) => Ok((project, description)),
+        (None, None, _) => Err(Error::Validation("a project is required".into())),
+    }
+}
+
 fn run_task(cmd: TaskCmd) -> Result<()> {
     let mut store = Store::open_default()?;
     match cmd {
@@ -6885,11 +6904,15 @@ fn run_task(cmd: TaskCmd) -> Result<()> {
             artifact,
             quiet,
         } => {
-            // clap guarantees exactly one of each positional/flag pair, and
-            // exactly one of the three description forms.
-            let project = project.or(project_pos).unwrap();
+            let (project, description_pos) =
+                create_positionals(project, project_pos, description_pos)?;
             let mut stdin_used = false;
             let body = resolve_field(description, description_file, &mut stdin_used)?;
+            if description_pos.is_none() && body.is_none() {
+                return Err(Error::Validation(
+                    "a description is required: give it positionally, with --description, or with --description-file".into(),
+                ));
+            }
             // A positional beside a body is the name; the derived name is the
             // first non-empty line, so name + blank line + body keeps both.
             let description = match (description_pos, body) {
@@ -10606,6 +10629,42 @@ mod tests {
     };
     use crate::core::{DiffStat, GitCommit, LiveContext, LiveContextKind, LiveWindow};
     use crate::core::{RetroFinding, RetroRun, RetroStatus};
+
+    /// Parse `naru task create <args>` and resolve its positionals.
+    fn create_resolved(args: &[&str]) -> Result<(String, Option<String>)> {
+        let mut argv = vec!["naru", "task", "create"];
+        argv.extend_from_slice(args);
+        match Cli::try_parse_from(argv).unwrap().command {
+            Command::Task(TaskCmd::Create {
+                project_pos,
+                description_pos,
+                project,
+                ..
+            }) => create_positionals(project, project_pos, description_pos),
+            _ => panic!("not task create"),
+        }
+    }
+
+    #[test]
+    fn task_create_positionals_either_order() {
+        let ok = |a: &[&str]| create_resolved(a).unwrap();
+        let some = |p: &str, d: Option<&str>| (p.to_string(), d.map(String::from));
+        assert_eq!(ok(&["hello", "--project", "2"]), some("2", Some("hello")));
+        assert_eq!(ok(&["--project", "2", "hello"]), some("2", Some("hello")));
+        assert_eq!(ok(&["2", "hello"]), some("2", Some("hello")));
+        assert_eq!(
+            ok(&["--project", "2", "--description", "x"]),
+            some("2", None)
+        );
+        assert_eq!(ok(&["2", "--description", "x"]), some("2", None));
+        // positional name + flag body keeps the name in the description slot
+        assert_eq!(
+            ok(&["name", "--project", "2", "--description", "body"]),
+            some("2", Some("name"))
+        );
+        let err = create_resolved(&["2", "hello", "--project", "2"]).unwrap_err();
+        assert!(matches!(err, Error::Validation(m) if m.contains("give the project once")));
+    }
 
     #[test]
     fn missing_live_check_cases() {
