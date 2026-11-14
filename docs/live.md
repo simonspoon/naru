@@ -874,8 +874,9 @@ instead"; pressing it (or the listen chord) claims the voice here.
 A respawn after a crash has no agent left to write the note. `naru live
 handoff --recover` (note optional; an explicit note always wins) makes one
 tool-less `claude -p --json-schema` call through the `live-summary` template
-(haiku, no `--bg`), reading the session's last 200 turns (at most 60 KiB,
-oldest dropped) inside a `<<<DATA … DATA>>>` fence as untrusted data, and uses
+(haiku, no `--bg`), reading the session's last 200 turns (cut so the whole
+prompt fits the 24 KiB spawn limit, oldest dropped — naru task 2811)
+inside a `<<<DATA … DATA>>>` fence as untrusted data, and uses
 its `note` as the successor's note. A failed call, an empty answer or a missing
 `claude` costs recall only: the note becomes "previous agent crashed; no note,
 continue from the last turns", a line goes to stderr, and the last 10 turns
