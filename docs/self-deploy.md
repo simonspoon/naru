@@ -6,8 +6,10 @@ Order: build + checks (nothing changed on failure) → `queue pause` → wait fo
 `queue idle` (`NARU_DEPLOY_DRAIN_TIMEOUT`, default 600 s; timeout = `aborted`, queue
 resumed) → db backup → atomic binary swap (`naru.prev` kept) → restart via
 `NARU_DEPLOY_RESTART_CMD` (unset on macOS with the `com.naru.serve` launchd agent installed
-= `launchctl kickstart -k gui/$(id -u)/com.naru.serve`, see `docs/launchd.md`; unset with no
-agent = cannot restart = unhealthy) → health
+= `scripts/launchd.sh restart`, a bootout + bootstrap of the installed plist + kickstart,
+because a bare `kickstart -k` of a login-loaded agent after a binary swap is `spawn failed`
+(naru task 2817, `docs/launchd.md`); `NARU_LAUNCHD_LABEL`/`NARU_LAUNCHD_DIR` pick the agent;
+unset with no agent = cannot restart = unhealthy) → health
 (`/api/version` on `NARU_DEPLOY_PORT` reports the new version, and its `commit` when both
 the new binary's `--version` and the server report one (naru task 2655), or `NARU_DEPLOY_HEALTH_CMD`
 with `NARU_DEPLOY_EXPECT`; and, if a live conversation was open before, it is

@@ -4,8 +4,10 @@
 # real agent. Plist renders and lints (label, RunAtLoad, KeepAlive, binary, `serve`,
 # log paths, no port flag); install = bootstrap + kickstart, idempotent (bootout first);
 # a db env set at install is baked in, an unset one absent; a hostile HOME (& < space)
-# is XML-escaped; uninstall = bootout + plist gone; self-deploy defaults its restart to
-# `kickstart -k` when the plist exists, not when absent, and an explicit command wins.
+# is XML-escaped; uninstall = bootout + plist gone; restart (naru task 2817) = bootout +
+# bootstrap of the plist left byte-identical + kickstart, refused with no plist; self-deploy
+# defaults its restart to `launchd.sh restart` when the plist exists (under
+# NARU_LAUNCHD_LABEL too), not when absent, and an explicit command wins.
 # PATH (naru task 2161) comes from a stub login shell (NARU_LAUNCHD_SHELL, so the real
 # ~/.zshrc is never read): its dirs first, deduped, relative entries dropped, the fixed
 # dirs appended; a failing shell gives exactly the fixed list; an `&` is escaped.
@@ -88,19 +90,35 @@ grep -q NARU_DB "$PLIST" && fail "re-install kept a stale NARU_DB"
 [ "$(log | grep -c '^bootstrap')" = 2 ] || fail "re-install did not bootstrap again"
 ok "install is idempotent"
 
-# self-deploy default restart
+# restart: re-load the installed plist unchanged (naru task 2817)
+: >"$TMP/launchctl.log"
+cp "$PLIST" "$TMP/plist.before"
+out=$(scripts/launchd.sh restart 2>/dev/null) || fail "restart failed"
+[ "$(log)" = "bootout gui/$UID_/com.naru.serve
+bootstrap gui/$UID_ $PLIST
+kickstart gui/$UID_/com.naru.serve" ] || fail "restart calls: $(log)"
+cmp -s "$PLIST" "$TMP/plist.before" || fail "restart rewrote the plist"
+echo "$out" | grep -q '^ok: restarted' || fail "restart printed: $out"
+: >"$TMP/launchctl.log"
+scripts/launchd.sh restart --dry-run >/dev/null && [ -z "$(log)" ] || fail "restart --dry-run touched launchctl"
+ok "restart boots out, bootstraps the plist unchanged and kickstarts"
+
+# self-deploy default restart: its resolution block plus restart()
 : >"$TMP/launchctl.log"
 cat >"$TMP/sd.sh" <<'EOS'
 set -e
-sed -n '/^restart() {/,/^}/p' scripts/self-deploy.sh >"$1/restart.fn"
+sed -n '/^RESTART_CMD=/,/^fi$/p;/^restart() {/,/^}/p' scripts/self-deploy.sh >"$1/restart.fn"
 EOS
 bash "$TMP/sd.sh" "$TMP"
-harness() { # run restart() with the given NARU_DEPLOY_RESTART_CMD
-  ( LOG="$TMP/sd.log"; log() { :; }; . "$TMP/restart.fn"; restart ) 
+grep -q '^RESTART_CMD=' "$TMP/restart.fn" && grep -q '^restart() {' "$TMP/restart.fn" || fail "self-deploy restart resolution not found"
+harness() { # resolve RESTART_CMD as self-deploy does, then run restart()
+  ( repo="$REPO"; restarted=false; LOG="$TMP/sd.log"; log() { :; }; . "$TMP/restart.fn"; restart )
 }
 ( cd "$REPO"; harness ) || fail "default restart failed"
-[ "$(log)" = "kickstart -k gui/$UID_/com.naru.serve" ] || fail "default restart ran: $(log)"
-ok "self-deploy defaults to kickstart -k when the agent is installed"
+[ "$(log)" = "bootout gui/$UID_/com.naru.serve
+bootstrap gui/$UID_ $PLIST
+kickstart gui/$UID_/com.naru.serve" ] || fail "default restart ran: $(log)"
+ok "self-deploy defaults to launchd.sh restart when the agent is installed"
 : >"$TMP/launchctl.log"
 ( NARU_DEPLOY_RESTART_CMD="echo mine >>'$TMP/mine'"; harness ) || fail "explicit restart failed"
 [ -z "$(log)" ] && [ -e "$TMP/mine" ] || fail "explicit command did not win"
@@ -115,6 +133,9 @@ ok "uninstall boots out and removes the plist"
 ( harness ) && fail "restart with no plist and no command should fail"
 [ -z "$(log)" ] || fail "restart touched launchctl with no plist"
 ok "no plist and no command: still cannot restart"
+scripts/launchd.sh restart >/dev/null 2>&1 && fail "launchd.sh restart with no plist exited 0"
+[ -z "$(log)" ] || fail "launchd.sh restart touched launchctl with no plist"
+ok "launchd.sh restart refuses with no plist"
 
 plist_path() { sed -n '/<key>PATH<\/key>/{n;s/.*<string>\(.*\)<\/string>.*/\1/p;}'; }
 FIXED="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
@@ -174,6 +195,10 @@ rawlog | grep -q 'com.naru.serve' && fail "dev-label install touched com.naru.se
 [ "$(log)" = "bootout gui/$UID_/com.naru.dev-x
 bootstrap gui/$UID_ $NARU_LAUNCHD_DIR/com.naru.dev-x.plist
 kickstart gui/$UID_/com.naru.dev-x" ] || fail "dev-label calls: $(log)"
+: >"$TMP/launchctl.log"
+( export NARU_LAUNCHD_LABEL=com.naru.dev-x; cd "$REPO"; harness ) || fail "dev-label self-deploy restart failed"
+rawlog | grep -q 'com.naru.serve' && fail "dev-label self-deploy restart touched com.naru.serve: $(rawlog)"
+[ "$(log | sed -n 2p)" = "bootstrap gui/$UID_ $NARU_LAUNCHD_DIR/com.naru.dev-x.plist" ] || fail "dev-label self-deploy restart: $(log)"
 NARU_LAUNCHD_LABEL=com.naru.dev-x scripts/launchd.sh uninstall >/dev/null
 [ ! -e "$NARU_LAUNCHD_DIR/com.naru.dev-x.plist" ] || fail "dev-label uninstall left the plist"
 ok "NARU_LAUNCHD_LABEL reaches the plist, its file name and every launchctl call"

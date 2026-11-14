@@ -6,7 +6,7 @@
 #   2 pause the queue, wait for idle (NARU_DEPLOY_DRAIN_TIMEOUT s; a timeout aborts
 #     and resumes), back up the db to <naru home>/backups/naru-pre-deploy-<ts>.db
 #   3 atomically swap the binary at $PREFIX/bin/naru, keeping naru.prev
-#   4 restart the server (NARU_DEPLOY_RESTART_CMD, e.g. a launchctl kickstart),
+#   4 restart the server (NARU_DEPLOY_RESTART_CMD, default scripts/launchd.sh restart),
 #     then check health: /api/version reports the new version (and its commit, when
 #     both the binary and the server report one, naru task 2655) and a live
 #     conversation open before the swap is still live (same or new agent_id) and a
@@ -24,9 +24,12 @@
 # Env: PREFIX (default ~/.local), NARU_DEPLOY_CHECKS (scripts/*-check.sh names),
 #      NARU_DEPLOY_NEW_BIN, NARU_DEPLOY_BACKUP_DIR (default ~/.naru/backups),
 #      NARU_DEPLOY_RESTART_CMD (bash; unset = on macOS with the com.naru.serve
-#      launchd agent installed (scripts/launchd.sh), `launchctl kickstart -k
-#      gui/$(id -u)/com.naru.serve`; otherwise no restart, so the deploy is judged
-#      unhealthy and rolled back), NARU_DEPLOY_DB (db path; default NARU_DB, MESA_DB,
+#      launchd agent installed, `scripts/launchd.sh restart`: bootout + bootstrap of
+#      the installed plist + kickstart, since a bare `kickstart -k` of a login-loaded
+#      agent after a binary swap is `spawn failed` (naru task 2817); otherwise no
+#      restart, so the deploy is judged unhealthy and rolled back),
+#      NARU_LAUNCHD_LABEL / NARU_LAUNCHD_DIR (the agent's label and plist dir, as in
+#      scripts/launchd.sh), NARU_DEPLOY_DB (db path; default NARU_DB, MESA_DB,
 #      then the platform default), NARU_DEPLOY_PORT (default: the config's serve.port, else 7770), NARU_DEPLOY_HEALTH_CMD
 #      (replaces the /api/version check; gets NARU_DEPLOY_EXPECT = the version that should be serving), NARU_DEPLOY_LIVE_CHECK=0 (skip the
 #      live-session check), NARU_DEPLOY_DRAIN_TIMEOUT (600), NARU_DEPLOY_HEALTH_TIMEOUT
@@ -78,7 +81,7 @@ resume_queue() { [ "$paused" -eq 1 ] && "$new_bin" queue resume >>"$LOG" 2>&1 &&
 abort() { log "ABORT: $1"; [ -s "$LOG" ] && tail -n 30 "$LOG" >&2; resume_queue; verdict aborted "$1"; exit 1; }
 
 plist_env() { # plist_env <key>: the string under that EnvironmentVariables key
-  local f="${NARU_LAUNCHD_DIR:-$HOME/Library/LaunchAgents}/com.naru.serve.plist"
+  local f="${NARU_LAUNCHD_DIR:-$HOME/Library/LaunchAgents}/${NARU_LAUNCHD_LABEL:-com.naru.serve}.plist"
   [ -f "$f" ] && awk -v k="$1" '$0 ~ "<key>"k"</key>" {getline; gsub(/.*<string>|<\/string>.*/, ""); print; exit}' "$f"
 }
 # The port the server listens on: NARU_DEPLOY_PORT, else `serve.port` in the config it
@@ -99,10 +102,11 @@ if [ -z "$PORT" ]; then
 fi
 log "health port: $PORT"
 # The restart command: NARU_DEPLOY_RESTART_CMD, else on macOS with the launchd agent
-# installed its kickstart, else none (cannot restart = unhealthy).
+# installed its re-bootstrap (scripts/launchd.sh restart), else none (cannot restart =
+# unhealthy).
 RESTART_CMD="${NARU_DEPLOY_RESTART_CMD:-}"
-if [ -z "$RESTART_CMD" ] && [ "$(uname -s)" = Darwin ] && [ -e "${NARU_LAUNCHD_DIR:-$HOME/Library/LaunchAgents}/com.naru.serve.plist" ]; then
-  RESTART_CMD="${NARU_LAUNCHCTL:-launchctl} kickstart -k gui/$(id -u)/com.naru.serve"
+if [ -z "$RESTART_CMD" ] && [ "$(uname -s)" = Darwin ] && [ -e "${NARU_LAUNCHD_DIR:-$HOME/Library/LaunchAgents}/${NARU_LAUNCHD_LABEL:-com.naru.serve}.plist" ]; then
+  RESTART_CMD="$(printf '%q' "$repo/scripts/launchd.sh") restart"
 fi
 
 if [ "$dry" -eq 1 ]; then

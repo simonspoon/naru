@@ -271,7 +271,8 @@ router of naru task 1711, whose separate agent was deleted by naru task 2407.
 ### Deploying Naru itself (naru task 2816)
 
 Rule 19: only when the person asks for Naru itself to be deployed or updated
-on this machine, or has okayed deploys, the agent runs `naru self-deploy
+on this machine, or okayed deploys in this live session (never an okay
+carried over from an earlier one; naru task 2817), the agent runs `naru self-deploy
 --repo <the naru project's local_path>` in the background (rule 12), never an
 installer or `launchctl` by hand, and says the verdict's `status`, plus its
 `reason` unless it is `swapped`; a release or a push is never part of it

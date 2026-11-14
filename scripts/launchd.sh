@@ -3,6 +3,7 @@
 #
 #   scripts/launchd.sh install [--dry-run|--print]
 #   scripts/launchd.sh uninstall [--dry-run]
+#   scripts/launchd.sh restart [--dry-run]
 #
 # install renders scripts/launchd/com.naru.serve.plist.in to
 # ~/Library/LaunchAgents/com.naru.serve.plist (binary $PREFIX/bin/naru, default
@@ -14,6 +15,10 @@
 # bootout is asynchronous, so install waits (up to NARU_LAUNCHD_WAIT s, default 10) for
 # the old service to go, retries a failed bootstrap (`5: Input/output error`) and fails
 # loudly, never printing `ok:`, if the service is still not loaded (naru task 2164).
+# restart (naru task 2817) re-loads the plist already installed, unchanged: bootout, the
+# same bootstrap, kickstart. A login-loaded agent is BTM-managed with a launch constraint
+# (LWCR) pinned to the binary's cdhash, so after a binary swap a bare `kickstart -k`
+# leaves it `spawn failed`; a fresh bootstrap from a shell carries no such constraint.
 # Env seams: NARU_LAUNCHD_DIR (plist dir), NARU_LAUNCHCTL (launchctl binary),
 # NARU_LAUNCHD_SHELL (shell asked for that PATH, default $SHELL), NARU_LAUNCHD_LABEL
 # (agent label, default com.naru.serve — a dev label for testing against real launchd),
@@ -26,8 +31,8 @@ shopt -u patsub_replacement 2>/dev/null || true  # a literal & in a substituted 
 [ "$(uname -s)" = Darwin ] || { echo "launchd.sh: macOS only" >&2; exit 2; }
 verb="${1:-}"; mode="${2:-}"
 case "$verb:$mode" in
-  install:|install:--dry-run|install:--print|uninstall:|uninstall:--dry-run) ;;
-  *) echo "usage: launchd.sh install [--dry-run|--print] | uninstall [--dry-run]" >&2; exit 2 ;;
+  install:|install:--dry-run|install:--print|uninstall:|uninstall:--dry-run|restart:|restart:--dry-run) ;;
+  *) echo "usage: launchd.sh install [--dry-run|--print] | uninstall [--dry-run] | restart [--dry-run]" >&2; exit 2 ;;
 esac
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -79,18 +84,11 @@ bootout() {
   for ((i = 0; i < n; i++)); do loaded || return 0; sleep 0.2; done
 }
 
-if [ "$verb" = install ]; then
-  if [ "$mode" = --dry-run ]; then
-    echo "would write $PLIST (bin $BIN), bootstrap $DOMAIN, kickstart $DOMAIN/$LABEL"; exit 0
-  fi
-  mkdir -p "$DIR" "$HOME/.naru"
-  render >"$PLIST.tmp"
-  plutil -lint "$PLIST.tmp" >/dev/null || { rm -f "$PLIST.tmp"; echo "launchd.sh: rendered plist is invalid" >&2; exit 1; }
-  mv -f "$PLIST.tmp" "$PLIST"
-  # Idempotent: drop a loaded copy first (absent is fine), then load the new one,
-  # retrying while launchd is still tearing the old one down (bootstrap error 5).
+# Idempotent: drop a loaded copy first (absent is fine), then load $PLIST, retrying
+# while launchd is still tearing the old one down (bootstrap error 5), and kickstart it.
+reload() {
   bootout
-  tries=0
+  local tries=0
   until "$LAUNCHCTL" bootstrap "$DOMAIN" "$PLIST"; do
     tries=$((tries + 1))
     if [ "$tries" -ge 5 ]; then
@@ -101,8 +99,24 @@ if [ "$verb" = install ]; then
   done
   "$LAUNCHCTL" kickstart "$DOMAIN/$LABEL"
   loaded || { echo "launchd.sh: $LABEL is not loaded after bootstrap; naru serve is NOT running" >&2; exit 1; }
+}
+
+if [ "$verb" = install ]; then
+  if [ "$mode" = --dry-run ]; then
+    echo "would write $PLIST (bin $BIN), bootstrap $DOMAIN, kickstart $DOMAIN/$LABEL"; exit 0
+  fi
+  mkdir -p "$DIR" "$HOME/.naru"
+  render >"$PLIST.tmp"
+  plutil -lint "$PLIST.tmp" >/dev/null || { rm -f "$PLIST.tmp"; echo "launchd.sh: rendered plist is invalid" >&2; exit 1; }
+  mv -f "$PLIST.tmp" "$PLIST"
+  reload
   echo "ok: installed $PLIST; naru serve now runs under launchd (logs ~/.naru/serve.log)"
   echo "note: a hand-run 'naru serve' on port 7770 must be quit first or the two collide" >&2
+elif [ "$verb" = restart ]; then
+  [ -f "$PLIST" ] || { echo "launchd.sh: no $PLIST; run scripts/launchd.sh install first" >&2; exit 1; }
+  if [ "$mode" = --dry-run ]; then echo "would bootout $DOMAIN/$LABEL, bootstrap $PLIST unchanged, kickstart"; exit 0; fi
+  reload
+  echo "ok: restarted $LABEL from $PLIST"
 else
   if [ "$mode" = --dry-run ]; then echo "would bootout $DOMAIN/$LABEL and remove $PLIST"; exit 0; fi
   bootout

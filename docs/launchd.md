@@ -35,9 +35,20 @@ to restart, so a real redeploy rolls back. The `com.naru.serve` user agent fixes
   install from the shell that started the manual server to keep the same db. Re-run to change.
 - `scripts/launchd.sh install --print` shows the plist; `--dry-run` shows the plan.
   `uninstall` boots the agent out and removes the plist.
-- Self-deploy: with `NARU_DEPLOY_RESTART_CMD` unset and the plist present it restarts with
-  `launchctl kickstart -k gui/$(id -u)/com.naru.serve`; an explicit value always wins; no
-  plist keeps "unset = cannot restart". Other platforms are unchanged.
+- `scripts/launchd.sh restart` (naru task 2817) re-loads the plist already installed,
+  unchanged: the same bootout, bootstrap (with its wait and retries) and kickstart, and
+  exits 1 with no plist. Why not a bare `kickstart -k`: an agent launchd loaded at login
+  is managed by Background Task Management, with a launch constraint (`managed LWCR`,
+  `launchctl print` shows it under `properties`) pinned to the binary's cdhash. After the
+  binary is swapped, a kickstart leaves it `job state = spawn failed`. A bootstrap from a
+  shell carried no such constraint in every case checked (the 2026-11-04 incident was fixed
+  by exactly that), so it spawns the new binary. The cost: between bootout and bootstrap
+  the job is unloaded, so a restart cut short there leaves no `KeepAlive` to bring it back
+  (run `scripts/launchd.sh restart` again).
+- Self-deploy: with `NARU_DEPLOY_RESTART_CMD` unset and the plist present
+  (`$NARU_LAUNCHD_DIR/$NARU_LAUNCHD_LABEL.plist`, defaults as above) it restarts with
+  `scripts/launchd.sh restart`; an explicit value always wins; no plist keeps "unset =
+  cannot restart". Other platforms are unchanged.
 
 ## One manual cutover
 
