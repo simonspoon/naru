@@ -715,7 +715,11 @@ impl CloseBlockers {
                 "  shell pid {pid}: {command} - stop it with KillShell / kill {pid}"
             ));
         }
-        lines.push("or pass --force \"<reason>\" to close anyway".to_string());
+        lines.push(
+            "wait for each to finish (or stop it as shown), then re-run this close; \
+             or pass --force \"<reason>\" to close anyway"
+                .to_string(),
+        );
         lines.join("\n")
     }
 }
@@ -2699,6 +2703,7 @@ echo "backgrounded · cf0c3945 · proj: do the thing""#,
         assert!(msg.contains("shell pid 4242"));
         assert!(msg.contains("kill 4242"));
         assert!(!msg.contains(&"x".repeat(121)));
+        assert!(msg.contains("then re-run this close"), "{msg}");
         assert!(msg.ends_with("or pass --force \"<reason>\" to close anyway"));
         assert_eq!(b.summary(), "1 shell(s), 1 subagent(s)");
         assert!(CloseBlockers::default().is_empty());

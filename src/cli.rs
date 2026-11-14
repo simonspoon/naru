@@ -6739,19 +6739,30 @@ fn close_artifact(
     }
     let since = task.claimed_at.as_deref().unwrap_or(&task.created_at);
     let local_path = store.get_project(task.project_id)?.local_path;
-    let searched = match &local_path {
+    let (searched, commit_it) = match &local_path {
         Some(dir) => match git::commit_citing_task(dir, since, task.id) {
             Some(sha) => return Ok(Some(sha)),
-            None => format!(
-                "no commit in {dir} cites 'task {}' since {since} (or git could not read it)",
-                task.id
+            None => (
+                format!(
+                    "no commit in {dir} cites 'task {}' since {since} (or git could not read it)",
+                    task.id
+                ),
+                format!(
+                    "commit the work in {dir} with a message starting 'task {}:' and re-run this, \
+                     or ",
+                    task.id
+                ),
             ),
         },
-        None => "its project has no local_path to look for a commit in".to_string(),
+        None => (
+            "its project has no local_path to look for a commit in".to_string(),
+            String::new(),
+        ),
     };
     Err(Error::Validation(format!(
-        "task {} has no artifact and {searched}; pass --artifact <commit sha, PR url or path>, \
-         or --no-artifact \"<reason>\" (e.g. \"config only, no code change\")",
+        "task {} has no artifact and {searched}; {commit_it}pass --artifact <commit sha, PR url \
+         or path> (e.g. a file outside the repo you changed), or --no-artifact \"<reason>\" \
+         (e.g. \"config only, no code change\")",
         task.id
     )))
 }
@@ -12149,6 +12160,16 @@ mod tests {
             matches!(&err, Error::Validation(m) if m.contains("--no-artifact")),
             "{err:?}"
         );
+        // Each way out is named: a citing commit, an artifact, or a reason.
+        let Error::Validation(msg) = err else {
+            unreachable!()
+        };
+        let commit = format!(
+            "commit the work in {path} with a message starting 'task {}:'",
+            task.id
+        );
+        assert!(msg.contains(&commit), "{msg}");
+        assert!(msg.contains("--artifact <commit sha"), "{msg}");
     }
 
     #[test]
@@ -12192,6 +12213,13 @@ mod tests {
             matches!(&err, Error::Validation(m) if m.contains("no local_path")),
             "{err:?}"
         );
+        // No repo to commit in, so the remedy is an artifact or a reason only.
+        let Error::Validation(msg) = err else {
+            unreachable!()
+        };
+        assert!(!msg.contains("commit the work"), "{msg}");
+        assert!(msg.contains("pass --artifact"), "{msg}");
+        assert!(msg.contains("--no-artifact"), "{msg}");
         assert_eq!(
             close_artifact(&store, &task, &close_patch(), Some("plan only")).unwrap(),
             None
