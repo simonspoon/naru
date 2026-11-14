@@ -218,7 +218,7 @@ print("data")
 esac
 [ -n "$why" ] || exit 0
 
-jq -nc --arg r "Dev sandbox: $why. Never install to, restart or overwrite the real install (~/.local/bin/naru, com.naru.serve :7777, com.naru.audio :7870, $app); use scripts/dev-env.sh (:7771). See docs/dev-env.md." \
+jq -nc --arg r "Dev sandbox: $why. Never install to, restart or overwrite the real install (~/.local/bin/naru, com.naru.serve :7777, com.naru.audio :7870, $app); use scripts/dev-env.sh (:7771). Only reading or mentioning it? Run it as a plain command with no pipe, redirect, heredoc or $, or put the text in a file with the Write tool. See docs/dev-env.md." \
   '{hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: $r}}' 2>/dev/null
 exit 0
 "##;
@@ -604,5 +604,39 @@ mod tests {
             denies("git commit -m \"install.sh\"", &[("PATH", path)]),
             Some(true)
         );
+    }
+
+    /// The deny reason tells the agent how to rephrase a harmless read.
+    #[test]
+    fn deny_reason_says_how_to_rephrase() {
+        if Command::new("jq").arg("--version").output().is_err() {
+            return;
+        }
+        let hook = |command: &str| {
+            let payload =
+                serde_json::json!({"tool_name": "Bash", "tool_input": {"command": command}});
+            let mut child = Command::new("bash")
+                .args(["-c", DEV_GUARD_HOOK])
+                .env_clear()
+                .env("PATH", std::env::var("PATH").unwrap())
+                .env("HOME", "/h")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(payload.to_string().as_bytes())
+                .unwrap();
+            String::from_utf8_lossy(&child.wait_with_output().unwrap().stdout).to_string()
+        };
+        let denied = hook("cat scripts/install.sh | head -n 5");
+        assert!(denied.contains("\"deny\""));
+        assert!(denied.contains(
+            "Only reading or mentioning it? Run it as a plain command with no pipe, redirect, heredoc or $, or put the text in a file with the Write tool."
+        ));
+        assert_eq!(hook("cat scripts/install.sh"), "");
     }
 }
