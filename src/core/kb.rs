@@ -1102,23 +1102,40 @@ fn apply_one(
 }
 
 /// `existing` plus the facts of `incoming` it lacks: [`units`] compared as
-/// they differ byte for byte once whitespace runs collapse (task 2848). `None` when
+/// they differ byte for byte once whitespace runs collapse (task 2848), except
+/// that a unit with code is compared exactly (task 2849). `None` when
 /// it lacks none. When it lacks them all, `incoming` is joined as it is.
 fn fold_body(existing: &str, incoming: &str) -> Option<String> {
     let held = units(existing);
     let collapse = |u: &str| u.split_whitespace().collect::<Vec<_>>().join(" ");
-    let mut known: HashSet<String> = held.iter().map(|(u, _)| collapse(u)).collect();
+    let mut known: Vec<String> = held.iter().map(|(u, _)| u.clone()).collect();
     let held_tokens: Vec<Vec<String>> = held.iter().map(|(u, _)| fold_tokens(u)).collect();
     let all = units(incoming);
     let new: Vec<&(String, bool)> = all
         .iter()
-        .filter(|(u, _)| known.insert(collapse(u)))
+        .filter(|(u, _)| {
+            // Naru task 2849: a pair with code in either unit is the same
+            // only when byte-identical (units already drop trailing blanks).
+            let seen = known.iter().any(|k| {
+                if is_code(u) || is_code(k) {
+                    k == u
+                } else {
+                    collapse(k) == collapse(u)
+                }
+            });
+            known.push(u.clone());
+            !seen
+        })
         .filter(|(u, _)| {
             // Naru task 2846: a unit is dropped only when it adds no token at
-            // all to one held unit. Short units are never judged so.
-            fold_tokens(u).len() < FOLD_MIN_WORDS || {
+            // all to one held unit. Short units are never judged so. Code is
+            // never judged so (task 2849).
+            is_code(u) || fold_tokens(u).len() < FOLD_MIN_WORDS || {
                 let w = fold_tokens(u);
-                !held_tokens.iter().any(|h| is_subsequence(&w, h))
+                !held
+                    .iter()
+                    .zip(&held_tokens)
+                    .any(|((h, _), t)| !is_code(h) && is_subsequence(&w, t))
             }
         })
         .collect();
@@ -1837,6 +1854,17 @@ fn fold_tokens(text: &str) -> Vec<String> {
             if t.is_empty() { w } else { t }.to_string()
         })
         .collect()
+}
+
+/// Whether a [`units`] unit holds code, where whitespace is meaning (naru task
+/// 2849): a fence line, or in a non-bullet unit a line indented by a tab or
+/// four spaces.
+fn is_code(unit: &str) -> bool {
+    let bullet = is_bullet(unit.lines().next().unwrap_or(""));
+    unit.lines().any(|l| {
+        l.trim_start().starts_with("```")
+            || (!bullet && (l.starts_with('\t') || l.starts_with("    ")))
+    })
 }
 
 /// Whether `a` is a non-empty contiguous run of `b`. Gaps are not allowed: a
@@ -4656,6 +4684,39 @@ mod tests {
         // a skip naming a note that does hold it stays a skip
         let (_, r) = file_as(&root, "s7", "src-7", json!([skip("quokka-flange")]));
         assert_eq!(counts(&r), (0, 0, 1, 0), "{r}");
+    }
+
+    #[test]
+    fn fold_keeps_code_that_differs_only_by_whitespace() {
+        // naru task 2849
+        let cases = [
+            (
+                "Run it like this:\n\n```python\nif x:\n    run()\n```",
+                "```python\nif x:\n  run()\n```",
+            ),
+            (
+                "```yaml\njob:\n  steps:\n    - run: a\n```",
+                "```yaml\njob:\n    steps:\n      - run: a\n```",
+            ),
+            (
+                "```make\nbuild:\n\tcc -o a a.c\n```",
+                "```make\nbuild:\n    cc -o a a.c\n```",
+            ),
+            ("Build the thing:\n\n    cc -o a a.c", "\tcc -o a a.c"),
+        ];
+        for (held, incoming) in cases {
+            let out = fold_body(held, incoming).expect(incoming);
+            assert!(out.contains(incoming) && out.contains(held), "{incoming}");
+        }
+        let code = "```python\nif x:\n    run()\n```";
+        // prose still collapses beside code; a bullet's indent is not code
+        let held = format!("{code}\n\nThe  flag is on.\n\n- a\n    b");
+        assert_eq!(fold_body(&held, "The flag is on.\n\n- a\n  b"), None);
+        // prose equal to a held code unit's text is kept, and the reverse
+        assert!(fold_body("    run()", "run()").is_some());
+        assert!(fold_body("run()", "    run()").is_some());
+        assert_eq!(fold_body(code, code), None);
+        assert_eq!(fold_body(code, &code.replace('\n', "  \n")), None);
     }
 
     /// Naru task 2846: a unit is dropped only when it adds no token at all.

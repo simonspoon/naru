@@ -336,6 +336,22 @@ for pair in "${PAIRS[@]}"; do
 done
 ok "dedupe: flag, path, reorder, stop-word and -V versus -v near-misses keep both units (task 2848)"
 
+# Code is whitespace-exact: an indentation-only (or tab versus spaces) correction is kept, an identical one folds (task 2849).
+CODE_A='```python\nif x:\n    run()\n```'
+CODE_B='```python\nif x:\n  run()\n```'
+stage add "{\"ops\":[{\"op\":\"create\",\"topic\":\"tools\",\"slug\":\"codeind\",\"title\":\"Code ind\",\"tags\":[\"codeind\"],\"body\":\"$CODE_A\"}]}"
+run 0 "$MESA" kb add "code first"
+wait_jobs $((6 + 2 * n + 1))
+stage add "{\"ops\":[{\"op\":\"append\",\"topic\":\"tools\",\"slug\":\"codeind\",\"body\":\"$CODE_B\"}]}"
+run 0 "$MESA" kb add "code reindented"
+wait_jobs $((6 + 2 * n + 2))
+stage add "{\"ops\":[{\"op\":\"append\",\"topic\":\"tools\",\"slug\":\"codeind\",\"body\":\"$CODE_B\"}]}"
+run 0 "$MESA" kb add "code reindented again"
+wait_jobs $((6 + 2 * n + 3))
+run 0 "$MESA" kb show topics/tools/codeind.md
+[ "$(jqs .body)" = "$(printf '%b\n\n%b' "$CODE_A" "$CODE_B")" ] || fail "indentation-only code must be kept once each: $STDOUT"
+ok "dedupe: code differing only by indentation is kept, an identical code unit folds (task 2849)"
+
 # ---- concurrency: 20 adds at once ----
 
 touch "$STUB_DIR/add-dynamic"
