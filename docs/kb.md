@@ -88,10 +88,11 @@ new one, and it had no way to say "already there".
   its trigger, the fix, no narrative.
 - **`skip`** names an existing note by topic and slug; `body` is the restated
   fact in one line and may be empty; `title` and `tags` are not used. A skip
-  naming a note that does not exist (the model misnamed it; 1 of 360 adds in
-  the rehearsal below) files nothing and refuses nothing: it has no note to
-  key a row to, so it writes no row and is marked `missing: true` in the
-  report. The raw text is still kept in `arrivals/`.
+  naming a note that does not exist (the model misnamed it) is never a drop
+  (naru task 2845): a `create` of that name, so the text is filed. A skip is
+  also checked against the named note's text: when the note lacks the fact it
+  is an `append`. Only an empty-body skip of a missing note is the old
+  `missing: true` no-op. The raw text is always kept in `arrivals/`.
 - **Naru checks every op itself**, whatever the model answered:
   - a `create` is scored against every note with `kb dupes`' own measure
     and, at or above its 0.3 threshold, applied to the best-scoring note
@@ -99,7 +100,10 @@ new one, and it had no way to say "already there".
     when no similar note has room.
     "Applied to that note" means an `append` of only the paragraphs, bullets
     and code blocks it lacks (`kb merge`'s compare: whitespace- and
-    case-insensitive), or a `skip` when it lacks none. A note with no room
+    case-insensitive), or a `skip` when it lacks none. A unit of 5 or more
+    scored words is also dropped when 70% of its words are in one unit the
+    note already holds (a rewording, naru task 2845), so a reworded fact is
+    not held twice; shorter units are only compared exactly. A note with no room
     left (the 16 KiB cap) is passed over for the next best. An op with fewer
     than 8 distinct words (title and body) is not scored: the overlap of a
     few words is noise;

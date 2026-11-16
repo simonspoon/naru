@@ -286,6 +286,31 @@ run 0 "$MESA" kb list --topic pets
 [ "$(jqs '.[0].title')" = "The cat" ] || fail "append must keep the title: $STDOUT"
 ok "hostile body: appended and created byte-identical, the prompt carried it fenced, nothing executed"
 
+# ---- a reworded add is folded away; a model skip is verified (naru task 2845) ----
+
+FACT_A='The quokka flange drifts out of calibration every month and needs the zirconium shim recalibrated before the weekly bake.'
+FACT_B='Before the weekly bake the zirconium shim must be recalibrated, because the quokka flange drifts out of calibration every month.'
+stage add "{\"ops\":[{\"op\":\"create\",\"topic\":\"tools\",\"slug\":\"quokka\",\"title\":\"Quokka flange\",\"tags\":[\"quokka\"],\"body\":\"$FACT_A\"}]}"
+run 0 "$MESA" kb add quokka original
+wait_jobs 4
+stage add "{\"ops\":[{\"op\":\"create\",\"topic\":\"tools\",\"slug\":\"quokka-again\",\"title\":\"Quokka flange\",\"tags\":[\"quokka\"],\"body\":\"$FACT_B\"}]}"
+run 0 "$MESA" kb add quokka reworded
+wait_jobs 5
+run 0 "$MESA" kb show topics/tools/quokka.md
+[ "$(jqs .body)" = "$FACT_A" ] && [ "$(jqs .seen)" = "2" ] || fail "a reworded add must leave the fact once with seen=2: $STDOUT"
+[ "$(grep -l 'quokka reworded' "$KB"/arrivals/*.md | wc -l | tr -d ' ')" = "1" ] || fail "the reworded raw text must be kept in arrivals"
+[ ! -e "$KB/topics/tools/quokka-again.md" ] || fail "a reworded add must not make a note"
+# A model skip naming a note that lacks the fact appends it; one naming a missing note files it.
+NEWFACT='The wombat press needs forty bar of nitrogen and a cold start below ten degrees every single time.'
+stage add "{\"ops\":[{\"op\":\"skip\",\"topic\":\"tools\",\"slug\":\"quokka\",\"title\":\"\",\"tags\":[],\"body\":\"$NEWFACT\"},{\"op\":\"skip\",\"topic\":\"tools\",\"slug\":\"no-such-note\",\"title\":\"\",\"tags\":[],\"body\":\"Ghost note text that must not be lost.\"}]}"
+run 0 "$MESA" kb add wombat skip
+wait_jobs 6
+run 0 "$MESA" kb show topics/tools/quokka.md
+jqs .body | grep -qF "wombat press" || fail "an unverified skip must append the fact: $STDOUT"
+run 0 "$MESA" kb show topics/tools/no-such-note.md
+[ "$(jqs .body)" = "Ghost note text that must not be lost." ] || fail "a skip of a missing note must file it: $STDOUT"
+ok "dedupe: a reworded add folds to nothing (seen=2, raw kept), an unverified model skip appends, a skip of a missing note creates it"
+
 # ---- concurrency: 20 adds at once ----
 
 touch "$STUB_DIR/add-dynamic"

@@ -879,8 +879,10 @@ fn topic_count(root: &Path) -> usize {
 /// `skip` when that is nothing. A `skip`, asked for or arrived at, writes no
 /// note: one `skip` row in `log.jsonl` and one in `sightings.jsonl` naming
 /// the existing note, once per add and note ([`sighted`]), so re-running a
-/// held spool text changes nothing. A `skip` naming a note that does not exist
-/// records nothing and is marked `missing`.
+/// held spool text changes nothing. A `skip` of an op with a body is checked
+/// against the note it names (naru task 2845): a note lacking the fact gets an
+/// `append`, a missing one a `create`; only an empty-body skip of a missing
+/// note records nothing and is marked `missing`.
 fn apply_one(
     root: &Path,
     raw: &Value,
@@ -905,6 +907,24 @@ fn apply_one(
     // What is applied: a `create` or `append` can turn into another kind.
     let mut kind = op.op.as_str();
     let mut redirect = false;
+    // A model's `skip` is a claim that the named note holds the fact: checked
+    // against its text (naru task 2845). A note that lacks it is appended to;
+    // one that does not exist is a `create`; neither is ever a silent drop.
+    if kind == "skip" && !body.is_empty() {
+        match existing_note_file(root, &topic, &slug).and_then(|f| fs::read_to_string(f).ok()) {
+            None => kind = "create",
+            Some(text) => {
+                // No room to append: it is filed as a note of its own.
+                if let Some(joined) = fold_body(&parse_note(&text, &slug).body, body) {
+                    kind = if joined.len() <= NOTE_MAX {
+                        "append"
+                    } else {
+                        "create"
+                    };
+                }
+            }
+        }
+    }
     if kind == "create" {
         for (t, s, held) in near_duplicates(root, &op, body)? {
             match fold_body(&held, body) {
@@ -1085,11 +1105,28 @@ fn apply_one(
 /// `kb merge` compares them (whitespace- and case-insensitively). `None` when
 /// it lacks none. When it lacks them all, `incoming` is joined as it is.
 fn fold_body(existing: &str, incoming: &str) -> Option<String> {
-    let mut known: HashSet<String> = units(existing).iter().map(|(u, _)| squash(u)).collect();
+    let held = units(existing);
+    let mut known: HashSet<String> = held.iter().map(|(u, _)| squash(u)).collect();
+    let mut ids = std::collections::HashMap::new();
+    let held_words: Vec<(Vec<u32>, Vec<String>)> = held
+        .iter()
+        .map(|(u, _)| (word_ids(u, &mut ids), sign_tokens(u)))
+        .collect();
     let all = units(incoming);
     let new: Vec<&(String, bool)> = all
         .iter()
         .filter(|(u, _)| known.insert(squash(u)))
+        .filter(|(u, _)| {
+            // A reworded unit (naru task 2845): most of its words already sit
+            // in one unit the note holds. Short units are never judged so.
+            let w = word_ids(u, &mut ids);
+            w.len() < PARAPHRASE_MIN_WORDS
+                || !held_words.iter().any(|(h, hs)| {
+                    overlap(&w, h) >= PARAPHRASE_OVERLAP
+                        && jaccard(&w, h) >= PARAPHRASE_JACCARD
+                        && *hs == sign_tokens(u)
+                })
+        })
         .collect();
     if new.is_empty() {
         return None;
@@ -1789,6 +1826,56 @@ fn word_ids(text: &str, ids: &mut std::collections::HashMap<String, u32>) -> Vec
     out.sort_unstable();
     out.dedup();
     out
+}
+
+/// A unit counts as a rewording of a held one when this share of its words is
+/// in the held one (see [`overlap`]).
+const PARAPHRASE_OVERLAP: f64 = 0.7;
+
+/// A unit with fewer scored words than this is never judged a rewording.
+const PARAPHRASE_MIN_WORDS: usize = 5;
+
+/// Both measures must hold, so one long held unit cannot swallow a short one.
+const PARAPHRASE_JACCARD: f64 = 0.5;
+
+/// The numbers and negations of `text`, which [`word_ids`] drops but which
+/// change a fact: two units that differ in them are not rewordings.
+fn sign_tokens(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = text
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| {
+            w.chars().any(|c| c.is_ascii_digit())
+                || matches!(
+                    *w,
+                    "not"
+                        | "no"
+                        | "never"
+                        | "without"
+                        | "cannot"
+                        | "don"
+                        | "doesn"
+                        | "isn"
+                        | "aren"
+                        | "won"
+                        | "can"
+                        | "cant"
+                        | "dont"
+                        | "nor"
+                        | "t"
+                )
+        })
+        .map(String::from)
+        .collect();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// The share of `a`'s words that `b` also holds (both sorted, deduplicated).
+fn overlap(a: &[u32], b: &[u32]) -> f64 {
+    let both = a.iter().filter(|w| b.binary_search(w).is_ok()).count();
+    both as f64 / a.len().max(1) as f64
 }
 
 fn jaccard(a: &[u32], b: &[u32]) -> f64 {
@@ -3880,7 +3967,8 @@ mod tests {
         assert_eq!(tree(&root), snap);
         // a dedupe skip (naru task 2833) is a log row and a real row: a later
         // backfill doubles neither, and gives it back when the file is lost
-        let skip = json!({"op":"skip","topic":"a","slug":"new","body":"seen again"});
+        let held = show(&root, "topics/a/new.md").unwrap().body;
+        let skip = json!({"op":"skip","topic":"a","slug":"new","body":held});
         let r = apply_ops(&root, &ops(json!([skip])), "t", None, Some("18b00000000-x")).unwrap();
         assert_eq!(r["applied"][0]["op"], "skip", "{r}");
         assert_eq!(show(&root, "topics/a/new.md").unwrap().seen, 4);
@@ -4511,6 +4599,98 @@ mod tests {
         )
     }
 
+    /// Naru task 2845: a reworded add folds to nothing; a model skip is checked.
+    #[test]
+    fn paraphrase_and_unverified_skip() {
+        let (_d, root) = kb();
+        let quokka = "topics/tools/quokka-flange.md";
+        let new_op = |slug: &str, body: &str| {
+            json!({"op":"create","topic":"tools","slug":slug,"title":"Quokka flange calibration",
+                "tags":["quokka"],"body":body})
+        };
+        let (_, r) = file_as(&root, "s1", "src-1", json!([new_op("quokka-flange", FACT)]));
+        assert_eq!(counts(&r), (1, 0, 0, 0), "{r}");
+        // the same fact reworded: seen twice, the body holds it once
+        let reworded = "- Every month the quokka flange drifts out of calibration.\n- Before the weekly bake, recalibrate it with the zirconium shim.";
+        let (id2, r) = file_as(
+            &root,
+            "s2",
+            "src-2",
+            json!([new_op("flange-drift", reworded)]),
+        );
+        assert_eq!(counts(&r), (0, 0, 1, 0), "{r}");
+        assert_eq!(show(&root, quokka).unwrap().body, FACT);
+        assert_eq!(scan(&root).unwrap().len(), 1);
+        assert!(root.join("arrivals").join(format!("{id2}.md")).exists());
+        // a reworded unit beside a new one: only the new one is appended
+        let mixed =
+            format!("{reworded}\n- The shim lives in drawer four, behind the spare gaskets.");
+        let (_, r) = file_as(
+            &root,
+            "s3",
+            "src-3",
+            json!([new_op("flange-drift", &mixed)]),
+        );
+        assert_eq!(counts(&r), (0, 1, 0, 0), "{r}");
+        assert_eq!(
+            show(&root, quokka).unwrap().body,
+            format!("{FACT}\n\n- The shim lives in drawer four, behind the spare gaskets.")
+        );
+        // a distinct note on a similar topic stays separate
+        let other = "The quokka flange gasket is replaced by the night crew whenever pressure readings climb above forty.";
+        let (_, r) = file_as(
+            &root,
+            "s4",
+            "src-4",
+            json!([
+                json!({"op":"create","topic":"tools","slug":"flange-gasket","title":"Night crew gasket swaps","tags":["gasket"],"body":other})
+            ]),
+        );
+        assert_eq!(scan(&root).unwrap().len(), 2, "{r}");
+        // a changed number or a negation is a new fact, not a rewording
+        let num = "- Set the retry limit to 5 for the upload worker pool today.";
+        let neg = "- Do not restart the cache server during a warm bake window.";
+        put(
+            &root,
+            "tools",
+            "retry",
+            "Retry limit",
+            &["retry"],
+            "- Set the retry limit to 3 for the upload worker pool today.",
+        );
+        let ap = json!({"op":"append","topic":"tools","slug":"retry","body":num});
+        let (_, r) = file_as(&root, "s4b", "src-4b", json!([ap]));
+        assert_eq!(counts(&r), (0, 1, 0, 0), "{r}");
+        put(
+            &root,
+            "tools",
+            "cache",
+            "Cache",
+            &["cache"],
+            "- Restart the cache server during a warm bake window.",
+        );
+        let ap = json!({"op":"append","topic":"tools","slug":"cache","body":neg});
+        let (_, r) = file_as(&root, "s4c", "src-4c", json!([ap]));
+        assert_eq!(counts(&r), (0, 1, 0, 0), "{r}");
+        // a reworded append is a skip
+        let ap = json!({"op":"append","topic":"tools","slug":"quokka-flange","body":reworded});
+        let (_, r) = file_as(&root, "s4d", "src-4d", json!([ap]));
+        assert_eq!(counts(&r), (0, 0, 1, 0), "{r}");
+        // a model skip naming a note that lacks the fact is an append
+        let lacks =
+            "A wombat press needs forty bar of nitrogen and a cold start below ten degrees.";
+        let skip = |slug: &str| json!({"op":"skip","topic":"tools","slug":slug,"title":"","tags":[],"body":lacks});
+        let (_, r) = file_as(&root, "s5", "src-5", json!([skip("quokka-flange")]));
+        assert_eq!(counts(&r), (0, 1, 0, 0), "{r}");
+        assert!(show(&root, quokka).unwrap().body.contains("wombat press"));
+        // and one naming a missing note is a new note
+        let (_, r) = file_as(&root, "s6", "src-6", json!([skip("no-such-note")]));
+        assert_eq!(counts(&r), (1, 0, 0, 0), "{r}");
+        // a skip naming a note that does hold it stays a skip
+        let (_, r) = file_as(&root, "s7", "src-7", json!([skip("quokka-flange")]));
+        assert_eq!(counts(&r), (0, 0, 1, 0), "{r}");
+    }
+
     /// Dedupe at the door (naru task 2833): a fact the kb already holds makes
     /// no new note, whatever op the model answers; a new one does.
     #[test]
@@ -4559,7 +4739,7 @@ mod tests {
 
         // the model's own skip, from a third session: seen 3, three sources
         let skip = json!({"op":"skip","topic":"tools","slug":"quokka-flange","title":"",
-            "tags":[],"body":"The flange drifts monthly."});
+            "tags":[],"body":"- The quokka flange drifts out of calibration every month."});
         let (_, r) = file_as(&root, "s3", "src-3", json!([skip]));
         assert_eq!(counts(&r), (0, 0, 1, 0), "{r}");
         let n = show(&root, quokka).unwrap();
@@ -4637,17 +4817,12 @@ mod tests {
         );
         assert_eq!(counts(&r), (2, 0, 0, 0), "{r}");
 
-        // a skip of a note that does not exist records nothing, is marked,
-        // and is not a refusal: the text still leaves the spool
+        // a skip of a note that does not exist never drops the text: it is
+        // filed as a note of that name (naru task 2845)
         let ghost = json!({"op":"skip","topic":"tools","slug":"ghost","body":"x"});
-        let rows_before = sightings(&root).len();
         let (id, r) = file_as(&root, "s8", "src-8", json!([ghost]));
-        assert_eq!(sightings(&root).len(), rows_before);
-        assert_eq!(counts(&r), (0, 0, 0, 0), "{r}");
-        assert_eq!(
-            r["applied"][0],
-            json!({"op":"skip","path":"topics/tools/ghost.md","bytes":0,"missing":true})
-        );
+        assert_eq!(counts(&r), (1, 0, 0, 0), "{r}");
+        assert_eq!(r["applied"][0]["path"], "topics/tools/ghost.md");
         assert!(root.join("arrivals").join(format!("{id}.md")).exists());
 
         // a near-duplicate note with no room left is passed over: the op is
@@ -4708,7 +4883,7 @@ mod tests {
         );
         let good = json!({"op":"create","topic":"tools","slug":"quokka-flange",
             "title":"Quokka flange calibration","tags":["quokka"],"body":FACT});
-        let seen = json!({"op":"skip","topic":"tools","slug":"wombat","body":"Forty bar."});
+        let seen = json!({"op":"skip","topic":"tools","slug":"wombat","body":"The wombat press needs forty bar."});
         let bad = create("Bad Topic", "x", "b");
         let fixed = create(
             "tools",
@@ -4821,7 +4996,8 @@ mod tests {
         let f = root.join("sightings.jsonl");
         let whole = fs::read_to_string(&f).unwrap();
         fs::write(&f, format!("{whole}{{\"ts\":\"2026-01-01T00:00")).unwrap();
-        let skip = json!({"op":"skip","topic":"a","slug":"b","body":"again"});
+        let held = show(&root, "topics/a/b.md").unwrap().body;
+        let skip = json!({"op":"skip","topic":"a","slug":"b","body":held});
         apply_ops(&root, &ops(json!([skip])), "t", None, None).unwrap();
         let app = json!({"op":"append","topic":"a","slug":"b","body":"more"});
         apply_ops(&root, &ops(json!([app])), "t", None, None).unwrap();
