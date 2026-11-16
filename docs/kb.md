@@ -99,13 +99,14 @@ new one, and it had no way to say "already there".
     (ties by path), so a create adds a pair `kb dupes` would report only
     when no similar note has room.
     "Applied to that note" means an `append` of only the paragraphs, bullets
-    and code blocks it lacks (`kb merge`'s compare: whitespace- and
-    case-insensitive), or a `skip` when it lacks none. A unit of 8 or more
-    words is also dropped when it adds no token to one held unit (naru task
-    2846): lowercased, edge punctuation trimmed, no word ignored (not even `a`, `the`, `is`; naru task 2847), its
-    token sequence equals or is a contiguous run of the held unit's,
-    with the same numbers and negations. Any other token (a flag, a path, a
-    version, a spelled-out number) or a different order keeps it, so a
+    and code blocks it lacks (compared byte for byte once whitespace
+    runs collapse; naru task 2848), or a `skip` when it lacks none. A unit
+    of 8 or more tokens is also dropped when its tokens equal or are a
+    contiguous run of one held unit's (naru tasks 2846, 2848). Tokens split
+    on whitespace only and compare exactly: no lowercasing, no stopwords,
+    no stripping of symbols, quotes, backticks or operators; only trailing
+    `.` `,` `;` `:` is cut from a token's end. Any other token (a case, a
+    flag, a path, `<` versus `>`) or a different order keeps it, so a
     looser paraphrase is appended and left to a later compaction; shorter
     units are only compared exactly. A note with no room
     left (the 16 KiB cap) is passed over for the next best. An op with fewer

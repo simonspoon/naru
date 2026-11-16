@@ -289,7 +289,7 @@ ok "hostile body: appended and created byte-identical, the prompt carried it fen
 # ---- a repeated add is folded away; a model skip is verified (naru tasks 2845, 2846) ----
 
 FACT_A='The quokka flange drifts out of calibration every month and needs the zirconium shim recalibrated before the weekly bake.'
-FACT_B='THE QUOKKA FLANGE DRIFTS OUT OF CALIBRATION EVERY MONTH AND NEEDS THE ZIRCONIUM SHIM RECALIBRATED BEFORE THE WEEKLY BAKE!'
+FACT_B='The quokka flange drifts out of calibration   every month and needs the zirconium shim recalibrated before the weekly   bake.'
 stage add "{\"ops\":[{\"op\":\"create\",\"topic\":\"tools\",\"slug\":\"quokka\",\"title\":\"Quokka flange\",\"tags\":[\"quokka\"],\"body\":\"$FACT_A\"}]}"
 run 0 "$MESA" kb add quokka original
 wait_jobs 4
@@ -319,6 +319,7 @@ declare -a PAIRS=(
   "The service reads ~/.config/naru/config.json at startup every single time.|The service reads ~/.naru/config.json at startup every single time."
   "The build is fine on linux, fails on macos when the cache is cold today.|The build is fine on macos, fails on linux when the cache is cold today."
   "Copy the config file from a to b before you restart the upload worker nightly job|Copy the config file from b to a before you restart the upload worker nightly job"
+  "Run the tool with -V to print the version of the build you have installed|Run the tool with -v to print the version of the build you have installed"
 )
 n=0
 for pair in "${PAIRS[@]}"; do
@@ -333,7 +334,7 @@ for pair in "${PAIRS[@]}"; do
   run 0 "$MESA" kb show "topics/tools/pair$n.md"
   jqs .body | grep -qF -- "$A" && jqs .body | grep -qF -- "$B" || fail "pair $n: both facts must stay in the note: $STDOUT"
 done
-ok "dedupe: flag, path, reorder and stop-word near-misses keep both units"
+ok "dedupe: flag, path, reorder, stop-word and -V versus -v near-misses keep both units (task 2848)"
 
 # ---- concurrency: 20 adds at once ----
 

@@ -1102,26 +1102,23 @@ fn apply_one(
 }
 
 /// `existing` plus the facts of `incoming` it lacks: [`units`] compared as
-/// `kb merge` compares them (whitespace- and case-insensitively). `None` when
+/// they differ byte for byte once whitespace runs collapse (task 2848). `None` when
 /// it lacks none. When it lacks them all, `incoming` is joined as it is.
 fn fold_body(existing: &str, incoming: &str) -> Option<String> {
     let held = units(existing);
-    let mut known: HashSet<String> = held.iter().map(|(u, _)| squash(u)).collect();
+    let collapse = |u: &str| u.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut known: HashSet<String> = held.iter().map(|(u, _)| collapse(u)).collect();
     let held_tokens: Vec<Vec<String>> = held.iter().map(|(u, _)| fold_tokens(u)).collect();
     let all = units(incoming);
     let new: Vec<&(String, bool)> = all
         .iter()
-        .filter(|(u, _)| known.insert(squash(u)))
+        .filter(|(u, _)| known.insert(collapse(u)))
         .filter(|(u, _)| {
             // Naru task 2846: a unit is dropped only when it adds no token at
             // all to one held unit. Short units are never judged so.
             fold_tokens(u).len() < FOLD_MIN_WORDS || {
                 let w = fold_tokens(u);
-                let signs = sign_tokens(u);
-                !held
-                    .iter()
-                    .zip(&held_tokens)
-                    .any(|((hu, _), h)| is_subsequence(&w, h) && sign_tokens(hu) == signs)
+                !held_tokens.iter().any(|h| is_subsequence(&w, h))
             }
         })
         .collect();
@@ -1828,20 +1825,17 @@ fn word_ids(text: &str, ids: &mut std::collections::HashMap<String, u32>) -> Vec
 /// A unit with fewer words than this is only ever dropped as an exact repeat.
 const FOLD_MIN_WORDS: usize = 8;
 
-/// `text` as lowercase whitespace-separated tokens, edge punctuation trimmed.
-/// Every word counts (naru task 2847). Punctuation inside a token stays, so a
-/// flag, a path or a version is one token and differs from any near miss.
+/// `text` as whitespace-separated tokens compared byte for byte (naru task
+/// 2848): no lowercasing, no stopwords, no symbol stripping. The one
+/// normalisation is trailing sentence punctuation (`.` `,` `;` `:`) cut from
+/// the end of a token; a token that would become empty is kept as it was.
+/// Used only by the drop test in [`fold_body`].
 fn fold_tokens(text: &str) -> Vec<String> {
-    const EDGE: &str = "\"'`()[]{}<>";
-    text.to_lowercase()
-        .split_whitespace()
+    text.split_whitespace()
         .map(|w| {
-            w.trim_matches(|c: char| EDGE.contains(c))
-                .trim_end_matches(|c: char| ".,;:!?".contains(c))
-                .trim_matches(|c: char| EDGE.contains(c))
+            let t = w.trim_end_matches(|c: char| ".,;:".contains(c));
+            if t.is_empty() { w } else { t }.to_string()
         })
-        .filter(|w| !w.is_empty())
-        .map(String::from)
         .collect()
 }
 
@@ -1849,40 +1843,6 @@ fn fold_tokens(text: &str) -> Vec<String> {
 /// token dropped from the middle (`only`, `off`, a clause) can flip a fact.
 fn is_subsequence(a: &[String], b: &[String]) -> bool {
     !a.is_empty() && b.windows(a.len()).any(|w| w == a)
-}
-
-/// The numbers and negations of `text`, which [`word_ids`] drops but which
-/// change a fact: two units that differ in them are not rewordings.
-fn sign_tokens(text: &str) -> Vec<String> {
-    let mut out: Vec<String> = text
-        .to_lowercase()
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|w| {
-            w.chars().any(|c| c.is_ascii_digit())
-                || matches!(
-                    *w,
-                    "not"
-                        | "no"
-                        | "never"
-                        | "without"
-                        | "cannot"
-                        | "don"
-                        | "doesn"
-                        | "isn"
-                        | "aren"
-                        | "won"
-                        | "can"
-                        | "cant"
-                        | "dont"
-                        | "nor"
-                        | "t"
-                )
-        })
-        .map(String::from)
-        .collect();
-    out.sort_unstable();
-    out.dedup();
-    out
 }
 
 fn jaccard(a: &[u32], b: &[u32]) -> f64 {
@@ -4617,9 +4577,9 @@ mod tests {
         };
         let (_, r) = file_as(&root, "s1", "src-1", json!([new_op("quokka-flange", FACT)]));
         assert_eq!(counts(&r), (1, 0, 0, 0), "{r}");
-        // the same fact with only case and punctuation changed: seen twice,
-        // the body holds it once
-        let repeat = FACT.to_uppercase().replace('.', "!");
+        // the same fact with only its whitespace changed (task 2848: case and
+        // symbols are kept): seen twice, the body holds it once
+        let repeat = FACT.replace(' ', "  ");
         let (id2, r) = file_as(
             &root,
             "s2",
@@ -4812,23 +4772,66 @@ mod tests {
             )
             .is_some()
         );
-        // an exact, case- or punctuation-only repeat, and a contiguous part, add nothing
+        // an exact or whitespace-only repeat, a repeat without its trailing
+        // sentence punctuation, and a contiguous part, add nothing
         let held = "The upload worker retries the failed request three times before giving up.";
-        assert_eq!(fold_body(held, &held.to_uppercase()), None);
+        assert_eq!(fold_body(held, held), None);
+        assert_eq!(fold_body(held, &held.replace(' ', "   ")), None);
+        assert_eq!(fold_body(held, held.trim_end_matches('.')), None);
         assert_eq!(
             fold_body(
                 held,
-                "the upload worker retries the failed request three times before giving up"
+                "worker retries the failed request three times before giving up."
             ),
             None
         );
-        assert_eq!(
-            fold_body(
-                held,
-                "Upload worker retries the failed request three times before giving up."
+        // naru task 2848: tokens compare byte for byte, so case, symbols and
+        // operators all tell two facts apart
+        let exact = [
+            (
+                "Run the tool with -V to print the version of the build you have installed",
+                "Run the tool with -v to print the version of the build you have installed",
             ),
-            None
-        );
+            (
+                "Set the PATH variable before you run the installer on a fresh machine today",
+                "Set the path variable before you run the installer on a fresh machine today",
+            ),
+            (
+                "Edit the Makefile before you run the installer on a fresh machine today ok",
+                "Edit the makefile before you run the installer on a fresh machine today ok",
+            ),
+            (
+                "Set the Foo option before you run the installer on a fresh machine today ok",
+                "Set the foo option before you run the installer on a fresh machine today ok",
+            ),
+            (
+                "The check passes only when x < y holds for every row in the table today ok",
+                "The check passes only when x > y holds for every row in the table today ok",
+            ),
+            (
+                "Run the `build` target before you run the installer on a fresh machine today",
+                "Run the build target before you run the installer on a fresh machine today",
+            ),
+            (
+                "Run the \"build\" target before you run the installer on a fresh machine today",
+                "Run the build target before you run the installer on a fresh machine today",
+            ),
+            (
+                "The check passes only when a == b holds for every row in the table today ok",
+                "The check passes only when a = b holds for every row in the table today ok",
+            ),
+            (
+                "Pass the flag -v before you run the installer on a fresh machine today ok!",
+                "Pass the flag -v before you run the installer on a fresh machine today ok?",
+            ),
+        ];
+        for (held, incoming) in exact {
+            assert_eq!(
+                fold_body(held, incoming).as_deref(),
+                Some(format!("{held}\n\n{incoming}").as_str()),
+                "{incoming}"
+            );
+        }
     }
 
     /// Dedupe at the door (naru task 2833): a fact the kb already holds makes
