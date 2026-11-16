@@ -600,16 +600,23 @@ pub fn list(root: &Path, topic: Option<&str>, session: Option<&str>) -> Result<V
 /// Every sighting in `sightings.jsonl` by note id, each note's oldest first
 /// (rows are appended in apply order, but a held spool text applied late
 /// carries its earlier arrival time). A missing file is empty; a line that is
-/// not a sighting row, and a `merge` alias row, is skipped. Read once per
-/// `kb list` or `kb show`, never from [`scan`] (naru task 2838).
+/// not a sighting row is skipped. A `merge` alias row (`from` -> `into`) moves
+/// the dropped id's rows onto the kept note, through chains of merges; a cycle
+/// stops where it would revisit (naru task 2839). Read once per `kb list` or
+/// `kb show`, never from [`scan`] (naru task 2838).
 fn read_sightings(root: &Path) -> Result<std::collections::HashMap<String, Vec<Sighting>>> {
     #[derive(Deserialize)]
     struct Row {
         note: String,
+        #[serde(default)]
+        from: Option<String>,
+        #[serde(default)]
+        into: Option<String>,
         #[serde(flatten)]
         sighting: Sighting,
     }
     let mut out: std::collections::HashMap<String, Vec<Sighting>> = Default::default();
+    let mut alias: std::collections::HashMap<String, String> = Default::default();
     let bytes = match fs::read(root.join("sightings.jsonl")) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
@@ -619,10 +626,36 @@ fn read_sightings(root: &Path) -> Result<std::collections::HashMap<String, Vec<S
         let Ok(row) = serde_json::from_str::<Row>(line) else {
             continue;
         };
-        if row.note.is_empty() || row.sighting.op == "merge" {
+        if row.sighting.op == "merge" {
+            if let (Some(from), Some(into)) = (row.from, row.into)
+                && !from.is_empty()
+                && from != into
+            {
+                alias.insert(from, into);
+            }
+            continue;
+        }
+        if row.note.is_empty() {
             continue;
         }
         out.entry(row.note).or_default().push(row.sighting);
+    }
+    if !alias.is_empty() {
+        let mut moved: std::collections::HashMap<String, Vec<Sighting>> = Default::default();
+        let mut ids: Vec<_> = out.into_iter().collect();
+        ids.sort_by(|a, b| a.0.cmp(&b.0));
+        for (id, rows) in ids {
+            let mut at = id.clone();
+            let mut visited = HashSet::from([id]);
+            while let Some(next) = alias.get(&at) {
+                if !visited.insert(next.clone()) {
+                    break;
+                }
+                at = next.clone();
+            }
+            moved.entry(at).or_default().extend(rows);
+        }
+        out = moved;
     }
     for rows in out.values_mut() {
         rows.sort_by(|a, b| a.ts.cmp(&b.ts));
@@ -3278,6 +3311,78 @@ mod tests {
         fs::remove_file(root.join("sightings.jsonl")).unwrap();
         assert_eq!(show(&root, path).unwrap().seen, 0);
         assert!(list(&root, None, None).unwrap().iter().all(|l| l.seen == 0));
+    }
+
+    /// A merge keeps the drops' sightings (naru task 2839): the kept note
+    /// reads the sum, the earliest first_seen, no duplicates; chains resolve;
+    /// a cycle or self-alias in the file does not loop; a drop without an id
+    /// has nothing to follow.
+    #[test]
+    fn merge_keeps_the_drops_sightings() {
+        let (_d, root) = kb();
+        let file = |op: Value| {
+            let id = spool(&root, "raw").unwrap();
+            let mut call = |_p: &str, _s: &str| Ok(json!({"ops": [op.clone()]}));
+            run_add_job(&root, &id, "cli", Some("s"), &mut call).unwrap();
+        };
+        file(create("pets", "a", "Cat a."));
+        file(json!({"op":"append","topic":"pets","slug":"a","body":"Cat a is grey."}));
+        file(create("pets", "b", "Dog b."));
+        file(create("pets", "c", "Fish c."));
+        let (a, b, c) = ("topics/pets/a.md", "topics/pets/b.md", "topics/pets/c.md");
+        let (id_a, id_b) = (
+            show(&root, a).unwrap().id.unwrap(),
+            show(&root, b).unwrap().id.unwrap(),
+        );
+        // make b's sighting the oldest
+        let f = root.join("sightings.jsonl");
+        let text = fs::read_to_string(&f).unwrap();
+        let rows: Vec<Value> = text
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        let fixed: Vec<String> = rows
+            .into_iter()
+            .map(|mut r| {
+                if r["note"] == id_b.as_str() {
+                    r["ts"] = json!("2001-01-01T00:00:00Z");
+                }
+                r.to_string()
+            })
+            .collect();
+        fs::write(&f, fixed.join("\n") + "\n").unwrap();
+        let a_first = show(&root, a).unwrap().first_seen.unwrap();
+        merge(&root, a, &[b.to_string()]).unwrap();
+        let n = show(&root, a).unwrap();
+        assert_eq!(n.seen, 3);
+        assert_eq!(n.first_seen.as_deref(), Some("2001-01-01T00:00:00Z"));
+        assert!(a_first.as_str() > "2001");
+        assert_eq!(n.sightings.len(), 3);
+        let l = list(&root, None, None).unwrap();
+        assert_eq!(l.iter().find(|x| x.info.path == a).unwrap().seen, 3);
+        // chain: a into c
+        let kept_id = n.id.clone().unwrap();
+        merge(&root, c, &[a.to_string()]).unwrap();
+        let n = show(&root, c).unwrap();
+        assert_eq!(n.seen, 4, "a's 3 plus c's own: {kept_id} {id_a}");
+        assert_eq!(n.first_seen.as_deref(), Some("2001-01-01T00:00:00Z"));
+        // a self-alias and a cycle in the file do not loop or lose rows
+        let cid = n.id.clone().unwrap();
+        let alias_row = |from: &str, into: &str| {
+            json!({"ts":"2030-01-01T00:00:00Z","note":into,"op":"merge","from":from,"into":into,"text":null}).to_string()
+        };
+        let mut extra = String::new();
+        for (x, y) in [(&cid, &cid), (&kept_id, &id_a), (&id_a, &kept_id)] {
+            extra.push_str(&alias_row(x, y));
+            extra.push('\n');
+        }
+        OpenOptions::new()
+            .append(true)
+            .open(&f)
+            .unwrap()
+            .write_all(extra.as_bytes())
+            .unwrap();
+        assert_eq!(show(&root, c).unwrap().seen, 4);
     }
 
     /// `scan` runs on the ask and lookup paths under a time budget, so they

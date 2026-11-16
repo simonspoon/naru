@@ -383,9 +383,11 @@ sighting text), keeping the three counts; `list`, `ask` and `add` accept and
 ignore it.
 
 Seen fields (naru task 2838): the sightings are the `sightings.jsonl` rows
-keyed to the note's `id`, minus `merge` alias rows and lines that do not
-parse; `first_seen`/`last_seen` are their oldest and newest `ts`, `seen` their
-count. Merged drops' rows are not followed yet (naru task 2839). A note
+keyed to the note's `id` plus those of every id merged into it, minus lines
+that do not parse; `first_seen`/`last_seen` are their oldest and newest `ts`,
+`seen` their count. The reader follows the `merge` alias rows (`from` ->
+`into`, chains included, nothing rewritten); a self-alias is ignored and a
+cycle stops where it would revisit, so neither loops (naru task 2839). A note
 without an id or without rows (everything filed before sightings, until the
 backfill) has `first_seen`/`last_seen` null and `seen` 0: unknown, not
 "never". `first_seen` is only as good as the id: a note copied by hand shares
