@@ -1142,10 +1142,11 @@ fn fold_body(existing: &str, incoming: &str) -> Option<String> {
     if new.is_empty() {
         return None;
     }
-    if new.len() == all.len() {
-        return Some(format!("{existing}\n\n{incoming}"));
-    }
     let mut body = existing.to_string();
+    close_open_fence(&mut body);
+    if new.len() == all.len() {
+        return Some(format!("{body}\n\n{incoming}"));
+    }
     let mut last_bullet = false;
     for (i, (unit, bullet)) in new.into_iter().enumerate() {
         body.push_str(if i > 0 && *bullet && last_bullet {
@@ -1863,12 +1864,37 @@ fn is_ws_sensitive(unit: &str) -> bool {
         .any(|l| fence_char(l).is_some() || l.starts_with([' ', '\t']))
 }
 
-/// The marker of a fence line: `` ` `` for "```", `~` for "~~~".
-fn fence_char(line: &str) -> Option<char> {
+/// The opening marker of a fence line as `(char, length)`: a run of three or
+/// more `` ` `` or `~`.
+fn fence_char(line: &str) -> Option<(char, usize)> {
     let t = line.trim_start();
-    ['`', '~']
-        .into_iter()
-        .find(|c| t.starts_with(&c.to_string().repeat(3)))
+    let c = t.chars().next().filter(|c| matches!(c, '`' | '~'))?;
+    let n = t.chars().take_while(|&x| x == c).count();
+    (n >= 3).then_some((c, n))
+}
+
+/// Whether `line` closes the fence `open` (task 2851, CommonMark): a run of at
+/// least as many of the same marker, nothing after it but whitespace.
+fn closes_fence(line: &str, open: (char, usize)) -> bool {
+    let t = line.trim();
+    t.chars().all(|c| c == open.0) && t.chars().count() >= open.1
+}
+
+/// Closes a fence `body` leaves open, so text appended after it lands outside
+/// the fence (task 2851); the rest of `body` is untouched.
+fn close_open_fence(body: &mut String) {
+    let mut open = None;
+    for line in body.lines() {
+        match open {
+            Some(f) if closes_fence(line, f) => open = None,
+            Some(_) => {}
+            None => open = fence_char(line),
+        }
+    }
+    if let Some((c, n)) = open {
+        body.push('\n');
+        body.extend(std::iter::repeat_n(c, n));
+    }
 }
 
 /// Whether `a` is a non-empty contiguous run of `b`. Gaps are not allowed: a
@@ -2017,7 +2043,7 @@ fn is_bullet(line: &str) -> bool {
 fn units(body: &str) -> Vec<(String, bool)> {
     let mut out: Vec<(String, bool)> = Vec::new();
     let mut cur: Option<(String, bool)> = None;
-    let mut in_fence: Option<char> = None;
+    let mut in_fence: Option<(char, usize)> = None;
     let flush = |cur: &mut Option<(String, bool)>, out: &mut Vec<(String, bool)>| {
         out.extend(cur.take());
     };
@@ -2027,7 +2053,7 @@ fn units(body: &str) -> Vec<(String, bool)> {
             let c = cur.as_mut().unwrap();
             c.0.push('\n');
             c.0.push_str(line);
-            if fence_char(line) == in_fence {
+            if closes_fence(line, in_fence.unwrap()) {
                 in_fence = None;
             }
         } else if line.trim().is_empty() {
@@ -2089,10 +2115,15 @@ pub fn merge(root: &Path, keep: &str, drops: &[String]) -> Result<Value> {
     let mut known: HashSet<String> = units(&kept.body).iter().map(|(u, _)| squash(u)).collect();
     let mut body = kept.body.clone();
     let mut last_bullet = units(&kept.body).last().is_some_and(|u| u.1);
+    let mut closed = false;
     for (_, (_, p)) in &loaded {
         for (unit, bullet) in units(&p.body) {
             if !known.insert(squash(&unit)) {
                 continue;
+            }
+            if !closed {
+                close_open_fence(&mut body);
+                closed = true;
             }
             let sep = if bullet && last_bullet { "\n" } else { "\n\n" };
             if !body.trim().is_empty() {
@@ -4740,6 +4771,26 @@ mod tests {
         assert!(fold_body("run()", "    run()").is_some());
         assert_eq!(fold_body(code, code), None);
         assert_eq!(fold_body(code, &code.replace('\n', "  \n")), None);
+    }
+
+    /// Naru task 2851: a fence closes only on a marker of equal or greater
+    /// length; an unclosed held fence is closed before anything is appended.
+    #[test]
+    fn fence_closes_on_equal_or_longer_marker() {
+        for (o, i) in [("````", "```"), ("~~~~", "~~~")] {
+            let v = |y: &str| format!("{o}md\n{i}\nx\n\n{y}\n{i}\n{o}");
+            let (held, incoming) = (v("  y"), v("    y"));
+            assert_eq!(units(&held).len(), 1);
+            let out = fold_body(&held, &incoming).expect("kept");
+            assert_eq!(out, format!("{held}\n\n{incoming}"));
+            assert_eq!(fold_body(&held, &held), None);
+        }
+        let held = "intro\n\n```\nopen";
+        let out = fold_body(held, "A fresh paragraph.").unwrap();
+        assert_eq!(out, "intro\n\n```\nopen\n```\n\nA fresh paragraph.");
+        assert_eq!(units(&out).len(), 3);
+        let held = "```\nopen\n````";
+        assert!(units(held).len() == 1);
     }
 
     /// Naru task 2846: a unit is dropped only when it adds no token at all.

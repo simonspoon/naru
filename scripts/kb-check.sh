@@ -365,6 +365,20 @@ run 0 "$MESA" kb show topics/tools/tildeind.md
 [ "$(jqs .body)" = "$(printf '%b\n\n%b' "$TILDE_A" "$TILDE_B")" ] || fail "tilde fences must be kept whole, once each: $STDOUT"
 ok "dedupe: tilde-fenced code differing only by indentation is kept whole (task 2850)"
 
+# A fence closes only on a marker as long as its opener (task 2851): a four-tilde
+# fence holding a three-tilde line is one unit, kept whole once each.
+NEST_A='~~~~md\n~~~\nx\n\n  y\n~~~\n~~~~'
+NEST_B='~~~~md\n~~~\nx\n\n    y\n~~~\n~~~~'
+stage add "{\"ops\":[{\"op\":\"create\",\"topic\":\"tools\",\"slug\":\"nestfence\",\"title\":\"Nest fence\",\"tags\":[\"nestfence\"],\"body\":\"$NEST_A\"}]}"
+run 0 "$MESA" kb add "nested first"
+wait_jobs $((6 + 2 * n + 6))
+stage add "{\"ops\":[{\"op\":\"append\",\"topic\":\"tools\",\"slug\":\"nestfence\",\"body\":\"$NEST_B\"}]}"
+run 0 "$MESA" kb add "nested reindented"
+wait_jobs $((6 + 2 * n + 7))
+run 0 "$MESA" kb show topics/tools/nestfence.md
+[ "$(jqs .body)" = "$(printf '%b\n\n%b' "$NEST_A" "$NEST_B")" ] || fail "nested fences must be kept whole, once each: $STDOUT"
+ok "dedupe: a longer fence is not closed by a shorter inner marker (task 2851)"
+
 # ---- concurrency: 20 adds at once ----
 
 touch "$STUB_DIR/add-dynamic"
