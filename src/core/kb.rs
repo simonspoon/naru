@@ -1828,14 +1828,9 @@ fn word_ids(text: &str, ids: &mut std::collections::HashMap<String, u32>) -> Vec
 /// A unit with fewer words than this is only ever dropped as an exact repeat.
 const FOLD_MIN_WORDS: usize = 8;
 
-/// Words with no weight in [`fold_tokens`].
-const FOLD_STOP: &[&str] = &[
-    "a", "an", "the", "is", "are", "was", "were", "to", "of", "it", "this", "that",
-];
-
 /// `text` as lowercase whitespace-separated tokens, edge punctuation trimmed
-/// and [`FOLD_STOP`] dropped. Punctuation inside a token stays, so a flag, a
-/// path or a version is one token and differs from any near miss.
+/// Every word counts (naru task 2847). Punctuation inside a token stays, so a
+/// flag, a path or a version is one token and differs from any near miss.
 fn fold_tokens(text: &str) -> Vec<String> {
     const EDGE: &str = "\"'`()[]{}<>";
     text.to_lowercase()
@@ -1845,7 +1840,7 @@ fn fold_tokens(text: &str) -> Vec<String> {
                 .trim_end_matches(|c: char| ".,;:!?".contains(c))
                 .trim_matches(|c: char| EDGE.contains(c))
         })
-        .filter(|w| !w.is_empty() && !FOLD_STOP.contains(w))
+        .filter(|w| !w.is_empty())
         .map(String::from)
         .collect()
 }
@@ -4750,6 +4745,36 @@ mod tests {
                 folded.as_deref(),
                 Some(format!("{held}\n\n{incoming}").as_str()),
                 "pair {i} must keep both"
+            );
+        }
+        // naru task 2847: no word is ignored, a stop word included
+        let stops = [
+            (
+                "Copy the config file from a to b before you restart the upload worker nightly job",
+                "Copy the config file from b to a before you restart the upload worker nightly job",
+            ),
+            (
+                "The upload worker was restarted by the nightly job after every single deploy window",
+                "The upload worker is restarted by the nightly job after every single deploy window",
+            ),
+            (
+                "Restart this upload worker by hand after the nightly job fails twice in one day",
+                "Restart that upload worker by hand after the nightly job fails twice in one day",
+            ),
+            (
+                "Restart this upload worker by hand after the nightly job fails twice in one day",
+                "Restart upload worker by hand after the nightly job fails twice in one day",
+            ),
+            (
+                "Check the end of the file for the checksum line before you upload the archive",
+                "Check the end file for the checksum line before you upload the archive",
+            ),
+        ];
+        for (held, incoming) in stops {
+            assert_eq!(
+                fold_body(held, incoming).as_deref(),
+                Some(format!("{held}\n\n{incoming}").as_str()),
+                "{incoming}"
             );
         }
         let gappy = [

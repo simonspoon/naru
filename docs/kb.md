@@ -102,7 +102,7 @@ new one, and it had no way to say "already there".
     and code blocks it lacks (`kb merge`'s compare: whitespace- and
     case-insensitive), or a `skip` when it lacks none. A unit of 8 or more
     words is also dropped when it adds no token to one held unit (naru task
-    2846): lowercased, edge punctuation and a few stop words removed, its
+    2846): lowercased, edge punctuation trimmed, no word ignored (not even `a`, `the`, `is`; naru task 2847), its
     token sequence equals or is a contiguous run of the held unit's,
     with the same numbers and negations. Any other token (a flag, a path, a
     version, a spelled-out number) or a different order keeps it, so a

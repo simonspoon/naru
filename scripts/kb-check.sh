@@ -318,6 +318,7 @@ declare -a PAIRS=(
   "Pass --force when the lock file is stale and the job will not start.|Pass --dry-run when the lock file is stale and the job will not start."
   "The service reads ~/.config/naru/config.json at startup every single time.|The service reads ~/.naru/config.json at startup every single time."
   "The build is fine on linux, fails on macos when the cache is cold today.|The build is fine on macos, fails on linux when the cache is cold today."
+  "Copy the config file from a to b before you restart the upload worker nightly job|Copy the config file from b to a before you restart the upload worker nightly job"
 )
 n=0
 for pair in "${PAIRS[@]}"; do
@@ -332,7 +333,7 @@ for pair in "${PAIRS[@]}"; do
   run 0 "$MESA" kb show "topics/tools/pair$n.md"
   jqs .body | grep -qF -- "$A" && jqs .body | grep -qF -- "$B" || fail "pair $n: both facts must stay in the note: $STDOUT"
 done
-ok "dedupe: flag, path and reorder near-misses keep both units"
+ok "dedupe: flag, path, reorder and stop-word near-misses keep both units"
 
 # ---- concurrency: 20 adds at once ----
 
