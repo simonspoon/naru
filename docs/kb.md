@@ -99,6 +99,32 @@ new one, and it had no way to say "already there".
   and it is an `append` of what the note lacks. A trusted skip keeps its body
   as the sighting row's `text`. Only an empty-body skip of a missing note is
   the old `missing: true` no-op. The raw text is always kept in `arrivals/`.
+  A skip also never hides a hard detail (naru task 2857): before it stands,
+  the raw text the model was sent (not its restatement) is checked. A chunk
+  can hold several facts, filed by other ops, so only its units about this
+  note count: those the note holds at least 50% of the distinct words of.
+  Each is searched for one-line inline code spans and for words holding a
+  digit, starting with `-` and a letter or digit (a flag), holding `/` or `~`
+  or ending in a dot-extension of 2+ characters (a path or file name),
+  written ALL-CAPS, snake_case or camelCase, or negating (`not`, `never`,
+  `no`, `none`, `nor`, `nothing`, `nowhere`, `without`; `cannot` and every
+  `n't` contraction count as `not`, and `no longer` is one detail, also held
+  by a `not`). Backticks split words too, and a `~` before a digit is cut.
+  Each must be in the note's title or body: a word whole and byte for byte,
+  case kept (punctuation may stand around it, so `7870` is held by `:7870`
+  and `build.sh` by `scripts/build.sh`, but not as a piece of a longer word,
+  number, flag or name: `~/.naru` is not held by `~/.naru-dev`; a negation
+  is compared lowercased), a code span anywhere in its text (a one-word span
+  whole, like a word). An empty-body skip of an existing note is checked the
+  same way. The units that carry an absent detail, and only those, go
+  through the `append` path below in place of the restatement (the strict
+  drop test; a `create` when there is no room), so the new detail reaches
+  the note, and the applied entry lists the absent details as `unheld`. If
+  the drop test holds every such unit the skip stands as before. Known
+  limits: token presence cannot see word order ("from a to b" versus "from b
+  to a"), nor a detail the raw text drops (`always` where the note says
+  `never`), nor a detail in a unit the note holds under half of; such a skip
+  stands, and the raw text is in `arrivals/`.
 - **Naru checks every op itself**, whatever the model answered:
   - a `create` is scored against every note with `kb dupes`' own measure
     and, at or above its 0.3 threshold, applied to the best-scoring note

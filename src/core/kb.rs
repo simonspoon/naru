@@ -73,6 +73,11 @@ const DEDUPE_MIN_WORDS: usize = 8;
 /// topic's other notes scored 0.29 or less in 42 of 45 cases. A trusted skip
 /// keeps its body in the sighting row and the raw text in `arrivals/`.
 const SKIP_HELD: f64 = 0.3;
+
+/// The share of a raw unit's distinct words a skipped note must hold for the
+/// unit to be about that note (naru task 2857): above [`SKIP_HELD`], so a
+/// chunk's other facts are left to their own ops.
+const SKIP_ABOUT: f64 = 0.5;
 const ASK_NOTE_BYTES: usize = 3 * 1024;
 const ASK_NOTES_TOTAL: usize = 12 * 1024;
 /// Notes filed from the same session as one of the top [`SIBLING_SEEDS`]
@@ -898,6 +903,7 @@ fn apply_one(
     source: &str,
     session: Option<&str>,
     arrival: Option<&str>,
+    sent: Option<&str>,
 ) -> Result<Value> {
     let op: RawOp = serde_json::from_value(raw.clone())
         .map_err(|e| Error::Validation(format!("not a valid op: {e}")))?;
@@ -907,7 +913,9 @@ fn apply_one(
             op.topic, op.slug
         )));
     }
-    let body = op.body.trim();
+    // The raw units a skip did not stand on (naru task 2857).
+    let mine: String;
+    let mut body = op.body.trim();
     if body.is_empty() && op.op != "skip" {
         return Err(Error::Validation("the op has an empty body".into()));
     }
@@ -916,18 +924,48 @@ fn apply_one(
     // What is applied: a `create` or `append` can turn into another kind.
     let mut kind = op.op.as_str();
     let mut redirect = false;
+    // The raw text's hard details a skipped note lacks (naru task 2857).
+    let mut unheld = Vec::new();
     // A model's `skip` is a claim that the named note holds the fact: checked
     // against its text (naru task 2845). A note about something else (task
     // 2854) is appended to; one that does not exist is a `create`; neither is
     // ever a silent drop.
-    if kind == "skip" && !body.is_empty() {
+    if kind == "skip" {
         match existing_note_file(root, &topic, &slug).and_then(|f| fs::read_to_string(f).ok()) {
-            None => kind = "create",
+            None if !body.is_empty() => kind = "create",
+            None => {}
             Some(text) => {
                 let note = parse_note(&text, &slug);
-                // Naru task 2854: the body is the model's one-line restatement,
-                // a paraphrase the strict drop test nearly always keeps.
-                if !holds_restated(&note, body) {
+                // Naru task 2857: a skip never hides a hard detail of the raw
+                // units about this note (those it holds [`SKIP_ABOUT`] of; a
+                // chunk can hold other facts, filed by other ops); the units
+                // carrying one, not the restatement, are then folded in.
+                if let Some(raw) = sent {
+                    let mut carrying = Vec::new();
+                    for (unit, _) in units(raw) {
+                        if !holds_share(&note, &unit, SKIP_ABOUT) {
+                            continue;
+                        }
+                        let lacks = unheld_details(&note, &unit);
+                        if lacks.is_empty() {
+                            continue;
+                        }
+                        for d in lacks {
+                            if !unheld.contains(&d) {
+                                unheld.push(d);
+                            }
+                        }
+                        carrying.push(unit);
+                    }
+                    if !unheld.is_empty() {
+                        mine = carrying.join("\n\n");
+                        body = &mine;
+                    }
+                }
+                // Naru task 2854: without an absent detail the body is the
+                // model's one-line restatement, a paraphrase the strict drop
+                // test nearly always keeps. An empty one claims nothing.
+                if !unheld.is_empty() || (!body.is_empty() && !holds_restated(&note, body)) {
                     // No room to append: it is filed as a note of its own.
                     if let Some(joined) = fold_body(&note.body, body) {
                         kind = if joined.len() <= NOTE_MAX {
@@ -935,6 +973,10 @@ fn apply_one(
                         } else {
                             "create"
                         };
+                    } else if !unheld.is_empty() {
+                        // The drop test holds every unit: the skip stands.
+                        unheld.clear();
+                        body = op.body.trim();
                     }
                 }
             }
@@ -1075,6 +1117,9 @@ fn apply_one(
         }
     };
     let mut done = json!({"op": kind, "path": rel, "bytes": 0});
+    if !unheld.is_empty() {
+        done["unheld"] = json!(unheld);
+    }
     if redirect {
         done["redirected_from"] = json!(op.topic);
     } else if kind != op.op || rel != rel_path(&op.topic, &op.slug) {
@@ -1181,6 +1226,12 @@ fn fold_body(existing: &str, incoming: &str) -> Option<String> {
 /// skip named a note about something else; a text with no such words is never
 /// held.
 fn holds_restated(note: &Parsed, text: &str) -> bool {
+    holds_share(note, text, SKIP_HELD)
+}
+
+/// Whether `note`'s title and body hold at least `min` of `text`'s distinct
+/// words ([`holds_restated`]).
+fn holds_share(note: &Parsed, text: &str, min: f64) -> bool {
     let mut ids = std::collections::HashMap::new();
     let held = word_ids(&format!("{} {}", note.title, note.body), &mut ids);
     let words = word_ids(text, &mut ids);
@@ -1188,7 +1239,144 @@ fn holds_restated(note: &Parsed, text: &str) -> bool {
         .iter()
         .filter(|w| held.binary_search(w).is_ok())
         .count() as f64;
-    !words.is_empty() && share >= SKIP_HELD * words.len() as f64
+    !words.is_empty() && share >= min * words.len() as f64
+}
+
+/// Words that turn a fact around (naru task 2857), compared lowercased
+/// ([`negation`]).
+const NEGATIONS: &[&str] = &[
+    "not", "never", "no", "none", "nor", "nothing", "nowhere", "without",
+];
+
+/// The negation `w` is, if any (naru task 2857): one of [`NEGATIONS`]
+/// lowercased, with `cannot` and every `n't` contraction read as `not`
+/// (`hasn't` = `has not`).
+fn negation(w: &str) -> Option<String> {
+    let w = w.to_lowercase().replace('\u{2019}', "'");
+    if w == "cannot" || w.ends_with("n't") {
+        return Some("not".into());
+    }
+    NEGATIONS.contains(&w.as_str()).then_some(w)
+}
+
+/// The hard details of `text` (naru task 2857), in order, each once: inline
+/// code spans, and the words (outer quotes, brackets and sentence punctuation
+/// cut) that hold a digit, start with `-` (a flag), hold `/` or `~` or end in
+/// a dot-extension of 2+ characters (a path or file name), are ALL-CAPS,
+/// snake_case or camelCase, or are a negation ([`negation`]; `no longer` is
+/// one detail).
+fn hard_details(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |d: String| {
+        if !out.contains(&d) {
+            out.push(d);
+        }
+    };
+    let spans: Vec<&str> = text.split('`').collect();
+    // Odd pieces are inside a span; the last one is unclosed when even-indexed.
+    for (i, span) in spans.iter().enumerate() {
+        // A span is one line: a fence's backticks are not one.
+        if i % 2 == 1 && i + 1 < spans.len() && !span.trim().is_empty() && !span.contains('\n') {
+            push(format!("`{}`", span.trim()));
+        }
+    }
+    // Backticks split too: `a`/`b` is two words, not one path.
+    let words: Vec<&str> = text
+        .split(|c: char| c.is_whitespace() || c == '`')
+        .map(detail_word)
+        .collect();
+    for (i, w) in words.iter().copied().enumerate() {
+        if let Some(neg) = negation(w) {
+            let longer = neg == "no"
+                && words
+                    .get(i + 1)
+                    .is_some_and(|n| n.eq_ignore_ascii_case("longer"));
+            push(if longer { "no longer".into() } else { neg });
+            continue;
+        }
+        let flag = w.starts_with('-')
+            && w.trim_start_matches('-')
+                .starts_with(|c: char| c.is_alphanumeric());
+        let ext = w.rsplit_once('.').is_some_and(|(b, e)| {
+            !b.is_empty() && e.len() >= 2 && e.chars().all(|c| c.is_ascii_alphanumeric())
+        });
+        let caps = w.chars().filter(|c| c.is_ascii_uppercase()).count() >= 2
+            && w.chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
+        let snake = w.split('_').filter(|p| !p.is_empty()).count() >= 2
+            && w.chars().all(|c| c.is_alphanumeric() || c == '_');
+        let camel = w
+            .chars()
+            .zip(w.chars().skip(1))
+            .any(|(a, b)| a.is_lowercase() && b.is_uppercase());
+        if w.chars().any(|c| c.is_ascii_digit())
+            || flag
+            || (w.len() > 1 && w.contains(['/', '~']))
+            || ext
+            || caps
+            || snake
+            || camel
+        {
+            push(w.to_string());
+        }
+    }
+    out
+}
+
+/// A whitespace-split word with its outer quotes, brackets, backticks and
+/// trailing sentence punctuation cut, case kept ([`hard_details`]); so is a
+/// `~` before a digit ("about").
+fn detail_word(w: &str) -> &str {
+    let w = w
+        .trim_start_matches(|c: char| "`'\"([{<*\u{2018}\u{201c}".contains(c))
+        .trim_end_matches(|c: char| "`'\")]}>*.,;:!?\u{2019}\u{201d}".contains(c));
+    match w.strip_prefix('~') {
+        Some(n) if n.starts_with(|c: char| c.is_ascii_digit()) => n,
+        _ => w,
+    }
+}
+
+/// Whether `text` holds the detail `d` whole, byte for byte (naru task
+/// 2857): not as a piece of a longer word, number, flag or name. What may
+/// stand around it is punctuation: `7870` is held by `:7870`, `build.sh` by
+/// `scripts/build.sh`, but `7771` not by `17771`, `-v` not by `--verbose`,
+/// `~/.naru` not by `~/.naru-dev`, `5` not by `1.5`.
+fn holds_whole(text: &str, d: &str) -> bool {
+    let joins = |c: char| c.is_alphanumeric() || c == '-' || c == '_';
+    text.match_indices(d).any(|(i, _)| {
+        let mut after = text[i + d.len()..].chars();
+        let before = text[..i].chars().next_back();
+        let next = after.next();
+        !before.is_some_and(|c| joins(c) || c == '.')
+            && !next.is_some_and(|c| {
+                joins(c) || (c == '.' && after.next().is_some_and(char::is_alphanumeric))
+            })
+    })
+}
+
+/// The hard details of `raw` ([`hard_details`]) that `note`'s title and body
+/// lack (naru task 2857): a word must be in the note's text whole, byte for
+/// byte ([`holds_whole`]), a code span must occur in its text (a one-word
+/// span whole), a negation
+/// must be one of its negations ([`negation`]; `no longer` is also held by a
+/// `not`).
+fn unheld_details(note: &Parsed, raw: &str) -> Vec<String> {
+    let text = format!("{}\n{}", note.title, note.body);
+    let negations = hard_details(&text);
+    let has = |d: &str| negations.iter().any(|n| n == d);
+    hard_details(raw)
+        .into_iter()
+        .filter(
+            |d| match d.strip_prefix('`').and_then(|d| d.strip_suffix('`')) {
+                // A one-word span is held whole, not as a substring.
+                Some(span) if !span.contains(char::is_whitespace) => !holds_whole(&text, span),
+                Some(span) => !text.contains(span),
+                None if d == "no longer" => !has(d) && !has("not"),
+                None if NEGATIONS.contains(&d.as_str()) => !has(d),
+                None => !holds_whole(&text, d),
+            },
+        )
+        .collect()
 }
 
 /// The existing notes a `create` would be a near-duplicate of, best first, as
@@ -1287,6 +1475,20 @@ pub fn apply_ops(
     session: Option<&str>,
     arrival: Option<&str>,
 ) -> Result<Value> {
+    apply_ops_for(root, out, source, session, arrival, None)
+}
+
+/// [`apply_ops`] for an answer to `text`, the raw text the model was sent: a
+/// model `skip` stands only when the note it names holds every hard detail of
+/// `text` ([`unheld_details`], naru task 2857).
+fn apply_ops_for(
+    root: &Path,
+    out: &Value,
+    source: &str,
+    session: Option<&str>,
+    arrival: Option<&str>,
+    text: Option<&str>,
+) -> Result<Value> {
     let ops = out["ops"]
         .as_array()
         .ok_or_else(|| Error::Validation("the model's answer holds no ops array".into()))?;
@@ -1300,7 +1502,7 @@ pub fn apply_ops(
             dropped += 1;
             continue;
         }
-        match apply_one(&root, raw, source, session, arrival) {
+        match apply_one(&root, raw, source, session, arrival, text) {
             Ok(done) => applied.push(done),
             Err(e) => failed.push(json!({
                 "op": raw["op"], "topic": raw["topic"], "slug": raw["slug"],
@@ -1503,7 +1705,7 @@ pub fn add_with(
             pieces.len(),
         );
         let out = call(&prompt, ADD_SCHEMA).map_err(Error::Unavailable)?;
-        let report = apply_ops(root, &out, source, session, arrival)?;
+        let report = apply_ops_for(root, &out, source, session, arrival, Some(piece))?;
         applied.extend(report["applied"].as_array().cloned().unwrap_or_default());
         failed.extend(report["failed"].as_array().cloned().unwrap_or_default());
         dropped += report["dropped"].as_i64().unwrap_or(0);
@@ -4752,6 +4954,213 @@ mod tests {
         // a skip naming a note that does hold it stays a skip
         let (_, r) = file_as(&root, "s7", "src-7", json!([skip("quokka-flange")]));
         assert_eq!(counts(&r), (0, 0, 1, 0), "{r}");
+    }
+
+    /// Naru task 2857: a model skip stands only when the named note holds
+    /// every hard detail of the raw text; one it lacks folds the raw text in.
+    #[test]
+    fn skip_does_not_hide_a_hard_detail() {
+        let skip = json!({"op":"skip","topic":"t","slug":"n","title":"","tags":[],
+            "body":"Build the dev serve in release mode and point it at the dev port."});
+        // (note, raw text, the detail that must reach the note)
+        let cases = [
+            (
+                "Build with `cargo build --release` for the dev serve on its port.",
+                "Build with `cargo build --debug` for the dev serve on its port.",
+                "--debug",
+            ),
+            (
+                "The dev serve listens on port 7771 in release mode.",
+                "The dev serve listens on port 7777 in release mode.",
+                "7777",
+            ),
+            (
+                "Print the dev serve version with naru -V in release mode.",
+                "Print the dev serve version with naru -v in release mode.",
+                "-v",
+            ),
+            (
+                "The dev serve must always run in release mode on its port.",
+                "The dev serve must never run in release mode on its port.",
+                "never",
+            ),
+            (
+                "The dev serve keeps its release state in ~/.naru-dev on its port.",
+                "The dev serve keeps its release state in ~/.naru on its port.",
+                "~/.naru",
+            ),
+        ];
+        for (held, raw, detail) in cases {
+            let (_d, root) = kb();
+            put(&root, "t", "n", "Dev serve release port", &[], held);
+            let id = spool(&root, raw, "src", Some("s1")).unwrap();
+            let mut call = |_p: &str, _s: &str| Ok(json!({ "ops": [skip.clone()] }));
+            let r = run_add_job(&root, &id, None, None, &mut call).unwrap();
+            assert_eq!(counts(&r), (0, 1, 0, 0), "{raw}: {r}");
+            let unheld = r["applied"][0]["unheld"].as_array().unwrap();
+            assert!(unheld.contains(&json!(detail)), "{r}");
+            let body = show(&root, "topics/t/n.md").unwrap().body;
+            assert_eq!(body, format!("{held}\n\n{raw}"), "{raw}");
+        }
+        // a paraphrase holding every hard detail stands: one skip row, the
+        // note unchanged but for the id it gets
+        let (_d, root) = kb();
+        let held =
+            "Never run `cargo build --release` on port 7771 from ~/.naru-dev with NARU_DB unset.";
+        put(&root, "t", "n", "Dev serve release port", &[], held);
+        let before = fs::read_to_string(root.join("topics/t/n.md")).unwrap();
+        let raw = "With NARU_DB unset, never use `cargo build --release` from ~/.naru-dev on 7771!";
+        let id = spool(&root, raw, "src", Some("s1")).unwrap();
+        let mut call = |_p: &str, _s: &str| Ok(json!({ "ops": [skip.clone()] }));
+        let r = run_add_job(&root, &id, None, None, &mut call).unwrap();
+        assert_eq!(counts(&r), (0, 0, 1, 0), "{r}");
+        let after = fs::read_to_string(root.join("topics/t/n.md")).unwrap();
+        let no_id: String = after
+            .lines()
+            .filter(|l| !l.starts_with("id: "))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        assert_eq!(no_id, before);
+        let log = fs::read_to_string(root.join("log.jsonl")).unwrap();
+        assert_eq!(log.matches("\"op\":\"skip\"").count(), 1, "{log}");
+        // word order is a known limit: the same tokens in another order stand
+        let held = "Move the dev serve release state from alpha to beta on its port.";
+        put(&root, "t", "o", "Dev serve release port", &[], held);
+        let raw = "Move the dev serve release state from beta to alpha on its port.";
+        let id = spool(&root, raw, "src", Some("s2")).unwrap();
+        let o = json!({"op":"skip","topic":"t","slug":"o","title":"","tags":[],"body":held});
+        let mut call = |_p: &str, _s: &str| Ok(json!({ "ops": [o.clone()] }));
+        let r = run_add_job(&root, &id, None, None, &mut call).unwrap();
+        assert_eq!(counts(&r), (0, 0, 1, 0), "{r}");
+        // a chunk of two facts: only the unit about the skipped note is
+        // folded into it; the other fact is filed by its own op
+        let (_d, root) = kb();
+        let held = "The dev serve listens on port 7771 in release mode.";
+        put(&root, "t", "n", "Dev serve release port", &[], held);
+        let mine = "The dev serve listens on port 7777 in release mode.";
+        let other = "Pass --force to the wombat press when the gasket in ~/press/lock is stale.";
+        let id = spool(&root, &format!("{mine}\n\n{other}"), "src", Some("s1")).unwrap();
+        let ops = json!([skip.clone(), {"op":"create","topic":"u","slug":"press","title":"Press",
+            "tags":[],"body":other}]);
+        let mut call = |_p: &str, _s: &str| Ok(json!({ "ops": ops.clone() }));
+        let r = run_add_job(&root, &id, None, None, &mut call).unwrap();
+        assert_eq!(counts(&r), (1, 1, 0, 0), "{r}");
+        assert_eq!(r["applied"][0]["unheld"], json!(["7777"]), "{r}");
+        assert_eq!(
+            show(&root, "topics/t/n.md").unwrap().body,
+            format!("{held}\n\n{mine}")
+        );
+        // a detail the strict drop test already holds: the skip stands, with
+        // its restatement as the sighting text and no `unheld`
+        let held = "Always run `naru  kb add` from the dev home before you ship the build.";
+        put(&root, "t", "q", "Dev serve release port", &[], held);
+        let raw = "Always run `naru kb add` from the dev home before you ship the build.";
+        assert_eq!(fold_body(held, raw), None);
+        let id = spool(&root, raw, "src", Some("s3")).unwrap();
+        let q = json!({"op":"skip","topic":"t","slug":"q","title":"","tags":[],"body":"Run naru kb add from the dev home before shipping the build."});
+        let mut call = |_p: &str, _s: &str| Ok(json!({ "ops": [q.clone()] }));
+        let r = run_add_job(&root, &id, None, None, &mut call).unwrap();
+        assert_eq!(counts(&r), (0, 0, 1, 0), "{r}");
+        assert!(r["applied"][0].get("unheld").is_none(), "{r}");
+        assert_eq!(sightings(&root).last().unwrap()["text"], q["body"]);
+        // an empty-body skip is checked the same way, and a one-word code
+        // span is not held by a longer word around it
+        let (_d, root) = kb();
+        let held = "The dev serve listens on port 7771 in release mode.";
+        put(&root, "t", "n", "Dev serve release port", &[], held);
+        let raw = "The dev serve listens on port 7777 in release mode.";
+        let id = spool(&root, raw, "src", Some("s1")).unwrap();
+        let e = json!({"op":"skip","topic":"t","slug":"n","title":"","tags":[],"body":""});
+        let mut call = |_p: &str, _s: &str| Ok(json!({ "ops": [e.clone()] }));
+        let r = run_add_job(&root, &id, None, None, &mut call).unwrap();
+        assert_eq!(counts(&r), (0, 1, 0, 0), "{r}");
+        assert_eq!(
+            show(&root, "topics/t/n.md").unwrap().body,
+            format!("{held}\n\n{raw}")
+        );
+        for (text, d, held) in [
+            ("Ports `:7777`, `:7870`, and `:7770`.", "7870", true),
+            ("see scripts/build.sh.", "build.sh", true),
+            ("lightx2v's LoRAs", "lightx2v", true),
+            ("about 1.1\u{2013}1.5 s", "1.1\u{2013}1.5", true),
+            (
+                "`NARU_AUDIO_HOME=~/.naru-audio-dev`",
+                "~/.naru-audio-dev",
+                true,
+            ),
+            ("port 17771", "7771", false),
+            ("pass --verbose", "-v", false),
+            ("in ~/.naru-dev", "~/.naru", false),
+            ("takes 1.5 s", "5", false),
+            ("takes 1.5 s", "1", false),
+            ("naru -V", "-v", false),
+        ] {
+            assert_eq!(holds_whole(text, d), held, "{d} in {text}");
+        }
+        assert_eq!(
+            hard_details("frontend `test`/`lint` took ~1.5 s in ~/x"),
+            ["`test`", "`lint`", "1.5", "~/x"]
+        );
+        let note = parse_note("# Commodes\n\nSet the commodes to off.\n", "c");
+        assert_eq!(unheld_details(&note, "Set `mode` to off."), ["`mode`"]);
+        assert!(unheld_details(&note, "Set the `commodes` to `off`.").is_empty());
+        // two units about the note: only the one carrying an absent detail
+        // is folded in, the paraphrase beside it is not
+        let (_d, root) = kb();
+        let held = "The dev serve listens on port 7771 in release mode.";
+        put(&root, "t", "n", "Dev serve release port", &[], held);
+        let same = "In release mode the dev serve listens on port 7771, as before.";
+        let mine = "The dev serve listens on port 7777 in release mode.";
+        let id = spool(&root, &format!("{same}\n\n{mine}"), "src", Some("s1")).unwrap();
+        let mut call = |_p: &str, _s: &str| Ok(json!({ "ops": [skip.clone()] }));
+        let r = run_add_job(&root, &id, None, None, &mut call).unwrap();
+        assert_eq!(counts(&r), (0, 1, 0, 0), "{r}");
+        assert_eq!(r["applied"][0]["unheld"], json!(["7777"]), "{r}");
+        assert_eq!(
+            show(&root, "topics/t/n.md").unwrap().body,
+            format!("{held}\n\n{mine}")
+        );
+        // a contraction is its long form, and `no longer` is held by a `not`:
+        // both stand; `no longer` against a note with no negation does not
+        for (held, raw, stands) in [
+            (
+                "The dev serve has not shipped in release mode on its port.",
+                "The dev serve hasn\u{2019}t shipped in release mode on its port yet.",
+                true,
+            ),
+            (
+                "The dev serve does not write its release state on its port.",
+                "The dev serve no longer writes its release state on its port.",
+                true,
+            ),
+            (
+                "The dev serve writes its release state on its port.",
+                "The dev serve no longer writes its release state on its port.",
+                false,
+            ),
+        ] {
+            let (_d, root) = kb();
+            put(&root, "t", "n", "Dev serve release port", &[], held);
+            let id = spool(&root, raw, "src", Some("s1")).unwrap();
+            let mut call = |_p: &str, _s: &str| Ok(json!({ "ops": [skip.clone()] }));
+            let r = run_add_job(&root, &id, None, None, &mut call).unwrap();
+            if stands {
+                assert_eq!(counts(&r), (0, 0, 1, 0), "{raw}: {r}");
+            } else {
+                assert_eq!(r["applied"][0]["unheld"], json!(["no longer"]), "{r}");
+                let body = show(&root, "topics/t/n.md").unwrap().body;
+                assert_eq!(body, format!("{held}\n\n{raw}"));
+            }
+        }
+        // what counts as a hard detail
+        assert_eq!(
+            hard_details("Run `naru kb add` (see src/core/kb.rs, v1.2.3), don\u{2019}t set MESA_DB or kb_dir/holdsRestated -- e.g. not -.").join(" "),
+            "`naru kb add` src/core/kb.rs v1.2.3 not MESA_DB kb_dir/holdsRestated"
+        );
+        assert_eq!(
+            hard_details("A plain sentence, with i.e. no-one here."),
+            Vec::<String>::new()
+        );
     }
 
     /// Naru task 2854: a model skip whose body paraphrases a note that holds

@@ -379,6 +379,25 @@ run 0 "$MESA" kb show topics/tools/nestfence.md
 [ "$(jqs .body)" = "$(printf '%b\n\n%b' "$NEST_A" "$NEST_B")" ] || fail "nested fences must be kept whole, once each: $STDOUT"
 ok "dedupe: a longer fence is not closed by a shorter inner marker (task 2851)"
 
+# A model skip stands only when the note holds every hard detail of the raw text (task 2857).
+PORT_A='The dev serve listens on port 7771 and reads its state from the dev home.'
+PORT_B='The dev serve listens on port 7777 and reads its state from the dev home.'
+PORT_SKIP="{\"ops\":[{\"op\":\"skip\",\"topic\":\"tools\",\"slug\":\"devport\",\"title\":\"\",\"tags\":[],\"body\":\"The dev serve listens on its port and reads state from the dev home.\"}]}"
+stage add "{\"ops\":[{\"op\":\"create\",\"topic\":\"tools\",\"slug\":\"devport\",\"title\":\"Dev port\",\"tags\":[\"devport\"],\"body\":\"$PORT_A\"}]}"
+run 0 "$MESA" kb add "$PORT_A"
+wait_jobs $((6 + 2 * n + 8))
+stage add "$PORT_SKIP"
+run 0 "$MESA" kb add "The dev serve reads its state from the dev home and listens on port 7771."
+wait_jobs $((6 + 2 * n + 9))
+run 0 "$MESA" kb show topics/tools/devport.md
+[ "$(jqs .body)" = "$PORT_A" ] && [ "$(jqs .seen)" = "2" ] || fail "a skip holding every hard detail must stand: $STDOUT"
+stage add "$PORT_SKIP"
+run 0 "$MESA" kb add "$PORT_B"
+wait_jobs $((6 + 2 * n + 10))
+run 0 "$MESA" kb show topics/tools/devport.md
+[ "$(jqs .body)" = "$(printf '%s\n\n%s' "$PORT_A" "$PORT_B")" ] || fail "a skip hiding a new port must append the raw text: $STDOUT"
+ok "dedupe: a model skip stands when the note holds the raw text's hard details, and a new port is appended (task 2857)"
+
 # ---- concurrency: 20 adds at once ----
 
 touch "$STUB_DIR/add-dynamic"
