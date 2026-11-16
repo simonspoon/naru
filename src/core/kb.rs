@@ -1828,7 +1828,7 @@ fn word_ids(text: &str, ids: &mut std::collections::HashMap<String, u32>) -> Vec
 /// A unit with fewer words than this is only ever dropped as an exact repeat.
 const FOLD_MIN_WORDS: usize = 8;
 
-/// `text` as lowercase whitespace-separated tokens, edge punctuation trimmed
+/// `text` as lowercase whitespace-separated tokens, edge punctuation trimmed.
 /// Every word counts (naru task 2847). Punctuation inside a token stays, so a
 /// flag, a path or a version is one token and differs from any near miss.
 fn fold_tokens(text: &str) -> Vec<String> {
