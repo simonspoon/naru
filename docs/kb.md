@@ -77,6 +77,21 @@ drops' sessions after the kept note's (kept first, then each drop's in order). A
 `sessions:` line, and a note written before the field reads as an empty
 list. `INDEX.md` and the prompts do not carry it.
 
+### Note id (naru task 2836)
+
+Each note carries a stable `id: <v4 uuid>` as the first front-matter line,
+so it keeps one identity across moves and merges (the path is not an
+identity: the cleanup workflow's step 14 `mv`s notes between topics). A
+`create` assigns one; an `append` keeps it, and gives a note without one
+(written before the field) one on that write; `kb merge` keeps the kept
+note's id (assigning one if it has none) and the drops' ids go with them.
+`backfill-sessions` rewrites only the `sessions:` line and the cleanup
+workflow's step 8 rewrite copies the front matter through, so neither
+changes it. A note without an `id:` line (or with a value that is not 1-64
+of `[A-Za-z0-9_-]`) still parses, with an empty id. `kb list`, `kb show`,
+`INDEX.md` and the prompts do not carry it yet. A binary from before this
+task drops the line on its next append or merge of that note.
+
 ### Backfilling sessions from the log (naru task 2577)
 
 `naru kb backfill-sessions` gives notes filed before the field the sessions

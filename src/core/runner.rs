@@ -179,7 +179,7 @@ pub fn uuid_from_bytes(mut b: [u8; 16]) -> String {
     )
 }
 
-fn random_bytes<const N: usize>() -> Result<[u8; N]> {
+pub(crate) fn random_bytes<const N: usize>() -> Result<[u8; N]> {
     let mut buf = [0u8; N];
     File::open("/dev/urandom")?.read_exact(&mut buf)?;
     Ok(buf)

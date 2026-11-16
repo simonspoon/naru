@@ -282,6 +282,9 @@ pub struct Answer {
 }
 
 struct Parsed {
+    /// The note's stable id (naru task 2836), empty for a note written
+    /// before ids existed; such a note gets one on its next write.
+    id: String,
     title: String,
     tags: Vec<String>,
     sessions: Vec<String>,
@@ -290,15 +293,28 @@ struct Parsed {
 }
 
 /// A note file. The `sessions:` line is written only when there are any, so
-/// a note filed with none looks as it did before naru task 2575.
-fn render(title: &str, tags: &[String], sessions: &[String], updated: &str, body: &str) -> String {
+/// a note filed with none looks as it did before naru task 2575; likewise the
+/// `id:` line (naru task 2836) only when `id` is non-empty.
+fn render(
+    id: &str,
+    title: &str,
+    tags: &[String],
+    sessions: &[String],
+    updated: &str,
+    body: &str,
+) -> String {
+    let id = if id.is_empty() {
+        String::new()
+    } else {
+        format!("id: {id}\n")
+    };
     let sessions = if sessions.is_empty() {
         String::new()
     } else {
         format!("sessions: {}\n", sessions.join(", "))
     };
     format!(
-        "---\ntitle: {title}\ntags: {}\n{sessions}updated: {updated}\n---\n{}\n",
+        "---\n{id}title: {title}\ntags: {}\n{sessions}updated: {updated}\n---\n{}\n",
         tags.join(", "),
         body.trim()
     )
@@ -312,6 +328,7 @@ fn parse_note(text: &str, slug: &str) -> Parsed {
         .and_then(|rest| rest.split_once("\n---\n"))
     {
         let mut p = Parsed {
+            id: String::new(),
             title: slug.to_string(),
             tags: Vec::new(),
             sessions: Vec::new(),
@@ -319,7 +336,11 @@ fn parse_note(text: &str, slug: &str) -> Parsed {
             body: body.trim_end_matches('\n').to_string(),
         };
         for line in head.lines() {
-            if let Some(v) = line.strip_prefix("title: ") {
+            if let Some(v) = line.strip_prefix("id: ") {
+                if valid_session(v.trim()) {
+                    p.id = v.trim().to_string();
+                }
+            } else if let Some(v) = line.strip_prefix("title: ") {
                 p.title = v.to_string();
             } else if let Some(v) = line.strip_prefix("tags:") {
                 p.tags = v
@@ -338,12 +359,20 @@ fn parse_note(text: &str, slug: &str) -> Parsed {
         return p;
     }
     Parsed {
+        id: String::new(),
         title: slug.to_string(),
         tags: Vec::new(),
         sessions: Vec::new(),
         updated: String::new(),
         body: text.trim_end_matches('\n').to_string(),
     }
+}
+
+/// A fresh note id (naru task 2836): a v4 UUID. It names the note across
+/// moves and merges, so it is never derived from the path.
+fn new_id() -> Result<String> {
+    use crate::core::runner;
+    Ok(runner::uuid_from_bytes(runner::random_bytes::<16>()?))
 }
 
 /// The regular, non-symlink file of a note path under `root`, or `None`.
@@ -641,7 +670,7 @@ fn apply_one(root: &Path, raw: &Value, source: &str, session: Option<&str>) -> R
             let mut tags = Vec::new();
             clean_tags(&op.tags, &mut tags);
             let sessions: Vec<String> = session.into_iter().map(String::from).collect();
-            render(&title, &tags, &sessions, &now_iso(), body)
+            render(&new_id()?, &title, &tags, &sessions, &now_iso(), body)
         }
         "append" => {
             let existing = existing_note_file(root, &topic, &slug)
@@ -658,7 +687,11 @@ fn apply_one(root: &Path, raw: &Value, source: &str, session: Option<&str>) -> R
             if let Some(id) = session {
                 add_session(&mut p.sessions, id);
             }
+            if p.id.is_empty() {
+                p.id = new_id()?;
+            }
             render(
+                &p.id,
                 &one_line(&p.title, TITLE_MAX),
                 &p.tags,
                 &p.sessions,
@@ -1457,7 +1490,11 @@ pub fn merge(root: &Path, keep: &str, drops: &[String]) -> Result<Value> {
             body.len()
         )));
     }
+    if kept.id.is_empty() {
+        kept.id = new_id()?;
+    }
     let text = render(
+        &kept.id,
         &one_line(&kept.title, TITLE_MAX),
         &kept.tags,
         &kept.sessions,
@@ -2354,7 +2391,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         fs::write(
             dir.join(format!("{slug}.md")),
-            render(title, &tags, &[], "2026-01-01T00:00:00Z", body),
+            render("", title, &tags, &[], "2026-01-01T00:00:00Z", body),
         )
         .unwrap();
     }
@@ -2526,6 +2563,7 @@ mod tests {
         put(&root, "a", "capped", "Capped", &[], "many");
         // a note that already records a session keeps it, after the backfill
         let live = render(
+            "",
             "Live",
             &[],
             &["live1".into()],
@@ -2678,5 +2716,92 @@ mod tests {
             .map(|s| before(&format!("topics/a/{s}.md")))
             .collect();
         assert_eq!(snapshot, after);
+    }
+
+    /// A note keeps one id (naru task 2836) across append, merge (the kept
+    /// note), backfill-sessions and the cleanup workflow's step 8 rewrite; a
+    /// note without one still parses and gets one on its next write.
+    #[test]
+    fn note_id_is_stable_across_every_write() {
+        let (_d, root) = kb();
+        let id_of = |path: &str| {
+            let text = fs::read_to_string(root.join(path)).unwrap();
+            parse_note(&text, "x").id
+        };
+        let path = "topics/rust/lifetimes.md";
+        apply_ops(
+            &root,
+            &ops(json!([create("rust", "lifetimes", "One.")])),
+            "t",
+            None,
+        )
+        .unwrap();
+        let id = id_of(path);
+        assert_eq!((id.len(), id.as_bytes()[14]), (36, b'4'), "a v4 uuid: {id}");
+        let mut ids = vec![id.clone()];
+        // append, with a session
+        let app = json!({"op":"append","topic":"rust","slug":"lifetimes","body":"Two."});
+        let r = apply_ops(&root, &ops(json!([app])), "t", Some("s1")).unwrap();
+        assert_eq!(r["applied"].as_array().unwrap().len(), 1, "{r}");
+        ids.push(id_of(path));
+        // merge: the kept note keeps its id
+        apply_ops(
+            &root,
+            &ops(json!([create("rust", "other", "Three.")])),
+            "t",
+            None,
+        )
+        .unwrap();
+        let other = id_of("topics/rust/other.md");
+        assert!(
+            !other.is_empty() && other != id,
+            "each note gets its own id"
+        );
+        merge(&root, path, &["topics/rust/other.md".to_string()]).unwrap();
+        ids.push(id_of(path));
+        // backfill-sessions rewrites the sessions line only
+        let row = json!({"ts": "2026-01-01T00:00:00Z", "op": "create", "path": path,
+            "bytes": 1, "source": "mined-session-s0"});
+        let mut log = fs::read_to_string(root.join("log.jsonl")).unwrap();
+        log.push_str(&format!("{row}\n"));
+        fs::write(root.join("log.jsonl"), log).unwrap();
+        let got = backfill_sessions(&root, true).unwrap();
+        assert_eq!(got["notes_updated"], 1, "{got}");
+        ids.push(id_of(path));
+        // cleanup step 8: front matter through the second `---`, then a new body
+        let text = fs::read_to_string(root.join(path)).unwrap();
+        let end = text.find("\n---\n").unwrap() + "\n---\n".len();
+        fs::write(root.join(path), format!("{}- short\n", &text[..end])).unwrap();
+        assert_eq!(show(&root, path).unwrap().body, "- short");
+        ids.push(id_of(path));
+        let id_changes = ids.windows(2).filter(|w| w[0] != w[1]).count();
+        assert_eq!(id_changes, 0, "{ids:?}");
+        let n = show(&root, path).unwrap();
+        assert_eq!(n.sessions, ["s0", "s1"]);
+
+        // a note without an id parses (old front matter, and none at all) …
+        put(&root, "rust", "old", "Old", &["a"], "old body");
+        fs::write(root.join("topics/rust/hand.md"), "no front matter\n").unwrap();
+        let old = fs::read_to_string(root.join("topics/rust/old.md")).unwrap();
+        assert!(!old.contains("id:"), "{old}");
+        let p = parse_note(&old, "old");
+        assert_eq!(
+            (p.id.as_str(), p.title.as_str(), p.body.as_str()),
+            ("", "Old", "old body")
+        );
+        assert_eq!(list(&root, Some("rust"), None).unwrap().len(), 3);
+        assert_eq!(id_of("topics/rust/hand.md"), "");
+        // … and gets one on its next append, which it then keeps
+        let app = json!({"op":"append","topic":"rust","slug":"old","body":"more"});
+        apply_ops(&root, &ops(json!([app.clone()])), "t", None).unwrap();
+        let lazy = id_of("topics/rust/old.md");
+        assert!(!lazy.is_empty() && lazy != id);
+        apply_ops(&root, &ops(json!([app])), "t", None).unwrap();
+        assert_eq!(id_of("topics/rust/old.md"), lazy);
+        // a kept note without one gets one on a merge
+        put(&root, "rust", "k", "K", &[], "k body");
+        put(&root, "rust", "d", "D", &[], "d body");
+        merge(&root, "topics/rust/k.md", &["topics/rust/d.md".to_string()]).unwrap();
+        assert!(!id_of("topics/rust/k.md").is_empty());
     }
 }
