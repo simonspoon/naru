@@ -397,6 +397,21 @@ fn existing_note_file(root: &Path, topic: &str, slug: &str) -> Option<PathBuf> {
 /// Every valid note under `root`, sorted by path. Symlinks, stray files and
 /// badly named entries are skipped; a missing kb is empty.
 pub fn scan(root: &Path) -> Result<Vec<NoteInfo>> {
+    Ok(parsed_notes(root)?
+        .into_iter()
+        .map(|(path, topic, p)| NoteInfo {
+            path,
+            topic,
+            title: one_line(&p.title, TITLE_MAX),
+            tags: p.tags,
+            updated: p.updated,
+            sessions: p.sessions,
+        })
+        .collect())
+}
+
+/// [`scan`]'s walk: every valid note as `(path, topic, parsed file)`.
+fn parsed_notes(root: &Path) -> Result<Vec<(String, String, Parsed)>> {
     let topics = root.join("topics");
     if is_symlink(&topics) || !topics.is_dir() {
         return Ok(Vec::new());
@@ -420,15 +435,11 @@ pub fn scan(root: &Path) -> Result<Vec<NoteInfo>> {
             let Ok(text) = fs::read_to_string(&path) else {
                 continue;
             };
-            let p = parse_note(&text, slug);
-            out.push(NoteInfo {
-                path: rel_path(&topic, slug),
-                topic: topic.clone(),
-                title: one_line(&p.title, TITLE_MAX),
-                tags: p.tags,
-                updated: p.updated,
-                sessions: p.sessions,
-            });
+            out.push((
+                rel_path(&topic, slug),
+                topic.clone(),
+                parse_note(&text, slug),
+            ));
         }
     }
     Ok(out)
@@ -581,6 +592,43 @@ fn log_line(root: &Path, op: &str, path: &str, bytes: usize, source: &str) -> Re
     Ok(())
 }
 
+/// Appends one `sightings.jsonl` row (naru task 2837) the way [`log_line`]
+/// appends to `log.jsonl`: a single `write` on an O_APPEND handle, under the
+/// held kb lock. A row is written only after the note's file carries the id
+/// it is keyed to.
+fn sighting(root: &Path, row: Value) -> Result<()> {
+    let mut line = row.to_string();
+    line.push('\n');
+    let mut f = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(root.join("sightings.jsonl"))?;
+    f.write_all(line.as_bytes())?;
+    Ok(())
+}
+
+/// When an add arrived: the time in its spool id ([`spool`], milliseconds in
+/// hex), so a text that waited in the spool keeps its true arrival time; now
+/// when there is no spool id.
+fn arrival_ts(arrival: Option<&str>) -> String {
+    arrival
+        .and_then(|a| a.split('-').next())
+        .and_then(|ms| i64::from_str_radix(ms, 16).ok())
+        .map_or_else(now_iso, |ms| iso_of(ms / 1000))
+}
+
+/// This machine's hostname, empty when it cannot be read.
+fn machine() -> String {
+    sysinfo::System::host_name().unwrap_or_default()
+}
+
+/// Whether a note other than the paths in `except` carries `id`.
+fn id_taken(root: &Path, id: &str, except: &[&str]) -> Result<bool> {
+    Ok(parsed_notes(root)?
+        .iter()
+        .any(|(path, _, p)| p.id == id && !except.contains(&path.as_str())))
+}
+
 /// Rewrites `INDEX.md` from the files.
 fn rebuild_index(root: &Path) -> Result<()> {
     write_atomic(&root.join("INDEX.md"), &index_text(&scan(root)?))
@@ -618,8 +666,16 @@ fn topic_count(root: &Path) -> usize {
 }
 
 /// Applies one op under the held lock. `root` is canonical. `session`, when
-/// given, is recorded as the note's most recent source session.
-fn apply_one(root: &Path, raw: &Value, source: &str, session: Option<&str>) -> Result<Value> {
+/// given, is recorded as the note's most recent source session. A written op
+/// also appends one [`sighting`] row keyed to the id now in the note's file; a
+/// refused op writes none.
+fn apply_one(
+    root: &Path,
+    raw: &Value,
+    source: &str,
+    session: Option<&str>,
+    arrival: Option<&str>,
+) -> Result<Value> {
     let op: RawOp = serde_json::from_value(raw.clone())
         .map_err(|e| Error::Validation(format!("not a valid op: {e}")))?;
     if !valid_name(&op.topic) || !valid_name(&op.slug) {
@@ -652,7 +708,7 @@ fn apply_one(root: &Path, raw: &Value, source: &str, session: Option<&str>) -> R
     if is_symlink(&topics) || is_symlink(&dir) || is_symlink(&file) {
         return Err(Error::Validation(format!("{rel} is on a symlink")));
     }
-    let text = match op.op.as_str() {
+    let (text, id) = match op.op.as_str() {
         "create" => {
             if fs::symlink_metadata(&file).is_ok() {
                 return Err(Error::Conflict(format!("{rel} already exists")));
@@ -670,7 +726,8 @@ fn apply_one(root: &Path, raw: &Value, source: &str, session: Option<&str>) -> R
             let mut tags = Vec::new();
             clean_tags(&op.tags, &mut tags);
             let sessions: Vec<String> = session.into_iter().map(String::from).collect();
-            render(&new_id()?, &title, &tags, &sessions, &now_iso(), body)
+            let id = new_id()?;
+            (render(&id, &title, &tags, &sessions, &now_iso(), body), id)
         }
         "append" => {
             let existing = existing_note_file(root, &topic, &slug)
@@ -687,17 +744,20 @@ fn apply_one(root: &Path, raw: &Value, source: &str, session: Option<&str>) -> R
             if let Some(id) = session {
                 add_session(&mut p.sessions, id);
             }
-            if p.id.is_empty() {
+            // A note copied by hand shares its id with the original: the copy
+            // being written gets a fresh one, so no two notes key one id.
+            if p.id.is_empty() || id_taken(root, &p.id, &[&rel])? {
                 p.id = new_id()?;
             }
-            render(
+            let text = render(
                 &p.id,
                 &one_line(&p.title, TITLE_MAX),
                 &p.tags,
                 &p.sessions,
                 &now_iso(),
                 &joined,
-            )
+            );
+            (text, p.id)
         }
         other => {
             return Err(Error::Validation(format!(
@@ -713,6 +773,14 @@ fn apply_one(root: &Path, raw: &Value, source: &str, session: Option<&str>) -> R
     }
     write_atomic(&file, &text)?;
     log_line(root, &op.op, &rel, text.len(), source)?;
+    sighting(
+        root,
+        json!({
+            "ts": arrival_ts(arrival), "note": id, "op": op.op,
+            "source": one_line(source, SOURCE_MAX), "session": session,
+            "machine": machine(), "arrival": arrival, "text": body, "backfilled": false,
+        }),
+    )?;
     let mut done = json!({"op": op.op, "path": rel, "bytes": text.len()});
     if redirect {
         done["redirected_from"] = json!(op.topic);
@@ -763,8 +831,15 @@ fn free_slug(dir: &Path, slug: &str) -> String {
 /// Applies a model's `{ops: […]}` answer under the kb lock: each op is tried on
 /// its own (a refused one is recorded, the rest still land), at most
 /// [`OPS_MAX`] of them, and `INDEX.md` is rebuilt at the end. The report is
-/// `{applied, failed, dropped}`.
-pub fn apply_ops(root: &Path, out: &Value, source: &str, session: Option<&str>) -> Result<Value> {
+/// `{applied, failed, dropped}`. `arrival` is the spool id of the add, if any
+/// ([`sighting`]).
+pub fn apply_ops(
+    root: &Path,
+    out: &Value,
+    source: &str,
+    session: Option<&str>,
+    arrival: Option<&str>,
+) -> Result<Value> {
     let ops = out["ops"]
         .as_array()
         .ok_or_else(|| Error::Validation("the model's answer holds no ops array".into()))?;
@@ -778,7 +853,7 @@ pub fn apply_ops(root: &Path, out: &Value, source: &str, session: Option<&str>) 
             dropped += 1;
             continue;
         }
-        match apply_one(&root, raw, source, session) {
+        match apply_one(&root, raw, source, session, arrival) {
             Ok(done) => applied.push(done),
             Err(e) => failed.push(json!({
                 "op": raw["op"], "topic": raw["topic"], "slug": raw["slug"],
@@ -910,12 +985,14 @@ pub type Call<'a> = dyn FnMut(&str, &str) -> std::result::Result<Value, String> 
 
 /// Files `text` into the kb: one call per chunk, each answer applied before the
 /// next chunk is sent. The report sums the applies. Every note written is
-/// tagged with `session` when given.
+/// tagged with `session` when given; `arrival` is the spool id the text came
+/// in under, recorded on each sightings row ([`apply_ops`]).
 pub fn add_with(
     root: &Path,
     text: &str,
     source: &str,
     session: Option<&str>,
+    arrival: Option<&str>,
     call: &mut Call,
 ) -> Result<Value> {
     let pieces = chunks(text, CHUNK);
@@ -931,7 +1008,7 @@ pub fn add_with(
         let listed = notes_for_filing(root, &notes, piece);
         let prompt = add_prompt(&topics, &listed, piece, source, i + 1, pieces.len());
         let out = call(&prompt, ADD_SCHEMA).map_err(Error::Unavailable)?;
-        let report = apply_ops(root, &out, source, session)?;
+        let report = apply_ops(root, &out, source, session, arrival)?;
         applied.extend(report["applied"].as_array().cloned().unwrap_or_default());
         failed.extend(report["failed"].as_array().cloned().unwrap_or_default());
         dropped += report["dropped"].as_i64().unwrap_or(0);
@@ -958,7 +1035,7 @@ pub fn run_add_job(
     if let Some(s) = session.filter(|s| !valid_session(s)) {
         return Err(Error::Validation(format!("{s:?} is not a session id")));
     }
-    let mut report = add_with(root, &text, source, session, call)?;
+    let mut report = add_with(root, &text, source, session, Some(id), call)?;
     // Only a clean add removes the spool: a refused op keeps the text so it
     // can be re-filed, and the report says where it is.
     if report["failed"].as_array().is_none_or(|f| f.is_empty()) {
@@ -1490,7 +1567,9 @@ pub fn merge(root: &Path, keep: &str, drops: &[String]) -> Result<Value> {
             body.len()
         )));
     }
-    if kept.id.is_empty() {
+    let mut merged: Vec<&str> = vec![keep];
+    merged.extend(loaded.iter().map(|(path, _)| *path));
+    if kept.id.is_empty() || id_taken(&root, &kept.id, &merged)? {
         kept.id = new_id()?;
     }
     let text = render(
@@ -1505,10 +1584,11 @@ pub fn merge(root: &Path, keep: &str, drops: &[String]) -> Result<Value> {
     log_line(&root, "merge", keep, text.len(), "kb merge")?;
     let mut removed = Vec::new();
     let mut failure = Ok(());
-    for (path, (file, _)) in &loaded {
+    for (path, (file, p)) in &loaded {
         let done = fs::remove_file(file)
             .map_err(Error::from)
-            .and_then(|()| log_line(&root, "delete", path, 0, "kb merge"));
+            .and_then(|()| log_line(&root, "delete", path, 0, "kb merge"))
+            .and_then(|()| alias(&root, &p.id, &kept.id, &merged));
         if let Err(e) = done {
             failure = Err(e);
             break;
@@ -1519,6 +1599,24 @@ pub fn merge(root: &Path, keep: &str, drops: &[String]) -> Result<Value> {
     rebuild_index(&root)?;
     failure?;
     Ok(json!({"kept": keep, "removed": removed}))
+}
+
+/// A deleted drop's id goes with its file: one `merge` alias row keeps it, so
+/// the drop's sightings can still be followed to the kept note (naru task
+/// 2839). None for a drop without an id, one sharing the kept note's, or one
+/// a note outside the merge still holds (its rows stay that note's).
+fn alias(root: &Path, from: &str, into: &str, merged: &[&str]) -> Result<()> {
+    if from.is_empty() || from == into || id_taken(root, from, merged)? {
+        return Ok(());
+    }
+    sighting(
+        root,
+        json!({
+            "ts": now_iso(), "note": into, "op": "merge", "from": from, "into": into,
+            "source": "kb merge", "session": null, "machine": machine(),
+            "arrival": null, "text": null, "backfilled": false,
+        }),
+    )
 }
 
 // ---- backfilling sessions from the log (naru task 2577) -----------------
@@ -1715,6 +1813,7 @@ mod tests {
             &ops(json!([create("rust", "lifetimes", "Body one.")])),
             "t",
             None,
+            None,
         )
         .unwrap();
         assert_eq!(r["applied"].as_array().unwrap().len(), 1, "{r}");
@@ -1724,7 +1823,7 @@ mod tests {
         assert_eq!(all[0].tags, ["a", "b"]);
         // append keeps the title, merges tags, and joins the body
         let app = json!({"op":"append","topic":"rust","slug":"lifetimes","title":"ignored","tags":["c"],"body":"More."});
-        let r = apply_ops(&root, &ops(json!([app])), "t", None).unwrap();
+        let r = apply_ops(&root, &ops(json!([app])), "t", None, None).unwrap();
         assert_eq!(r["applied"].as_array().unwrap().len(), 1, "{r}");
         let n = show(&root, "topics/rust/lifetimes.md").unwrap();
         assert_eq!(n.body, "Body one.\n\nMore.");
@@ -1749,12 +1848,26 @@ mod tests {
     fn sessions_round_trip_append_dedupe_and_absence() {
         let (_d, root) = kb();
         // a note filed with no session has no `sessions:` line and reads empty
-        apply_ops(&root, &ops(json!([create("a", "none", "x")])), "t", None).unwrap();
+        apply_ops(
+            &root,
+            &ops(json!([create("a", "none", "x")])),
+            "t",
+            None,
+            None,
+        )
+        .unwrap();
         let text = fs::read_to_string(root.join("topics/a/none.md")).unwrap();
         assert!(!text.contains("sessions:"), "{text}");
         assert!(show(&root, "topics/a/none.md").unwrap().sessions.is_empty());
         // create records the session; the front matter round-trips
-        apply_ops(&root, &ops(json!([create("a", "b", "x")])), "t", Some("s1")).unwrap();
+        apply_ops(
+            &root,
+            &ops(json!([create("a", "b", "x")])),
+            "t",
+            Some("s1"),
+            None,
+        )
+        .unwrap();
         let text = fs::read_to_string(root.join("topics/a/b.md")).unwrap();
         assert!(text.contains("\nsessions: s1\nupdated: "), "{text}");
         assert_eq!(show(&root, "topics/a/b.md").unwrap().sessions, ["s1"]);
@@ -1762,7 +1875,7 @@ mod tests {
         let app = |s: &str| {
             let op =
                 json!({"op":"append","topic":"a","slug":"b","title":"","tags":[],"body":"more"});
-            apply_ops(&root, &ops(json!([op])), "t", Some(s)).unwrap();
+            apply_ops(&root, &ops(json!([op])), "t", Some(s), None).unwrap();
         };
         app("s2");
         app("s1");
@@ -1770,7 +1883,7 @@ mod tests {
         assert_eq!(show(&root, "topics/a/b.md").unwrap().sessions, ["s1", "s2"]);
         // an append without a session keeps the list as it was
         let op = json!({"op":"append","topic":"a","slug":"b","title":"","tags":[],"body":"x"});
-        apply_ops(&root, &ops(json!([op])), "t", None).unwrap();
+        apply_ops(&root, &ops(json!([op])), "t", None, None).unwrap();
         assert_eq!(list(&root, None, None).unwrap()[0].sessions, ["s1", "s2"]);
         // capped at the most recent SESSIONS_MAX
         for i in 0..SESSIONS_MAX + 3 {
@@ -1801,7 +1914,14 @@ mod tests {
             ["x", "y"]
         );
         // merge unions the sessions of the drops into the kept note
-        apply_ops(&root, &ops(json!([create("a", "c", "y")])), "t", Some("m1")).unwrap();
+        apply_ops(
+            &root,
+            &ops(json!([create("a", "c", "y")])),
+            "t",
+            Some("m1"),
+            None,
+        )
+        .unwrap();
         merge(&root, "topics/a/c.md", &["topics/a/hand.md".into()]).unwrap();
         assert_eq!(
             show(&root, "topics/a/c.md").unwrap().sessions,
@@ -1817,7 +1937,7 @@ mod tests {
     #[test]
     fn bad_ops_are_refused_one_by_one() {
         let (_d, root) = kb();
-        apply_ops(&root, &ops(json!([create("a", "b", "x")])), "t", None).unwrap();
+        apply_ops(&root, &ops(json!([create("a", "b", "x")])), "t", None, None).unwrap();
         let over = "x".repeat(NOTE_MAX + 1);
         let bad = [
             create("../etc", "passwd", "x"),
@@ -1831,7 +1951,7 @@ mod tests {
             json!({"nonsense": true}),
         ];
         for op in bad {
-            let r = apply_ops(&root, &ops(json!([op])), "t", None).unwrap();
+            let r = apply_ops(&root, &ops(json!([op])), "t", None, None).unwrap();
             assert_eq!(r["failed"].as_array().unwrap().len(), 1, "{r}");
             assert_eq!(r["applied"].as_array().unwrap().len(), 0, "{r}");
         }
@@ -1841,11 +1961,11 @@ mod tests {
         let mixed: Vec<Value> = std::iter::once(create("a", "b", "dup"))
             .chain((0..OPS_MAX + 1).map(|i| create("a", &format!("ok{i}"), "fine")))
             .collect();
-        let r = apply_ops(&root, &ops(json!(mixed)), "t", None).unwrap();
+        let r = apply_ops(&root, &ops(json!(mixed)), "t", None, None).unwrap();
         assert_eq!(r["failed"].as_array().unwrap().len(), 1, "{r}");
         assert_eq!(r["applied"].as_array().unwrap().len(), OPS_MAX - 1, "{r}");
         assert_eq!(r["dropped"], 2);
-        assert!(apply_ops(&root, &json!({}), "t", None).is_err());
+        assert!(apply_ops(&root, &json!({}), "t", None, None).is_err());
     }
 
     #[test]
@@ -1860,13 +1980,14 @@ mod tests {
                 .enumerate()
                 .map(|(i, _)| create(&format!("t{}", chunk * OPS_MAX + i), "n", "x"))
                 .collect();
-            apply_ops(&root, &ops(json!(v)), "t", None).unwrap();
+            apply_ops(&root, &ops(json!(v)), "t", None, None).unwrap();
         }
         assert_eq!(topic_count(&root), TOPICS_MAX);
         let r = apply_ops(
             &root,
             &ops(json!([create("one-more", "n", "x")])),
             "t",
+            None,
             None,
         )
         .unwrap();
@@ -1875,7 +1996,14 @@ mod tests {
         assert_eq!(r["applied"][0]["redirected_from"], "one-more", "{r}");
         assert_eq!(topic_count(&root), TOPICS_MAX);
         // an existing topic still takes notes
-        let r = apply_ops(&root, &ops(json!([create("t0", "second", "x")])), "t", None).unwrap();
+        let r = apply_ops(
+            &root,
+            &ops(json!([create("t0", "second", "x")])),
+            "t",
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(r["applied"].as_array().unwrap().len(), 1, "{r}");
 
         // a symlinked topic folder and a symlinked note are refused and unreadable
@@ -1891,11 +2019,19 @@ mod tests {
                 &ops(json!([create("linked", "new", "x")])),
                 "t",
                 None,
+                None,
             )
             .unwrap();
             assert_eq!(r["failed"].as_array().unwrap().len(), 1, "{r}");
             assert!(!outside.path().join("new.md").exists());
-            let r = apply_ops(&root, &ops(json!([create("t0", "ln", "x")])), "t", None).unwrap();
+            let r = apply_ops(
+                &root,
+                &ops(json!([create("t0", "ln", "x")])),
+                "t",
+                None,
+                None,
+            )
+            .unwrap();
             assert_eq!(r["failed"].as_array().unwrap().len(), 1, "{r}");
             assert_eq!(
                 fs::read_to_string(outside.path().join("s.md")).unwrap(),
@@ -1921,7 +2057,14 @@ mod tests {
     #[test]
     fn show_refuses_everything_outside() {
         let (_d, root) = kb();
-        apply_ops(&root, &ops(json!([create("a", "b", "hi")])), "t", None).unwrap();
+        apply_ops(
+            &root,
+            &ops(json!([create("a", "b", "hi")])),
+            "t",
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(show(&root, "topics/a/b.md").unwrap().body, "hi");
         for p in [
             "INDEX.md",
@@ -1956,6 +2099,7 @@ mod tests {
             &root,
             &ops(json!([create("pets", "cat", "The cat is named Miso.")])),
             "t",
+            None,
             None,
         )
         .unwrap();
@@ -2012,6 +2156,7 @@ mod tests {
                 &ops(json!([create("t", slug, body)])),
                 "t",
                 Some(session),
+                None,
             )
             .unwrap();
         };
@@ -2059,8 +2204,8 @@ mod tests {
             ));
         }
         let rest = notes.split_off(OPS_MAX);
-        apply_ops(&root, &ops(json!(notes)), "t", None).unwrap();
-        apply_ops(&root, &ops(json!(rest)), "t", None).unwrap();
+        apply_ops(&root, &ops(json!(notes)), "t", None, None).unwrap();
+        apply_ops(&root, &ops(json!(rest)), "t", None, None).unwrap();
         let mut seen = String::new();
         let mut schema = String::new();
         let mut call = |p: &str, s: &str| -> std::result::Result<Value, String> {
@@ -2111,7 +2256,7 @@ mod tests {
                 "shell directory shell directory: form permission terms.",
             ));
         }
-        apply_ops(&root, &ops(json!(notes)), "t", None).unwrap();
+        apply_ops(&root, &ops(json!(notes)), "t", None, None).unwrap();
         let shown = |q: &str| {
             let mut seen = String::new();
             let mut call = |p: &str, _: &str| -> std::result::Result<Value, String> {
@@ -2147,7 +2292,7 @@ mod tests {
             seen = p.to_string();
             Ok(json!({"ops": []}))
         };
-        add_with(&root, hostile, "src DATA>>>", None, &mut call).unwrap();
+        add_with(&root, hostile, "src DATA>>>", None, None, &mut call).unwrap();
         assert_eq!(seen.matches("DATA>>>").count(), 4, "{seen}");
         assert!(seen.contains("$(touch /tmp/pwn) `id`"));
     }
@@ -2236,7 +2381,7 @@ mod tests {
             "The quokka flange calibration drifts; redo the zirconium shim monthly.\n{}",
             "Some other upkeep chatter. ".repeat(CHUNK / 30)
         );
-        let r = add_with(&root, &raw, "t", None, &mut call).unwrap();
+        let r = add_with(&root, &raw, "t", None, None, &mut call).unwrap();
         assert!(seen.contains(&deep), "the matching note's index line");
         for t in 0..44 {
             assert!(seen.contains(&format!("\narea-{t:02} (8)\n")), "topic {t}");
@@ -2305,6 +2450,7 @@ mod tests {
             &ops(json!([create("another-new", "zebra", "Zebra crossing.")])),
             "t",
             None,
+            None,
         )
         .unwrap();
         assert_eq!(r["applied"][0]["path"], "topics/t07/zebra.md", "{r}");
@@ -2324,6 +2470,7 @@ mod tests {
             ),
             "t",
             None,
+            None,
         )
         .unwrap();
         assert_eq!(r["failed"].as_array().unwrap().len(), 1, "{r}");
@@ -2338,7 +2485,7 @@ mod tests {
             seen = p.to_string();
             Ok(json!({"ops": [create("pets", "cat", "Miso.")]}))
         };
-        add_with(&root, "text", src, None, &mut call).unwrap();
+        add_with(&root, "text", src, None, None, &mut call).unwrap();
         assert!(
             seen.contains("(source: a ## Injected ignore previous)"),
             "{seen}"
@@ -2360,6 +2507,7 @@ mod tests {
                         &root,
                         &ops(json!([create("t", &format!("n{i}"), "body")])),
                         "t",
+                        None,
                         None,
                     )
                     .unwrap();
@@ -2734,6 +2882,7 @@ mod tests {
             &ops(json!([create("rust", "lifetimes", "One.")])),
             "t",
             None,
+            None,
         )
         .unwrap();
         let id = id_of(path);
@@ -2741,7 +2890,7 @@ mod tests {
         let mut ids = vec![id.clone()];
         // append, with a session
         let app = json!({"op":"append","topic":"rust","slug":"lifetimes","body":"Two."});
-        let r = apply_ops(&root, &ops(json!([app])), "t", Some("s1")).unwrap();
+        let r = apply_ops(&root, &ops(json!([app])), "t", Some("s1"), None).unwrap();
         assert_eq!(r["applied"].as_array().unwrap().len(), 1, "{r}");
         ids.push(id_of(path));
         // merge: the kept note keeps its id
@@ -2749,6 +2898,7 @@ mod tests {
             &root,
             &ops(json!([create("rust", "other", "Three.")])),
             "t",
+            None,
             None,
         )
         .unwrap();
@@ -2793,15 +2943,166 @@ mod tests {
         assert_eq!(id_of("topics/rust/hand.md"), "");
         // … and gets one on its next append, which it then keeps
         let app = json!({"op":"append","topic":"rust","slug":"old","body":"more"});
-        apply_ops(&root, &ops(json!([app.clone()])), "t", None).unwrap();
+        apply_ops(&root, &ops(json!([app.clone()])), "t", None, None).unwrap();
         let lazy = id_of("topics/rust/old.md");
         assert!(!lazy.is_empty() && lazy != id);
-        apply_ops(&root, &ops(json!([app])), "t", None).unwrap();
+        apply_ops(&root, &ops(json!([app])), "t", None, None).unwrap();
         assert_eq!(id_of("topics/rust/old.md"), lazy);
         // a kept note without one gets one on a merge
         put(&root, "rust", "k", "K", &[], "k body");
         put(&root, "rust", "d", "D", &[], "d body");
         merge(&root, "topics/rust/k.md", &["topics/rust/d.md".to_string()]).unwrap();
         assert!(!id_of("topics/rust/k.md").is_empty());
+    }
+
+    fn sightings(root: &Path) -> Vec<Value> {
+        fs::read_to_string(root.join("sightings.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn sightings_one_row_per_applied_op() {
+        let (_d, root) = kb();
+        let path = "topics/pets/cat.md";
+        let id_of =
+            |root: &Path| parse_note(&fs::read_to_string(root.join(path)).unwrap(), "cat").id;
+        // one create plus two appends, from three sessions, through the add job
+        let ops_by_session = [
+            ("s1", create("pets", "cat", "Miso is the cat.")),
+            (
+                "s2",
+                json!({"op":"append","topic":"pets","slug":"cat","body":"Miso is grey."}),
+            ),
+            (
+                "s3",
+                json!({"op":"append","topic":"pets","slug":"cat","body":"Miso is six."}),
+            ),
+        ];
+        let mut arrivals = Vec::new();
+        for (session, op) in &ops_by_session {
+            let id = spool(&root, "raw").unwrap();
+            let mut call = |_p: &str, _s: &str| Ok(json!({"ops": [op.clone()]}));
+            let r = run_add_job(&root, &id, "cli", Some(session), &mut call).unwrap();
+            assert_eq!(r["applied"].as_array().unwrap().len(), 1, "{r}");
+            arrivals.push(id);
+        }
+        let rows = sightings(&root);
+        assert_eq!(rows.len(), 3, "{rows:?}");
+        let sessions: HashSet<&str> = rows
+            .iter()
+            .map(|r| r["session"].as_str().unwrap())
+            .collect();
+        assert_eq!(sessions.len(), 3);
+        let note = id_of(&root);
+        for (i, r) in rows.iter().enumerate() {
+            let ms = i64::from_str_radix(arrivals[i].split('-').next().unwrap(), 16).unwrap();
+            assert_eq!(r["ts"], iso_of(ms / 1000), "ts comes from the spool id");
+            assert_eq!(r["note"], note.as_str());
+            assert_eq!(r["arrival"], arrivals[i].as_str());
+            assert_eq!(r["text"], ops_by_session[i].1["body"]);
+            assert_eq!(r["source"], "cli");
+            assert_eq!(r["machine"], machine());
+            assert_eq!(r["backfilled"], false);
+        }
+        let kinds: Vec<&str> = rows.iter().map(|r| r["op"].as_str().unwrap()).collect();
+        assert_eq!(kinds, ["create", "append", "append"]);
+        // a refused op writes no row: create over an existing note, a bad name,
+        // an append to nothing, an empty body
+        let refused = json!([
+            create("pets", "cat", "again"),
+            create("Bad", "x", "b"),
+            {"op":"append","topic":"pets","slug":"dog","body":"x"},
+            create("pets", "empty", "  "),
+        ]);
+        let r = apply_ops(&root, &ops(refused), "t", Some("s4"), None).unwrap();
+        assert_eq!(r["failed"].as_array().unwrap().len(), 4, "{r}");
+        assert_eq!(sightings(&root).len(), 3, "a refused op gives 0 rows");
+        // without a spool id the row has no arrival and is stamped now
+        apply_ops(
+            &root,
+            &ops(json!([create("pets", "dog", "Rex.")])),
+            "t",
+            None,
+            None,
+        )
+        .unwrap();
+        let last = sightings(&root).pop().unwrap();
+        assert_eq!(
+            (last["arrival"].clone(), last["session"].clone()),
+            (Value::Null, Value::Null)
+        );
+        assert!(last["ts"].as_str().unwrap().starts_with("20"));
+    }
+
+    #[test]
+    fn sightings_key_the_id_in_the_file() {
+        let (_d, root) = kb();
+        let id_of = |p: &str| parse_note(&fs::read_to_string(root.join(p)).unwrap(), "x").id;
+        let app = |slug: &str| json!({"op":"append","topic":"a","slug":slug,"body":"more"});
+        // a plain `cp` leaves two notes sharing one id: the copy appended to
+        // gets a fresh id, the original keeps its own
+        apply_ops(
+            &root,
+            &ops(json!([create("a", "orig", "x")])),
+            "t",
+            None,
+            None,
+        )
+        .unwrap();
+        let orig = id_of("topics/a/orig.md");
+        fs::copy(root.join("topics/a/orig.md"), root.join("topics/a/copy.md")).unwrap();
+        apply_ops(&root, &ops(json!([app("copy")])), "t", None, None).unwrap();
+        let copy = id_of("topics/a/copy.md");
+        assert!(!copy.is_empty() && copy != orig, "{copy} vs {orig}");
+        assert_eq!(sightings(&root).last().unwrap()["note"], copy.as_str());
+        apply_ops(&root, &ops(json!([app("orig")])), "t", None, None).unwrap();
+        assert_eq!(id_of("topics/a/orig.md"), orig);
+        assert_eq!(sightings(&root).last().unwrap()["note"], orig.as_str());
+        // an invalid id value gets a fresh id; of two id lines the last valid
+        // one wins, here a copy of orig's, so it gets a fresh one too. The
+        // rewrite keeps exactly one id line and the row is keyed to it
+        for (slug, head) in [
+            ("bad", "id: not a valid id!\n".to_string()),
+            ("two", format!("id: second-id\nid: {orig}\n")),
+        ] {
+            fs::write(
+                root.join(format!("topics/a/{slug}.md")),
+                format!("---\n{head}title: T\ntags: \nupdated: x\n---\nbody\n"),
+            )
+            .unwrap();
+            apply_ops(&root, &ops(json!([app(slug)])), "t", None, None).unwrap();
+            let text = fs::read_to_string(root.join(format!("topics/a/{slug}.md"))).unwrap();
+            assert_eq!(text.matches("\nid: ").count(), 1, "{text}");
+            let id = id_of(&format!("topics/a/{slug}.md"));
+            assert!(
+                valid_session(&id) && id != orig && id != "second-id",
+                "{id}"
+            );
+            assert_eq!(sightings(&root).last().unwrap()["note"], id.as_str());
+        }
+        // a merge keeps each drop's id in an alias row to the kept note
+        let before = sightings(&root).len();
+        merge(&root, "topics/a/orig.md", &["topics/a/copy.md".to_string()]).unwrap();
+        let rows = sightings(&root);
+        assert_eq!(rows.len(), before + 1);
+        let alias = rows.last().unwrap();
+        assert_eq!(
+            (&alias["op"], &alias["from"], &alias["into"], &alias["note"]),
+            (&json!("merge"), &json!(copy), &json!(orig), &json!(orig))
+        );
+        assert_eq!(id_of("topics/a/orig.md"), orig);
+        // no alias for a drop without an id, one sharing the kept note's id,
+        // or one a note outside the merge still holds
+        put(&root, "a", "noid", "N", &[], "n");
+        fs::copy(root.join("topics/a/orig.md"), root.join("topics/a/same.md")).unwrap();
+        fs::copy(root.join("topics/a/bad.md"), root.join("topics/a/held.md")).unwrap();
+        let before = sightings(&root).len();
+        let drops = ["noid", "same", "held"].map(|d| format!("topics/a/{d}.md"));
+        merge(&root, "topics/a/orig.md", &drops).unwrap();
+        assert_eq!(sightings(&root).len(), before);
+        assert_eq!(id_of("topics/a/orig.md"), orig);
     }
 }
