@@ -646,8 +646,18 @@ it is never read twice. There is no `kb ask` pre-filter (naru task 2842): a
 fact the notes already hold reaches the door, which folds an exact repeat into
 a `skip` sighting of its note (anything not an exact repeat is filed as the
 model decides), so a re-arrival is recorded rather than lost. A run reports
-`<id>: sent N facts to kb add` per session (repeats included), or `<id>: kb
-add failed`.
+`<id>: sent N facts to kb add` per session (repeats included).
+
+**A failed `kb add` loses nothing** (naru task 2852): a session is ledgered only
+when its add was accepted (a refusal `kb add` itself spools counts). When the
+add fails outright the session stays out of the ledger, so the next run mines
+it again (the door folds a repeat into a skip sighting), and the run says `<id>:
+kb add failed (attempt N of 3), will retry next run` and ends with `kb-mine: N
+session(s) failed to file: <ids>`. Attempts are counted in
+`~/.naru/kb-mined.txt.failed`, one line per failed run. The third failure
+writes the fact texts to `kb/spool/<id>.md` with its `.json` origin sidecar
+(the format of a refused add, so spool recovery picks it up) and ledgers the
+session.
 
 **Which sessions** (naru task 2681): real work, plus **`naru-live` voice
 sessions** (`main_agent` `naru-live`). Every other session whose `cwd` is under

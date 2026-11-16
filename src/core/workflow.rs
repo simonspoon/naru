@@ -2219,6 +2219,7 @@ VOICE_TURNS='.turns[] | if .kind=="prompt" then ((.text//"")
   elif ((.text//"") | test("naru live listen|^(cat )?/private/tmp/")) then empty
   else "TOOL "+(.name//"")+": "+((.text//"")[:120]) end'
 
+failures=""; nfail=0; seq=0
 while IFS=' ' read -r id kind <&3; do
   if [ "$kind" = voice ]; then
     prompt="$VOICE_NOTE $PROMPT"
@@ -2244,14 +2245,39 @@ ${text: -8000}"; fi
   # sighting of its note (naru tasks 2833, 2842), so no `kb ask` pre-filter here
   kept=$(printf '%s' "$facts" | grep -E '^- ' || true)
   if [ -n "$kept" ]; then
-    printf '%s\n' "$kept" | naru kb add --source "mined-session-$id" --session "$id" --stdin >/dev/null \
-      && echo "$id: sent $(printf '%s\n' "$kept" | grep -c '^- ') facts to kb add" \
-      || echo "$id: kb add failed"
+    if printf '%s\n' "$kept" | naru kb add --source "mined-session-$id" --session "$id" --stdin >/dev/null; then
+      echo "$id: sent $(printf '%s\n' "$kept" | grep -c '^- ') facts to kb add"
+    else
+      # nothing was kept: leave the session out of the ledger so the next run
+      # mines it again (the door folds a repeat into a skip sighting). Attempts
+      # are counted in "$STATE.failed", one line per failed run. The third
+      # failure spools the fact texts, as kb add's own refusals are, and then
+      # the session is ledgered.
+      printf '%s\n' "$id" >> "$STATE.failed"
+      tries=$(grep -cxF -- "$id" "$STATE.failed")
+      if [ "$tries" -lt 3 ]; then
+        echo "$id: kb add failed (attempt $tries of 3), will retry next run"
+        failures="$failures $id"; nfail=$((nfail + 1))
+        continue
+      fi
+      sp="${NARU_KB_DIR:-${MESA_KB_DIR:-${NARU_HOME:-$HOME/.naru}/kb}}/spool"
+      seq=$((seq + 1))
+      sid=$(printf '%x-%x-%s' "$(( $(date +%s) * 1000 ))" "$$" "$seq")
+      if mkdir -p "$sp" && printf '%s\n' "$kept" > "$sp/$sid.md" \
+        && jq -nc --arg s "mined-session-$id" --arg i "$id" --arg m "$(hostname)" '{source: $s, session: $i, machine: $m}' > "$sp/$sid.json"; then
+        echo "$id: kb add failed $tries times; fact texts saved to $sp/$sid.md, session ledgered"
+      else
+        echo "$id: kb add failed $tries times and the spool is not writable, will retry next run"
+        failures="$failures $id"; nfail=$((nfail + 1))
+        continue
+      fi
+    fi
   else
     echo "$id: nothing found"
   fi
   echo "$id" >> "$STATE"
 done 3<<< "$rows"
+if [ "$nfail" -gt 0 ]; then echo "kb-mine: $nfail session(s) failed to file:$failures"; fi
 "##;
 
 /// Installs or updates the managed built-in workflows — the two KB mining

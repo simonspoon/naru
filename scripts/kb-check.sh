@@ -511,6 +511,53 @@ run 0 "$MESA" kb show topics/infra/pelican-relay.md
 [ "$("$MESA" kb dupes | jq length)" = "$DUPES_BEFORE" ] || fail "re-mining must not add a dupes cluster"
 ok "mining: no kb ask call; every extracted fact reaches kb add; a re-mined fact folds into a skip sighting from its session (seen=2, dupes clusters unchanged at $DUPES_BEFORE)"
 
+# ---- a failed kb add never loses a session's facts (naru task 2852) ----
+#
+# Same script, a stub whose `kb add` fails while $MINE_DIR/addfail exists.
+# A failed session stays out of the ledger and is mined again; the third
+# failure spools the fact texts and ledgers it; a run reports the failures.
+
+cat > "$MINE_BIN/naru" <<'STUB'
+#!/usr/bin/env bash
+case "$1 $2" in
+  "cc sessions") cat "$MINE_DIR/sessions.json" ;;
+  "cc chat") cat "$MINE_DIR/chat.json" ;;
+  "live status") echo null ;;
+  "kb add") if [ -e "$MINE_DIR/addfail" ]; then cat >/dev/null; echo '{"error":{"code":"unavailable","message":"stub"}}' >&2; exit 1; fi; exec "$REAL_NARU" "$@" ;;
+  *) exec "$REAL_NARU" "$@" ;;
+esac
+STUB
+jq -s . <(row fail-s1 2020-01-03) > "$MINE_DIR/sessions.json"
+FAIL_FACT='The heron gateway silently truncates headers longer than 8 KiB before its auth check runs.'
+printf '%s' "$FAIL_FACT" > "$MINE_DIR/fact"
+mine_fail() { # one run with kb add failing; MOUT = its output
+  MOUT=$(PATH="$MINE_BIN:$PATH" NARU_KB_MINED="$MINE_DIR/ledger" NARU_INPUT=1 bash "$MINE") || fail "the mining script exited non-zero: $MOUT"
+}
+touch "$MINE_DIR/addfail"
+mine_fail
+case "$MOUT" in *"fail-s1: kb add failed (attempt 1 of 3)"*"kb-mine: 1 session(s) failed to file: fail-s1"*) ;; *) fail "a failed add must be reported: $MOUT" ;; esac
+grep -qx fail-s1 "$MINE_DIR/ledger" && fail "a session whose add failed must stay out of the ledger"
+mine_fail
+case "$MOUT" in *"attempt 2 of 3"*) ;; *) fail "the session must be mined again: $MOUT" ;; esac
+grep -qx fail-s1 "$MINE_DIR/ledger" && fail "still not ledgered after 2 failures"
+mine_fail
+case "$MOUT" in *"failed 3 times; fact texts saved to "*) ;; *) fail "third failure: $MOUT" ;; esac
+grep -qx fail-s1 "$MINE_DIR/ledger" || fail "the session must be ledgered after the third failure"
+SPOOLED=$(grep -lF -- "$FAIL_FACT" "$KB"/spool/*.md) || fail "the fact text must be in spool/"
+[ "$(jq -r '.session' "${SPOOLED%.md}.json")" = "fail-s1" ] && [ "$(jq -r '.source' "${SPOOLED%.md}.json")" = "mined-session-fail-s1" ] || fail "spool sidecar: $(cat "${SPOOLED%.md}.json")"
+rm -f "$SPOOLED" "${SPOOLED%.md}.json"
+# a failure followed by a success: filed once, then ledgered
+jq -s . <(row fail-s2 2020-01-04) > "$MINE_DIR/sessions.json"
+printf '%s' 'The heron gateway retries a refused upstream exactly twice and then drops the request.' > "$MINE_DIR/fact"
+mine_fail
+grep -qx fail-s2 "$MINE_DIR/ledger" && fail "fail-s2 ledgered after a failed add"
+rm -f "$MINE_DIR/addfail"
+mine
+[ "$MOUT" = "fail-s2: sent 1 facts to kb add" ] || fail "retry after the add recovers: $MOUT"
+grep -qx fail-s2 "$MINE_DIR/ledger" || fail "fail-s2 must be ledgered once its add succeeds"
+[ "$(grep -rlF 'retries a refused upstream exactly twice' "$KB/arrivals" "$KB/topics" 2>/dev/null | grep -c '\.md$')" -ge 1 ] || fail "the recovered fact must be in the KB"
+ok "mining: a failed kb add keeps the session out of the ledger and reports it; mined again; the 3rd failure spools the fact texts and ledgers it; a later success files the fact"
+
 # ---- the automatic lookup hook (naru task 2274) ----
 #
 # The kb-lookup.sh built-in extracted from `library show`, fed UserPromptSubmit
