@@ -8234,8 +8234,10 @@ fn run_migrate(cmd: MigrateCmd) -> Result<()> {
     Ok(())
 }
 
-/// Keys dropped from a kb note under `--quiet` (naru task 1919): the body.
-const QUIET_DROP_KB_NOTE: &[&str] = &["body"];
+/// Keys dropped from a kb note under `--quiet` (naru task 1919): the body,
+/// and the sightings with their texts (naru task 2838); `first_seen`,
+/// `last_seen` and `seen` stay.
+const QUIET_DROP_KB_NOTE: &[&str] = &["body", "sightings"];
 
 fn run_kb(cmd: KbCmd) -> Result<()> {
     use crate::core::kb;
@@ -11946,22 +11948,37 @@ mod tests {
         );
     }
 
-    /// Key parity for a kb note (naru task 1919): `--quiet` drops the body.
+    /// Key parity for a kb note (naru task 1919): `--quiet` drops the body
+    /// and the sightings (naru task 2838).
     #[test]
     fn kb_note_quiet_drops_the_body() {
         let note = crate::core::kb::Note {
             path: "topics/a/b.md".into(),
             body: "text".into(),
             sessions: vec!["s1".into()],
+            id: None,
+            first_seen: None,
+            last_seen: None,
+            seen: 0,
+            sightings: Vec::new(),
         };
         assert_eq!(
             sorted_owned(keys(&note)),
-            sorted(&["path", "body", "sessions"]),
+            sorted(&[
+                "path",
+                "body",
+                "sessions",
+                "id",
+                "first_seen",
+                "last_seen",
+                "seen",
+                "sightings"
+            ]),
             "kb::Note gained/lost a field: decide whether --quiet should drop it"
         );
         assert_eq!(
             sorted_owned(value_keys(&quiet(&note, QUIET_DROP_KB_NOTE))),
-            sorted(&["path", "sessions"]),
+            sorted(&["path", "sessions", "id", "first_seen", "last_seen", "seen"]),
         );
     }
 

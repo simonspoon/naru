@@ -250,6 +250,9 @@ pub(crate) fn iso_of(secs: i64) -> String {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct NoteInfo {
     pub path: String,
+    /// The note's stable id (naru task 2836), null before its first write
+    /// since ids existed.
+    pub id: Option<String>,
     pub topic: String,
     pub title: String,
     pub tags: Vec<String>,
@@ -259,12 +262,55 @@ pub struct NoteInfo {
     pub sessions: Vec<String>,
 }
 
+/// A `kb list` row (naru task 2838): the note's metadata plus when it was
+/// seen, from one read of `sightings.jsonl` per call. [`scan`] does not fill
+/// these, since it also runs on the ask and lookup paths.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ListedNote {
+    #[serde(flatten)]
+    pub info: NoteInfo,
+    /// The oldest and newest sighting's `ts`; null when the note has no
+    /// sighting (filed before sightings existed, or without an id).
+    pub first_seen: Option<String>,
+    pub last_seen: Option<String>,
+    /// How many sightings the note has; 0 means unknown, not never.
+    pub seen: usize,
+}
+
 /// `kb show`'s answer.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Note {
     pub path: String,
     pub body: String,
     pub sessions: Vec<String>,
+    /// As [`NoteInfo::id`] and [`ListedNote`] (naru task 2838).
+    pub id: Option<String>,
+    pub first_seen: Option<String>,
+    pub last_seen: Option<String>,
+    pub seen: usize,
+    /// The note's sightings, oldest first.
+    pub sightings: Vec<Sighting>,
+}
+
+/// One arrival on a note: a `sightings.jsonl` row (naru task 2837) without
+/// its `note` key, which is the note's own id. Merge alias rows are not
+/// sightings and are never one of these.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Sighting {
+    pub ts: String,
+    pub op: String,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub session: Option<String>,
+    #[serde(default)]
+    pub machine: Option<String>,
+    #[serde(default)]
+    pub arrival: Option<String>,
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub backfilled: bool,
 }
 
 /// One cited note in an answer.
@@ -401,6 +447,7 @@ pub fn scan(root: &Path) -> Result<Vec<NoteInfo>> {
         .into_iter()
         .map(|(path, topic, p)| NoteInfo {
             path,
+            id: (!p.id.is_empty()).then_some(p.id),
             topic,
             title: one_line(&p.title, TITLE_MAX),
             tags: p.tags,
@@ -526,26 +573,105 @@ fn notes_for_filing(root: &Path, notes: &[NoteInfo], piece: &str) -> String {
 }
 
 /// `kb list`: every note, optionally only one topic's and/or only those
-/// filed from one session.
-pub fn list(root: &Path, topic: Option<&str>, session: Option<&str>) -> Result<Vec<NoteInfo>> {
+/// filed from one session, with when each was seen.
+pub fn list(root: &Path, topic: Option<&str>, session: Option<&str>) -> Result<Vec<ListedNote>> {
+    let mut by_note = read_sightings(root)?;
     Ok(scan(root)?
         .into_iter()
         .filter(|n| topic.is_none_or(|t| n.topic == t))
         .filter(|n| session.is_none_or(|s| n.sessions.iter().any(|x| x == s)))
+        .map(|info| {
+            let rows = info
+                .id
+                .as_ref()
+                .and_then(|id| by_note.remove(id))
+                .unwrap_or_default();
+            let (first_seen, last_seen) = span(&rows);
+            ListedNote {
+                info,
+                first_seen,
+                last_seen,
+                seen: rows.len(),
+            }
+        })
         .collect())
 }
 
-/// `kb show`: a note's body. A path that is not a note in the kb — outside it,
+/// Every sighting in `sightings.jsonl` by note id, each note's oldest first
+/// (rows are appended in apply order, but a held spool text applied late
+/// carries its earlier arrival time). A missing file is empty; a line that is
+/// not a sighting row, and a `merge` alias row, is skipped. Read once per
+/// `kb list` or `kb show`, never from [`scan`] (naru task 2838).
+fn read_sightings(root: &Path) -> Result<std::collections::HashMap<String, Vec<Sighting>>> {
+    #[derive(Deserialize)]
+    struct Row {
+        note: String,
+        #[serde(flatten)]
+        sighting: Sighting,
+    }
+    let mut out: std::collections::HashMap<String, Vec<Sighting>> = Default::default();
+    let bytes = match fs::read(root.join("sightings.jsonl")) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+        Err(e) => return Err(e.into()),
+    };
+    for line in String::from_utf8_lossy(&bytes).lines() {
+        let Ok(row) = serde_json::from_str::<Row>(line) else {
+            continue;
+        };
+        if row.note.is_empty() || row.sighting.op == "merge" {
+            continue;
+        }
+        out.entry(row.note).or_default().push(row.sighting);
+    }
+    for rows in out.values_mut() {
+        rows.sort_by(|a, b| a.ts.cmp(&b.ts));
+    }
+    Ok(out)
+}
+
+/// The oldest and newest `ts` of rows sorted oldest first.
+fn span(rows: &[Sighting]) -> (Option<String>, Option<String>) {
+    (
+        rows.first().map(|r| r.ts.clone()),
+        rows.last().map(|r| r.ts.clone()),
+    )
+}
+
+/// A note's parsed file. A path that is not a note in the kb — outside it,
 /// badly formed, a symlink, absent — is `not_found`.
-pub fn show(root: &Path, path: &str) -> Result<Note> {
+fn read_parsed(root: &Path, path: &str) -> Result<Parsed> {
     let missing = || Error::NotFound(format!("no note {path:?} in the knowledge base"));
     let (topic, slug) = parse_rel(path).ok_or_else(missing)?;
     let file = existing_note_file(root, &topic, &slug).ok_or_else(missing)?;
-    let p = parse_note(&fs::read_to_string(file)?, &slug);
+    Ok(parse_note(&fs::read_to_string(file)?, &slug))
+}
+
+/// A note's body alone, as [`read_parsed`]. The ask, lookup and dupes paths
+/// read notes through this, never through [`show`], so they never open
+/// `sightings.jsonl` (naru task 2838).
+fn note_body(root: &Path, path: &str) -> Result<String> {
+    Ok(read_parsed(root, path)?.body)
+}
+
+/// `kb show`: a note's body and sightings, `not_found` as [`read_parsed`].
+pub fn show(root: &Path, path: &str) -> Result<Note> {
+    let p = read_parsed(root, path)?;
+    let id = (!p.id.is_empty()).then_some(p.id);
+    let sightings = match &id {
+        Some(id) => read_sightings(root)?.remove(id).unwrap_or_default(),
+        None => Vec::new(),
+    };
+    let (first_seen, last_seen) = span(&sightings);
     Ok(Note {
         path: path.to_string(),
         body: p.body,
         sessions: p.sessions,
+        id,
+        first_seen,
+        last_seen,
+        seen: sightings.len(),
+        sightings,
     })
 }
 
@@ -1123,15 +1249,15 @@ fn prefilter_idf(
     let mut docs: Vec<(&NoteInfo, String, String, String)> = Vec::new();
     let mut df: std::collections::HashMap<String, usize> = Default::default();
     for n in notes {
-        let Ok(note) = show(root, &n.path) else {
+        let Ok(raw) = note_body(root, &n.path) else {
             continue;
         };
         let head = format!("{} {} {}", n.title, n.tags.join(" "), n.path);
-        for w in keywords(&format!("{head} {}", note.body)) {
+        for w in keywords(&format!("{head} {raw}")) {
             *df.entry(w).or_default() += 1;
         }
-        let body = note.body.to_lowercase();
-        docs.push((n, head.to_lowercase(), body, note.body));
+        let body = raw.to_lowercase();
+        docs.push((n, head.to_lowercase(), body, raw));
     }
     let n_docs = docs.len() as f64;
     let idf =
@@ -1180,8 +1306,8 @@ fn with_siblings(
                 if have(&chosen) || have(&picked) {
                     continue;
                 }
-                if let Ok(note) = show(root, &n.path) {
-                    picked.push((n.clone(), note.body));
+                if let Ok(body) = note_body(root, &n.path) {
+                    picked.push((n.clone(), body));
                 }
             }
         }
@@ -1396,7 +1522,7 @@ pub fn dupes(root: &Path, threshold: f64) -> Result<Vec<Cluster>> {
     let prints: Vec<Fingerprint> = notes
         .iter()
         .map(|n| {
-            let body = show(root, &n.path).map(|s| s.body).unwrap_or_default();
+            let body = note_body(root, &n.path).unwrap_or_default();
             Fingerprint {
                 words: word_ids(&format!("{} {body}", n.title), &mut ids),
                 title: word_ids(&n.title, &mut ids),
@@ -1819,8 +1945,8 @@ mod tests {
         assert_eq!(r["applied"].as_array().unwrap().len(), 1, "{r}");
         let all = list(&root, None, None).unwrap();
         assert_eq!(all.len(), 1);
-        assert_eq!(all[0].title, "T / x");
-        assert_eq!(all[0].tags, ["a", "b"]);
+        assert_eq!(all[0].info.title, "T / x");
+        assert_eq!(all[0].info.tags, ["a", "b"]);
         // append keeps the title, merges tags, and joins the body
         let app = json!({"op":"append","topic":"rust","slug":"lifetimes","title":"ignored","tags":["c"],"body":"More."});
         let r = apply_ops(&root, &ops(json!([app])), "t", None, None).unwrap();
@@ -1828,7 +1954,7 @@ mod tests {
         let n = show(&root, "topics/rust/lifetimes.md").unwrap();
         assert_eq!(n.body, "Body one.\n\nMore.");
         let l = &list(&root, Some("rust"), None).unwrap()[0];
-        assert_eq!((l.title.as_str(), l.tags.len()), ("T / x", 3));
+        assert_eq!((l.info.title.as_str(), l.info.tags.len()), ("T / x", 3));
         // the index matches the files; the log has one line per write
         let index = fs::read_to_string(root.join("INDEX.md")).unwrap();
         assert_eq!(index, index_text(&scan(&root).unwrap()));
@@ -1884,7 +2010,10 @@ mod tests {
         // an append without a session keeps the list as it was
         let op = json!({"op":"append","topic":"a","slug":"b","title":"","tags":[],"body":"x"});
         apply_ops(&root, &ops(json!([op])), "t", None, None).unwrap();
-        assert_eq!(list(&root, None, None).unwrap()[0].sessions, ["s1", "s2"]);
+        assert_eq!(
+            list(&root, None, None).unwrap()[0].info.sessions,
+            ["s1", "s2"]
+        );
         // capped at the most recent SESSIONS_MAX
         for i in 0..SESSIONS_MAX + 3 {
             app(&format!("n{i}"));
@@ -1898,7 +2027,7 @@ mod tests {
             list(&root, None, Some(s))
                 .unwrap()
                 .into_iter()
-                .map(|n| n.path)
+                .map(|n| n.info.path)
                 .collect()
         };
         assert_eq!(paths("n5"), ["topics/a/b.md"]);
@@ -3035,6 +3164,151 @@ mod tests {
             (Value::Null, Value::Null)
         );
         assert!(last["ts"].as_str().unwrap().starts_with("20"));
+    }
+
+    /// The read side (naru task 2838): `kb show` and `kb list` report the
+    /// sightings of the task 2837 fixture; merge alias rows and junk lines are
+    /// not sightings; a note without an id or rows reads as unknown.
+    #[test]
+    fn show_and_list_report_sightings() {
+        let (_d, root) = kb();
+        let path = "topics/pets/cat.md";
+        let bodies = [
+            ("s1", create("pets", "cat", "Miso is the cat.")),
+            (
+                "s2",
+                json!({"op":"append","topic":"pets","slug":"cat","body":"Miso is grey."}),
+            ),
+            (
+                "s3",
+                json!({"op":"append","topic":"pets","slug":"cat","body":"Miso is six."}),
+            ),
+        ];
+        for (session, op) in &bodies {
+            let id = spool(&root, "raw").unwrap();
+            let mut call = |_p: &str, _s: &str| Ok(json!({"ops": [op.clone()]}));
+            run_add_job(&root, &id, "cli", Some(session), &mut call).unwrap();
+        }
+        let rows = sightings(&root);
+        let oldest = rows
+            .iter()
+            .map(|r| r["ts"].as_str().unwrap())
+            .min()
+            .unwrap();
+        let newest = rows
+            .iter()
+            .map(|r| r["ts"].as_str().unwrap())
+            .max()
+            .unwrap();
+        let n = show(&root, path).unwrap();
+        assert_eq!(n.seen, 3);
+        assert_eq!(n.first_seen.as_deref(), Some(oldest));
+        assert_eq!(n.last_seen.as_deref(), Some(newest));
+        assert_eq!(n.id.as_deref(), rows[0]["note"].as_str());
+        let sessions: Vec<_> = n.sightings.iter().map(|s| s.session.clone()).collect();
+        assert_eq!(
+            sessions,
+            [Some("s1".into()), Some("s2".into()), Some("s3".into())]
+        );
+        assert_eq!(n.sightings[1].text.as_deref(), Some("Miso is grey."));
+        // a held text applied last keeps its earlier arrival and sorts first
+        let late = json!({"op":"append","topic":"pets","slug":"cat","body":"Miso naps."});
+        apply_ops(
+            &root,
+            &ops(json!([late])),
+            "t",
+            Some("s0"),
+            Some("18b00000000-old"),
+        )
+        .unwrap();
+        let n = show(&root, path).unwrap();
+        assert_eq!(n.seen, 4);
+        assert_eq!(
+            n.first_seen.as_deref(),
+            Some(iso_of(0x18b00000000 / 1000).as_str())
+        );
+        assert_eq!(n.sightings[0].session.as_deref(), Some("s0"));
+        assert_eq!(n.last_seen.as_deref(), Some(newest));
+        // a merge alias row, a junk line and a row with a null text
+        put(&root, "pets", "dog", "Dog", &[], "Rex.");
+        let mut extra = String::from("not json\n{\"op\":\"create\"}\n");
+        extra.push_str(
+            &json!({"ts":"2020-01-01T00:00:00Z","note":n.id,"op":"merge",
+            "from":"x","into":n.id,"text":null})
+            .to_string(),
+        );
+        extra.push('\n');
+        extra.push_str(
+            &json!({"ts":"2030-01-01T00:00:00Z","note":n.id,"op":"skip",
+            "text":null,"session":null})
+            .to_string(),
+        );
+        extra.push('\n');
+        OpenOptions::new()
+            .append(true)
+            .open(root.join("sightings.jsonl"))
+            .unwrap()
+            .write_all(extra.as_bytes())
+            .unwrap();
+        let n = show(&root, path).unwrap();
+        assert_eq!(n.seen, 5, "the merge row and junk are not sightings");
+        assert_eq!(n.last_seen.as_deref(), Some("2030-01-01T00:00:00Z"));
+        assert_eq!(n.sightings[4].text, None);
+        // list: same counts; the hand-placed note without an id is unknown
+        let all = list(&root, None, None).unwrap();
+        let cat = all.iter().find(|l| l.info.path == path).unwrap();
+        assert_eq!(
+            (cat.seen, cat.first_seen.clone(), cat.last_seen.clone()),
+            (5, n.first_seen.clone(), n.last_seen.clone())
+        );
+        let dog = all
+            .iter()
+            .find(|l| l.info.path == "topics/pets/dog.md")
+            .unwrap();
+        assert_eq!(
+            (dog.info.id.clone(), dog.seen, dog.first_seen.clone()),
+            (None, 0, None)
+        );
+        let d = show(&root, "topics/pets/dog.md").unwrap();
+        assert_eq!(
+            (d.id, d.seen, d.first_seen, d.sightings.len()),
+            (None, 0, None, 0)
+        );
+        // no sightings file at all: every note reads as unknown
+        fs::remove_file(root.join("sightings.jsonl")).unwrap();
+        assert_eq!(show(&root, path).unwrap().seen, 0);
+        assert!(list(&root, None, None).unwrap().iter().all(|l| l.seen == 0));
+    }
+
+    /// `scan` runs on the ask and lookup paths under a time budget, so they
+    /// never read `sightings.jsonl` (naru task 2838): with the file replaced
+    /// by a directory, which fails any read, ask and lookup still answer
+    /// while list and show fail.
+    #[test]
+    fn ask_and_lookup_never_read_sightings() {
+        let (_d, root) = kb();
+        apply_ops(
+            &root,
+            &ops(json!([
+                create("pets", "cat", "The cat is named Miso."),
+                create("rust", "tips", "Clippy runs in CI.")
+            ])),
+            "t",
+            None,
+            None,
+        )
+        .unwrap();
+        fs::remove_file(root.join("sightings.jsonl")).unwrap();
+        fs::create_dir(root.join("sightings.jsonl")).unwrap();
+        assert!(list(&root, None, None).is_err());
+        assert!(show(&root, "topics/pets/cat.md").is_err());
+        let mut call = |_p: &str, _s: &str| -> std::result::Result<Value, String> {
+            Ok(json!({"answer": "Miso.", "sources": ["topics/pets/cat.md"], "fit": "strong"}))
+        };
+        let a = ask_with(&root, "what is the cat named?", &mut call).unwrap();
+        assert_eq!(a.sources.len(), 1, "{a:?}");
+        let l = lookup_with(&root, "rename the cat Miso", &mut call).unwrap();
+        assert_eq!(l.sources.len(), 1, "{l:?}");
     }
 
     #[test]

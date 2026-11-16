@@ -90,8 +90,9 @@ note's id (assigning one if it has none); each drop's id survives as a
 `backfill-sessions` rewrites only the `sessions:` line and the cleanup
 workflow's step 8 rewrite copies the front matter through, so neither
 changes it. A note without an `id:` line (or with a value that is not 1-64
-of `[A-Za-z0-9_-]`) still parses, with an empty id. `kb list`, `kb show`,
-`INDEX.md` and the prompts do not carry it yet. A binary from before this
+of `[A-Za-z0-9_-]`) still parses, with an empty id. `kb list` and `kb show`
+carry it as `id` (null when empty, naru task 2838); `INDEX.md` and the
+prompts do not. A binary from before this
 task drops the line on its next append or merge of that note.
 
 ### Sightings (naru task 2837)
@@ -370,12 +371,30 @@ Monday. The heuristic misses an agent that uses a fact without naming its note.
 
 ## `kb list` / `kb show`
 
-`list` prints a bare array of `{path, topic, title, tags, updated, sessions}`;
-`--session <id>` keeps only the notes whose `sessions` hold that id (with
-`--topic`, both must match). `show` prints `{path, body, sessions}`; a path
-that is not a note in the kb (outside it, malformed, a symlink, absent) is
-`not_found`. `--quiet` on `show` drops `body`;
-`list`, `ask` and `add` accept and ignore it.
+`list` prints a bare array of `{path, id, topic, title, tags, updated,
+sessions, first_seen, last_seen, seen}`; `--session <id>` keeps only the notes
+whose `sessions` hold that id (with `--topic`, both must match). `show` prints
+`{path, body, sessions, id, first_seen, last_seen, seen, sightings}`, where
+`sightings` is the note's rows oldest first, each `{ts, op, source, session,
+machine, arrival, text, backfilled}` (`text` null on a row that had none); a
+path that is not a note in the kb (outside it, malformed, a symlink, absent)
+is `not_found`. `--quiet` on `show` drops `body` and `sightings` (so every
+sighting text), keeping the three counts; `list`, `ask` and `add` accept and
+ignore it.
+
+Seen fields (naru task 2838): the sightings are the `sightings.jsonl` rows
+keyed to the note's `id`, minus `merge` alias rows and lines that do not
+parse; `first_seen`/`last_seen` are their oldest and newest `ts`, `seen` their
+count. Merged drops' rows are not followed yet (naru task 2839). A note
+without an id or without rows (everything filed before sightings, until the
+backfill) has `first_seen`/`last_seen` null and `seen` 0: unknown, not
+"never". `first_seen` is only as good as the id: a note copied by hand shares
+its id, and whichever copy is written first moves to a fresh id (see the id
+rules above), so the original can lose its history to the copy and show a
+later `first_seen`; Naru cannot detect that. `list` and `show` read
+`sightings.jsonl` once per call; `scan`, `kb ask`, the automatic lookup and
+`kb dupes` never open it (they read note bodies without it), so the lookup's
+time budget is unchanged. The web routes return the same objects.
 
 ## `kb dupes` / `kb merge` (naru task 2277)
 
