@@ -100,10 +100,14 @@ new one, and it had no way to say "already there".
     when no similar note has room.
     "Applied to that note" means an `append` of only the paragraphs, bullets
     and code blocks it lacks (`kb merge`'s compare: whitespace- and
-    case-insensitive), or a `skip` when it lacks none. A unit of 5 or more
-    scored words is also dropped when 70% of its words are in one unit the
-    note already holds (a rewording, naru task 2845), so a reworded fact is
-    not held twice; shorter units are only compared exactly. A note with no room
+    case-insensitive), or a `skip` when it lacks none. A unit of 8 or more
+    words is also dropped when it adds no token to one held unit (naru task
+    2846): lowercased, edge punctuation and a few stop words removed, its
+    token sequence equals or is a contiguous run of the held unit's,
+    with the same numbers and negations. Any other token (a flag, a path, a
+    version, a spelled-out number) or a different order keeps it, so a
+    looser paraphrase is appended and left to a later compaction; shorter
+    units are only compared exactly. A note with no room
     left (the 16 KiB cap) is passed over for the next best. An op with fewer
     than 8 distinct words (title and body) is not scored: the overlap of a
     few words is noise;

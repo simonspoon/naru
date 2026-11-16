@@ -1107,25 +1107,22 @@ fn apply_one(
 fn fold_body(existing: &str, incoming: &str) -> Option<String> {
     let held = units(existing);
     let mut known: HashSet<String> = held.iter().map(|(u, _)| squash(u)).collect();
-    let mut ids = std::collections::HashMap::new();
-    let held_words: Vec<(Vec<u32>, Vec<String>)> = held
-        .iter()
-        .map(|(u, _)| (word_ids(u, &mut ids), sign_tokens(u)))
-        .collect();
+    let held_tokens: Vec<Vec<String>> = held.iter().map(|(u, _)| fold_tokens(u)).collect();
     let all = units(incoming);
     let new: Vec<&(String, bool)> = all
         .iter()
         .filter(|(u, _)| known.insert(squash(u)))
         .filter(|(u, _)| {
-            // A reworded unit (naru task 2845): most of its words already sit
-            // in one unit the note holds. Short units are never judged so.
-            let w = word_ids(u, &mut ids);
-            w.len() < PARAPHRASE_MIN_WORDS
-                || !held_words.iter().any(|(h, hs)| {
-                    overlap(&w, h) >= PARAPHRASE_OVERLAP
-                        && jaccard(&w, h) >= PARAPHRASE_JACCARD
-                        && *hs == sign_tokens(u)
-                })
+            // Naru task 2846: a unit is dropped only when it adds no token at
+            // all to one held unit. Short units are never judged so.
+            fold_tokens(u).len() < FOLD_MIN_WORDS || {
+                let w = fold_tokens(u);
+                let signs = sign_tokens(u);
+                !held
+                    .iter()
+                    .zip(&held_tokens)
+                    .any(|((hu, _), h)| is_subsequence(&w, h) && sign_tokens(hu) == signs)
+            }
         })
         .collect();
     if new.is_empty() {
@@ -1828,15 +1825,36 @@ fn word_ids(text: &str, ids: &mut std::collections::HashMap<String, u32>) -> Vec
     out
 }
 
-/// A unit counts as a rewording of a held one when this share of its words is
-/// in the held one (see [`overlap`]).
-const PARAPHRASE_OVERLAP: f64 = 0.7;
+/// A unit with fewer words than this is only ever dropped as an exact repeat.
+const FOLD_MIN_WORDS: usize = 8;
 
-/// A unit with fewer scored words than this is never judged a rewording.
-const PARAPHRASE_MIN_WORDS: usize = 5;
+/// Words with no weight in [`fold_tokens`].
+const FOLD_STOP: &[&str] = &[
+    "a", "an", "the", "is", "are", "was", "were", "to", "of", "it", "this", "that",
+];
 
-/// Both measures must hold, so one long held unit cannot swallow a short one.
-const PARAPHRASE_JACCARD: f64 = 0.5;
+/// `text` as lowercase whitespace-separated tokens, edge punctuation trimmed
+/// and [`FOLD_STOP`] dropped. Punctuation inside a token stays, so a flag, a
+/// path or a version is one token and differs from any near miss.
+fn fold_tokens(text: &str) -> Vec<String> {
+    const EDGE: &str = "\"'`()[]{}<>";
+    text.to_lowercase()
+        .split_whitespace()
+        .map(|w| {
+            w.trim_matches(|c: char| EDGE.contains(c))
+                .trim_end_matches(|c: char| ".,;:!?".contains(c))
+                .trim_matches(|c: char| EDGE.contains(c))
+        })
+        .filter(|w| !w.is_empty() && !FOLD_STOP.contains(w))
+        .map(String::from)
+        .collect()
+}
+
+/// Whether `a` is a non-empty contiguous run of `b`. Gaps are not allowed: a
+/// token dropped from the middle (`only`, `off`, a clause) can flip a fact.
+fn is_subsequence(a: &[String], b: &[String]) -> bool {
+    !a.is_empty() && b.windows(a.len()).any(|w| w == a)
+}
 
 /// The numbers and negations of `text`, which [`word_ids`] drops but which
 /// change a fact: two units that differ in them are not rewordings.
@@ -1870,12 +1888,6 @@ fn sign_tokens(text: &str) -> Vec<String> {
     out.sort_unstable();
     out.dedup();
     out
-}
-
-/// The share of `a`'s words that `b` also holds (both sorted, deduplicated).
-fn overlap(a: &[u32], b: &[u32]) -> f64 {
-    let both = a.iter().filter(|w| b.binary_search(w).is_ok()).count();
-    both as f64 / a.len().max(1) as f64
 }
 
 fn jaccard(a: &[u32], b: &[u32]) -> f64 {
@@ -4610,21 +4622,21 @@ mod tests {
         };
         let (_, r) = file_as(&root, "s1", "src-1", json!([new_op("quokka-flange", FACT)]));
         assert_eq!(counts(&r), (1, 0, 0, 0), "{r}");
-        // the same fact reworded: seen twice, the body holds it once
-        let reworded = "- Every month the quokka flange drifts out of calibration.\n- Before the weekly bake, recalibrate it with the zirconium shim.";
+        // the same fact with only case and punctuation changed: seen twice,
+        // the body holds it once
+        let repeat = FACT.to_uppercase().replace('.', "!");
         let (id2, r) = file_as(
             &root,
             "s2",
             "src-2",
-            json!([new_op("flange-drift", reworded)]),
+            json!([new_op("flange-drift", &repeat)]),
         );
         assert_eq!(counts(&r), (0, 0, 1, 0), "{r}");
         assert_eq!(show(&root, quokka).unwrap().body, FACT);
         assert_eq!(scan(&root).unwrap().len(), 1);
         assert!(root.join("arrivals").join(format!("{id2}.md")).exists());
-        // a reworded unit beside a new one: only the new one is appended
-        let mixed =
-            format!("{reworded}\n- The shim lives in drawer four, behind the spare gaskets.");
+        // a repeat beside a new unit: only the new one is appended
+        let mixed = format!("{repeat}\n- The shim lives in drawer four, behind the spare gaskets.");
         let (_, r) = file_as(
             &root,
             "s3",
@@ -4672,8 +4684,8 @@ mod tests {
         let ap = json!({"op":"append","topic":"tools","slug":"cache","body":neg});
         let (_, r) = file_as(&root, "s4c", "src-4c", json!([ap]));
         assert_eq!(counts(&r), (0, 1, 0, 0), "{r}");
-        // a reworded append is a skip
-        let ap = json!({"op":"append","topic":"tools","slug":"quokka-flange","body":reworded});
+        // a repeated append is a skip
+        let ap = json!({"op":"append","topic":"tools","slug":"quokka-flange","body":repeat});
         let (_, r) = file_as(&root, "s4d", "src-4d", json!([ap]));
         assert_eq!(counts(&r), (0, 0, 1, 0), "{r}");
         // a model skip naming a note that lacks the fact is an append
@@ -4689,6 +4701,109 @@ mod tests {
         // a skip naming a note that does hold it stays a skip
         let (_, r) = file_as(&root, "s7", "src-7", json!([skip("quokka-flange")]));
         assert_eq!(counts(&r), (0, 0, 1, 0), "{r}");
+    }
+
+    /// Naru task 2846: a unit is dropped only when it adds no token at all.
+    #[test]
+    fn fold_never_drops_a_differing_unit() {
+        let pairs = [
+            (
+                "Run cargo build --release before you ship the new binary to anyone.",
+                "Run cargo build --debug before you ship the new binary to anyone.",
+            ),
+            (
+                "Pass --force when the lock file is stale and the job will not start.",
+                "Pass --dry-run when the lock file is stale and the job will not start.",
+            ),
+            (
+                "The service reads ~/.config/naru/config.json at startup every single time.",
+                "The service reads ~/.naru/config.json at startup every single time.",
+            ),
+            (
+                "The audio service restarts itself after every crash of the main process.",
+                "The video service restarts itself after every crash of the main process.",
+            ),
+            (
+                "The upload worker retries the failed request three times before giving up.",
+                "The upload worker retries the failed request five times before giving up.",
+            ),
+            (
+                "The build is fine on linux, fails on macos when the cache is cold today.",
+                "The build is fine on macos, fails on linux when the cache is cold today.",
+            ),
+            (
+                "Deploy to staging first and then production once the smoke checks are green.",
+                "Deploy to production first and then staging once the smoke checks are green.",
+            ),
+            (
+                "The upload worker retries the failed request three times before giving up.",
+                "The upload worker retries the failed request three times before giving up, always.",
+            ),
+            (
+                "The upload worker is fine to restart during a deploy window on weekdays.",
+                "The upload worker is not fine to restart during a deploy window on weekdays.",
+            ),
+        ];
+        for (i, (held, incoming)) in pairs.iter().enumerate() {
+            let folded = fold_body(held, incoming);
+            assert_eq!(
+                folded.as_deref(),
+                Some(format!("{held}\n\n{incoming}").as_str()),
+                "pair {i} must keep both"
+            );
+        }
+        let gappy = [
+            (
+                "Do not run the migration on prod, but run backfill on staging before the release window opens at noon",
+                "Do not run backfill on staging before the release window opens",
+            ),
+            (
+                "Enable the new cache flag only for staging and keep it off for production builds before the Friday release window",
+                "Enable the new cache flag for production builds before the Friday release",
+            ),
+            (
+                "Run rm -rf * in the build directory only when the cache is stale and nothing else",
+                "Run rm -rf in the build directory only when the cache is stale",
+            ),
+            (
+                "The cache is stale when the deploy runs but the cache is fine when the deploy is skipped for the week",
+                "The cache is stale when the deploy is skipped for the week",
+            ),
+        ];
+        for (held, incoming) in gappy {
+            assert!(fold_body(held, incoming).is_some(), "{incoming}");
+        }
+        assert!(
+            fold_body(
+                "Python classes define __init__ to set up the object state when created",
+                "Python classes define init to set up the object state when created"
+            )
+            .is_some()
+        );
+        assert!(
+            fold_body(
+                "Some held unit that has plenty of ordinary words in it.",
+                "* * * * * * * * *"
+            )
+            .is_some()
+        );
+        // an exact, case- or punctuation-only repeat, and a contiguous part, add nothing
+        let held = "The upload worker retries the failed request three times before giving up.";
+        assert_eq!(fold_body(held, &held.to_uppercase()), None);
+        assert_eq!(
+            fold_body(
+                held,
+                "the upload worker retries the failed request three times before giving up"
+            ),
+            None
+        );
+        assert_eq!(
+            fold_body(
+                held,
+                "Upload worker retries the failed request three times before giving up."
+            ),
+            None
+        );
     }
 
     /// Dedupe at the door (naru task 2833): a fact the kb already holds makes
