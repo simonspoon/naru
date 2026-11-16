@@ -453,6 +453,64 @@ run 0 "$MESA" kb show topics/pets/cat.md
 [ "$(jqs '.sessions | length')" = "0" ] || fail "no-session note: $STDOUT"
 ok "sessions: --session recorded in front matter, list --session filters, append keeps earlier ids, ambient id used, bad id refused"
 
+# ---- the mining script files every fact, with no `kb ask` pre-filter (naru task 2842) ----
+#
+# The shipped KB: mine past sessions script, extracted from this build's
+# built-in, mines two sessions that yield the same fact. `naru` on PATH is
+# this build except for the `cc`/`live` reads (fixtures) and a log of every
+# `kb ask`; `claude` on PATH is the extraction model. The second filing is
+# folded at the door into a sighting, not a second note.
+
+"$MESA" workflow defaults --builtins >/dev/null
+MINE="$TMP/kb-mine.sh"
+"$MESA" workflow show "KB: mine past sessions" | jq -r '.nodes[] | select(.kind == "cli") | .config.command' > "$MINE"
+bash -n "$MINE" || fail "the mining script does not parse"
+MINE_BIN="$TMP/mine-bin"
+mkdir -p "$MINE_BIN"
+export MINE_DIR="$TMP/mine" REAL_NARU="$PWD/target/debug/naru"
+mkdir -p "$MINE_DIR"
+MINE_FACT='The pelican relay drops its queue on every restart unless the spill directory is on the same volume.'
+printf '%s' "$MINE_FACT" > "$MINE_DIR/fact"
+row() { jq -nc --arg id "$1" --arg start "$2" '{session_id: $id, messages: 20, start: $start, end: "2020-01-01T00:00:00Z", cwd: "/repo", main_agent: null, live_session_id: null}'; }
+jq -s . <(row mine-s1 2020-01-02) <(row mine-s2 2020-01-01) > "$MINE_DIR/sessions.json"
+echo '{"turns":[{"kind":"prompt","text":"fix the relay"},{"kind":"response","text":"done"}]}' > "$MINE_DIR/chat.json"
+cat > "$MINE_BIN/naru" <<'STUB'
+#!/usr/bin/env bash
+case "$1 $2" in
+  "cc sessions") cat "$MINE_DIR/sessions.json" ;;
+  "cc chat") cat "$MINE_DIR/chat.json" ;;
+  "live status") echo null ;;
+  "kb ask") echo "$*" >> "$MINE_DIR/asks"; exec "$REAL_NARU" "$@" ;;
+  *) exec "$REAL_NARU" "$@" ;;
+esac
+STUB
+cat > "$MINE_BIN/claude" <<'STUB'
+#!/usr/bin/env bash
+cat > /dev/null
+printf -- '- %s\nSome chatter that is not a fact.\n' "$(cat "$MINE_DIR/fact")"
+STUB
+chmod +x "$MINE_BIN/naru" "$MINE_BIN/claude"
+stage add "{\"ops\":[{\"op\":\"create\",\"topic\":\"infra\",\"slug\":\"pelican-relay\",\"title\":\"Pelican relay\",\"tags\":[\"pelican\"],\"body\":\"$MINE_FACT\"}]}"
+mine() { # mine -> MOUT; mines one session and waits for its add job
+  local n; n=$(job_count)
+  MOUT=$(PATH="$MINE_BIN:$PATH" NARU_KB_MINED="$MINE_DIR/ledger" NARU_INPUT=1 bash "$MINE") || fail "the mining script failed: $MOUT"
+  wait_jobs $((n + 1))
+}
+mine
+[ "$MOUT" = "mine-s1: sent 1 facts to kb add" ] || fail "first mining run: $MOUT"
+grep -qxF -- "- $MINE_FACT" "$KB/arrivals/$(ls -t "$KB/arrivals" | grep '\.md$' | head -1)" ||
+  fail "the add must carry exactly the extracted fact lines"
+DUPES_BEFORE=$("$MESA" kb dupes | jq length)
+mine
+[ "$MOUT" = "mine-s2: sent 1 facts to kb add" ] || fail "second mining run: $MOUT"
+[ ! -e "$MINE_DIR/asks" ] || fail "the mining script must not call kb ask: $(cat "$MINE_DIR/asks")"
+[ "$(cat "$MINE_DIR/ledger")" = "$(printf 'mine-s1\nmine-s2')" ] || fail "ledger: $(cat "$MINE_DIR/ledger")"
+run 0 "$MESA" kb show topics/infra/pelican-relay.md
+[ "$(jqs .body)" = "$MINE_FACT" ] && [ "$(jqs .seen)" = "2" ] && [ "$(jqs '[.sightings[] | .op + ":" + .session] | join(",")')" = "create:mine-s1,skip:mine-s2" ] ||
+  fail "a re-mined fact must fold into a skip sighting (seen=2, both sessions): $STDOUT"
+[ "$("$MESA" kb dupes | jq length)" = "$DUPES_BEFORE" ] || fail "re-mining must not add a dupes cluster"
+ok "mining: no kb ask call; every extracted fact reaches kb add; a re-mined fact folds into a skip sighting from its session (seen=2, dupes clusters unchanged at $DUPES_BEFORE)"
+
 # ---- the automatic lookup hook (naru task 2274) ----
 #
 # The kb-lookup.sh built-in extracted from `library show`, fed UserPromptSubmit

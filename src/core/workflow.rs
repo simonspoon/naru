@@ -2240,18 +2240,15 @@ ${text: -8000}"; fi
     text="${text:24000}"
   done
   [ "$failed" = 1 ] && { echo "$id: extraction failed, will retry next run"; continue; }
-  kept=""; seen=0; skipped=0
-  while IFS= read -r f; do
-    [ -z "$f" ] && continue
-    seen=$((seen+1)); fact="${f#- }"
-    ans=$(naru kb ask "Do the notes already state this fact? Answer only if they clearly contain it; otherwise say the notes do not answer. FACT: $fact" 2>/dev/null | jq -r '.answer // ""')
-    if [ -n "$ans" ]; then skipped=$((skipped+1)); else kept="$kept- $fact
-"; fi
-  done <<< "$facts"
+  # every fact goes to the door, known or not: `kb add` folds a repeat into a
+  # sighting of its note (naru tasks 2833, 2842), so no `kb ask` pre-filter here
+  kept=$(printf '%s' "$facts" | grep -E '^- ' || true)
   if [ -n "$kept" ]; then
-    printf '%s' "$kept" | naru kb add --source "mined-session-$id" --session "$id" --stdin >/dev/null && echo "$id: filed $(printf '%s' "$kept" | grep -c '^- ') of $seen facts ($skipped already known)"
+    printf '%s\n' "$kept" | naru kb add --source "mined-session-$id" --session "$id" --stdin >/dev/null \
+      && echo "$id: sent $(printf '%s\n' "$kept" | grep -c '^- ') facts to kb add" \
+      || echo "$id: kb add failed"
   else
-    echo "$id: nothing new ($seen facts, $skipped already known)"
+    echo "$id: nothing found"
   fi
   echo "$id" >> "$STATE"
 done 3<<< "$rows"
@@ -8262,11 +8259,11 @@ case "$1 $2" in
   "cc sessions") cat "$HOME/sessions.json" ;;
   "cc chat") cat "$HOME/chat.json" ;;
   "live status") echo '{"id":7,"ended_at":null}' ;;
-  "kb ask") echo '{"answer":""}' ;;
-  "kb add") cat >/dev/null ;;
+  "kb ask") echo "KB ASK" >> "$HOME/seen"; echo '{"answer":"known"}' ;;
+  "kb add") sed 's/^/KB ADD /' >> "$HOME/seen" ;;
 esac
 "#;
-        let claude = "#!/bin/bash\ncat >> \"$HOME/seen\"\necho '- a fact'\n";
+        let claude = "#!/bin/bash\ncat >> \"$HOME/seen\"\necho '- a fact'\necho 'chatter'\necho '- another fact'\n";
         let bin = dir.path().join("bin");
         std::fs::create_dir(&bin).unwrap();
         for (name, body) in [("naru", naru), ("claude", claude)] {
@@ -8327,6 +8324,27 @@ esac
         assert!(!out.contains("warm\n"), "{out}");
         assert!(!out.contains("live listen"), "{out}");
         assert!(!out.contains("Drive naru live session"), "{out}");
+    }
+
+    /// naru task 2842: no `kb ask` pre-filter; every extracted fact (and
+    /// nothing else the model said) reaches one `kb add` per session, where
+    /// the door folds a known one into a sighting.
+    #[cfg(unix)]
+    #[test]
+    fn kb_mine_files_every_fact_without_asking() {
+        if std::process::Command::new("jq")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let (out, ledger) = run_kb_mine("1", "");
+        assert_eq!(ledger, ["work-1"], "{out}");
+        assert_eq!(out.matches("KB ASK").count(), 0, "{out}");
+        let added: Vec<&str> = out.lines().filter(|l| l.starts_with("KB ADD ")).collect();
+        assert_eq!(added, ["KB ADD - a fact", "KB ADD - another fact"], "{out}");
+        assert!(out.contains("work-1: sent 2 facts to kb add"), "{out}");
     }
 
     #[test]

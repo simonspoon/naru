@@ -640,9 +640,14 @@ max 5) is a trigger, a `cli` node carrying the kb-mine script inline
 (`KB_MINE_SCRIPT` in `src/core/workflow.rs`) and a log node. The script picks
 the newest unprocessed sessions from `cc sessions` (8+ messages, ended 20+
 minutes ago), has haiku extract only gotchas and new facts from `cc chat`
-(transcript fenced as data), drops each fact `kb ask` already answers, files the
-rest with one `kb add --session <that session id>`, and appends the session id to `~/.naru/kb-mined.txt` so
-it is never read twice.
+(transcript fenced as data), files every extracted fact with one `kb add
+--session <that session id>`, and appends the session id to `~/.naru/kb-mined.txt` so
+it is never read twice. There is no `kb ask` pre-filter (naru task 2842): a
+fact the notes already hold reaches the door, which folds an exact repeat into
+a `skip` sighting of its note (anything not an exact repeat is filed as the
+model decides), so a re-arrival is recorded rather than lost. A run reports
+`<id>: sent N facts to kb add` per session (repeats included), or `<id>: kb
+add failed`.
 
 **Which sessions** (naru task 2681): real work, plus **`naru-live` voice
 sessions** (`main_agent` `naru-live`). Every other session whose `cwd` is under
