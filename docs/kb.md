@@ -108,10 +108,12 @@ new one, and it had no way to say "already there".
     `.` `,` `;` `:` is cut from a token's end. Any other token (a case, a
     flag, a path, `<` versus `>`) or a different order keeps it, so a
     looser paraphrase is appended and left to a later compaction; shorter
-    units are only compared exactly. A unit with code (a fenced block, or
-    an indented code line) is dropped only when byte-identical to the held
-    unit it is compared with, trailing blanks aside; indentation and tabs
-    count (naru task 2849). A note with no room
+    units are only compared exactly. A whitespace-sensitive unit (one
+    with a backtick or `~~~` fence line, or any line starting with a space
+    or tab, nested bullets and indented YAML included) is dropped only when
+    byte-identical to the held unit it is compared with, trailing blanks
+    aside; indentation and tabs count, so a nested list re-sent with other
+    indentation is appended, not dropped (naru tasks 2849, 2850). A note with no room
     left (the 16 KiB cap) is passed over for the next best. An op with fewer
     than 8 distinct words (title and body) is not scored: the overlap of a
     few words is noise;

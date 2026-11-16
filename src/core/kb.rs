@@ -1103,7 +1103,7 @@ fn apply_one(
 
 /// `existing` plus the facts of `incoming` it lacks: [`units`] compared as
 /// they differ byte for byte once whitespace runs collapse (task 2848), except
-/// that a unit with code is compared exactly (task 2849). `None` when
+/// that a whitespace-sensitive unit is compared exactly (tasks 2849, 2850). `None` when
 /// it lacks none. When it lacks them all, `incoming` is joined as it is.
 fn fold_body(existing: &str, incoming: &str) -> Option<String> {
     let held = units(existing);
@@ -1117,7 +1117,7 @@ fn fold_body(existing: &str, incoming: &str) -> Option<String> {
             // Naru task 2849: a pair with code in either unit is the same
             // only when byte-identical (units already drop trailing blanks).
             let seen = known.iter().any(|k| {
-                if is_code(u) || is_code(k) {
+                if is_ws_sensitive(u) || is_ws_sensitive(k) {
                     k == u
                 } else {
                     collapse(k) == collapse(u)
@@ -1130,12 +1130,12 @@ fn fold_body(existing: &str, incoming: &str) -> Option<String> {
             // Naru task 2846: a unit is dropped only when it adds no token at
             // all to one held unit. Short units are never judged so. Code is
             // never judged so (task 2849).
-            is_code(u) || fold_tokens(u).len() < FOLD_MIN_WORDS || {
+            is_ws_sensitive(u) || fold_tokens(u).len() < FOLD_MIN_WORDS || {
                 let w = fold_tokens(u);
                 !held
                     .iter()
                     .zip(&held_tokens)
-                    .any(|((h, _), t)| !is_code(h) && is_subsequence(&w, t))
+                    .any(|((h, _), t)| !is_ws_sensitive(h) && is_subsequence(&w, t))
             }
         })
         .collect();
@@ -1856,15 +1856,19 @@ fn fold_tokens(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// Whether a [`units`] unit holds code, where whitespace is meaning (naru task
-/// 2849): a fence line, or in a non-bullet unit a line indented by a tab or
-/// four spaces.
-fn is_code(unit: &str) -> bool {
-    let bullet = is_bullet(unit.lines().next().unwrap_or(""));
-    unit.lines().any(|l| {
-        l.trim_start().starts_with("```")
-            || (!bullet && (l.starts_with('\t') || l.starts_with("    ")))
-    })
+/// Whether a [`units`] unit is whitespace-sensitive (naru task 2850): it holds
+/// a fence line (backtick or tilde) or any line beginning with a space or tab.
+fn is_ws_sensitive(unit: &str) -> bool {
+    unit.lines()
+        .any(|l| fence_char(l).is_some() || l.starts_with([' ', '\t']))
+}
+
+/// The marker of a fence line: `` ` `` for "```", `~` for "~~~".
+fn fence_char(line: &str) -> Option<char> {
+    let t = line.trim_start();
+    ['`', '~']
+        .into_iter()
+        .find(|c| t.starts_with(&c.to_string().repeat(3)))
 }
 
 /// Whether `a` is a non-empty contiguous run of `b`. Gaps are not allowed: a
@@ -2008,29 +2012,31 @@ fn is_bullet(line: &str) -> bool {
 
 /// A body's facts: each paragraph, each top-level bullet (with its indented
 /// sub-bullets and continuation lines), each fenced code block (blank lines
-/// inside included); the flag marks a bullet.
+/// inside included, backtick or `~~~`); an indented line joins the current
+/// unit whatever it is (task 2850); the flag marks a bullet.
 fn units(body: &str) -> Vec<(String, bool)> {
     let mut out: Vec<(String, bool)> = Vec::new();
     let mut cur: Option<(String, bool)> = None;
-    let mut in_fence = false;
+    let mut in_fence: Option<char> = None;
     let flush = |cur: &mut Option<(String, bool)>, out: &mut Vec<(String, bool)>| {
         out.extend(cur.take());
     };
     for line in body.lines() {
         let line = line.trim_end();
-        if in_fence {
+        if in_fence.is_some() {
             let c = cur.as_mut().unwrap();
             c.0.push('\n');
             c.0.push_str(line);
-            in_fence = !line.trim_start().starts_with("```");
+            if fence_char(line) == in_fence {
+                in_fence = None;
+            }
         } else if line.trim().is_empty() {
             flush(&mut cur, &mut out);
-        } else if line.trim_start().starts_with("```") {
+        } else if let Some(f) = fence_char(line) {
             flush(&mut cur, &mut out);
             cur = Some((line.to_string(), false));
-            in_fence = true;
-        } else if line.starts_with(char::is_whitespace) && cur.as_ref().is_some_and(|c| c.1) {
-            let c = cur.as_mut().unwrap();
+            in_fence = Some(f);
+        } else if let (true, Some(c)) = (line.starts_with(char::is_whitespace), cur.as_mut()) {
             c.0.push('\n');
             c.0.push_str(line);
         } else if is_bullet(line) {
@@ -4709,9 +4715,26 @@ mod tests {
             assert!(out.contains(incoming) && out.contains(held), "{incoming}");
         }
         let code = "```python\nif x:\n    run()\n```";
-        // prose still collapses beside code; a bullet's indent is not code
-        let held = format!("{code}\n\nThe  flag is on.\n\n- a\n    b");
-        assert_eq!(fold_body(&held, "The flag is on.\n\n- a\n  b"), None);
+        // prose still collapses beside code
+        let held = format!("{code}\n\nThe  flag is on.");
+        assert_eq!(fold_body(&held, "The flag is on."), None);
+        // task 2850: tilde fences, recipe bullets, re-indented bare YAML
+        let cases = [
+            (
+                "~~~yaml\njob:\n  steps:\n  - a\n~~~",
+                "~~~yaml\njob:\n    steps:\n    - a\n~~~",
+            ),
+            ("~~~\nx\n    y\n~~~", "~~~\nx\n  y\n~~~"),
+            ("- build:\n\tcc -o a a.c", "- build:\n    cc -o a a.c"),
+            ("job:\n  steps:\n  - a", "job:\n    steps:\n    - a"),
+        ];
+        for (held, incoming) in cases {
+            let out = fold_body(held, incoming).expect(incoming);
+            assert!(out.contains(incoming) && out.contains(held), "{incoming}");
+            assert_eq!(fold_body(held, held), None, "{held}");
+        }
+        assert_eq!(units("~~~yaml\na\n\n  b\n~~~").len(), 1);
+        assert_eq!(units("~~~\na\n\nb").len(), 1);
         // prose equal to a held code unit's text is kept, and the reverse
         assert!(fold_body("    run()", "run()").is_some());
         assert!(fold_body("run()", "    run()").is_some());

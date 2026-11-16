@@ -352,6 +352,19 @@ run 0 "$MESA" kb show topics/tools/codeind.md
 [ "$(jqs .body)" = "$(printf '%b\n\n%b' "$CODE_A" "$CODE_B")" ] || fail "indentation-only code must be kept once each: $STDOUT"
 ok "dedupe: code differing only by indentation is kept, an identical code unit folds (task 2849)"
 
+# A tilde fence is whitespace-exact like a backtick one, and never split (task 2850).
+TILDE_A='~~~yaml\njob:\n  steps:\n  - a\n~~~'
+TILDE_B='~~~yaml\njob:\n    steps:\n    - a\n~~~'
+stage add "{\"ops\":[{\"op\":\"create\",\"topic\":\"tools\",\"slug\":\"tildeind\",\"title\":\"Tilde ind\",\"tags\":[\"tildeind\"],\"body\":\"$TILDE_A\"}]}"
+run 0 "$MESA" kb add "tilde first"
+wait_jobs $((6 + 2 * n + 4))
+stage add "{\"ops\":[{\"op\":\"append\",\"topic\":\"tools\",\"slug\":\"tildeind\",\"body\":\"$TILDE_B\"}]}"
+run 0 "$MESA" kb add "tilde reindented"
+wait_jobs $((6 + 2 * n + 5))
+run 0 "$MESA" kb show topics/tools/tildeind.md
+[ "$(jqs .body)" = "$(printf '%b\n\n%b' "$TILDE_A" "$TILDE_B")" ] || fail "tilde fences must be kept whole, once each: $STDOUT"
+ok "dedupe: tilde-fenced code differing only by indentation is kept whole (task 2850)"
+
 # ---- concurrency: 20 adds at once ----
 
 touch "$STUB_DIR/add-dynamic"
