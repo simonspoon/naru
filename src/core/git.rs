@@ -4825,8 +4825,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().to_str().unwrap();
         g(p, &["init", "-b", "main"]);
-        let big = "é".repeat(BODY_CAP);
-        g(p, &["commit", "--allow-empty", "-m", "s", "-m", &big]);
+        // Via a file: one argv string this big exceeds Linux's per-argument
+        // cap (E2BIG).
+        let msg = dir.path().join(".git/BIG_MSG");
+        std::fs::write(&msg, format!("s\n\n{}", "é".repeat(BODY_CAP))).unwrap();
+        g(p, &["commit", "--allow-empty", "-F", msg.to_str().unwrap()]);
         let sha = g(p, &["rev-parse", "HEAD"]);
         let d = commit_detail_of(p, &sha).unwrap();
         assert!(d.body.len() <= BODY_CAP + "\n[message truncated]".len());
@@ -5624,13 +5627,22 @@ mod tests {
         wgit(d.path(), &["checkout", "-q", "trunk"]);
         put(&d, "base.txt", "trunk\n");
         wgit(d.path(), &["commit", "-q", "-am", "t"]);
+        // The identity is required: with no global/system config, git on a
+        // host it cannot guess one for (a Linux CI runner) refuses the merge
+        // before writing MERGE_HEAD.
         let out = Command::new("git")
-            .args(["-C", dstr(&d), "merge", "feature"])
+            .args(["-C", dstr(&d), "-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(["merge", "feature"])
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .output()
             .unwrap();
-        assert!(!out.status.success());
+        assert!(
+            !out.status.success() && d.path().join(".git/MERGE_HEAD").exists(),
+            "the merge must stop on a conflict\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
         d
     }
 
@@ -5673,7 +5685,8 @@ mod tests {
         put(&d, "base.txt", "edited\n");
         wgit(d.path(), &["commit", "-q", "-am", "edit"]);
         let _ = Command::new("git")
-            .args(["-C", dstr(&d), "merge", "feature"])
+            .args(["-C", dstr(&d), "-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(["merge", "feature"])
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .output()

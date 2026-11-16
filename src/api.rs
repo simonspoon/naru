@@ -29483,7 +29483,14 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         let merge = std::process::Command::new("git")
             .arg("-C")
             .arg(&root)
-            .args(["merge", "feature"])
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "merge",
+                "feature",
+            ])
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .output()
@@ -31573,7 +31580,17 @@ echo "backgrounded · deadbeef (idle — send a prompt to start)"
         git_in(&root, &["checkout", "-q", "-"]);
         std::fs::write(root.join("base.txt"), "trunk\n").unwrap();
         git_in(&root, &["commit", "-q", "-am", "t"]);
-        let _ = git_out(&root, &["merge", "feature"]);
+        let _ = git_out(
+            &root,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "merge",
+                "feature",
+            ],
+        );
         let d = hunks_diff(&state, id, &wt, "base.txt", Some(false)).await;
         assert!(d["digest"].is_null());
         for op in HUNK_ROUTES {
