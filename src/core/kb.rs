@@ -1063,8 +1063,10 @@ pub fn check_add(text: &str, source: &str, session: Option<&str>) -> Result<()> 
     Ok(())
 }
 
-/// Writes the raw text to `kb/spool/<id>.md` and answers the id.
-pub fn spool(root: &Path, text: &str) -> Result<String> {
+/// Writes the raw text to `kb/spool/<id>.md`, its origin (`source`,
+/// `session`, `machine`) to the `kb/spool/<id>.json` sidecar beside it (naru
+/// task 2841), and answers the id.
+pub fn spool(root: &Path, text: &str, source: &str, session: Option<&str>) -> Result<String> {
     let dir = root.join("spool");
     fs::create_dir_all(&dir)?;
     let ms = SystemTime::now()
@@ -1080,13 +1082,20 @@ pub fn spool(root: &Path, text: &str) -> Result<String> {
         .create_new(true)
         .open(dir.join(format!("{id}.md")))?;
     f.write_all(text.as_bytes())?;
+    let origin = json!({"source": source, "session": session, "machine": machine()});
+    if let Err(e) = write_atomic(&dir.join(format!("{id}.json")), &origin.to_string()) {
+        let _ = fs::remove_file(dir.join(format!("{id}.md")));
+        return Err(e);
+    }
     Ok(id)
 }
 
-/// Removes a spool file again (a job that could not start).
+/// Removes a spool file and its sidecar again (a job that could not start).
 pub fn unspool(root: &Path, id: &str) {
     if valid_spool_id(id) {
-        let _ = fs::remove_file(root.join("spool").join(format!("{id}.md")));
+        for ext in ["md", "json"] {
+            let _ = fs::remove_file(root.join("spool").join(format!("{id}.{ext}")));
+        }
     }
 }
 
@@ -1176,12 +1185,15 @@ pub fn add_with(
 }
 
 /// The body of `naru __job kb-add`: reads the spooled text, files it, and
-/// removes the spool file once the whole add went through (a failed one keeps
-/// it, so nothing is lost).
+/// once the whole add went through moves the text and its sidecar to
+/// `arrivals/` (naru task 2841; a failed one keeps them in the spool, so
+/// nothing is lost). A `source` or `session` not given falls back to the
+/// sidecar's, so a re-run of a held spool id keeps its origin; `cli` and no
+/// session when there is no sidecar either.
 pub fn run_add_job(
     root: &Path,
     id: &str,
-    source: &str,
+    source: Option<&str>,
     session: Option<&str>,
     call: &mut Call,
 ) -> Result<Value> {
@@ -1189,16 +1201,39 @@ pub fn run_add_job(
         return Err(Error::Validation(format!("{id:?} is not a spool id")));
     }
     let spooled = root.join("spool").join(format!("{id}.md"));
+    let sidecar = root.join("spool").join(format!("{id}.json"));
     let text = fs::read_to_string(&spooled)
         .map_err(|e| Error::NotFound(format!("no spooled text {id}: {e}")))?;
+    let origin: Value = fs::read_to_string(&sidecar)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or(Value::Null);
+    let source = source
+        .or_else(|| origin["source"].as_str())
+        .unwrap_or("cli");
+    let session = session.or_else(|| origin["session"].as_str());
     if let Some(s) = session.filter(|s| !valid_session(s)) {
         return Err(Error::Validation(format!("{s:?} is not a session id")));
     }
     let mut report = add_with(root, &text, source, session, Some(id), call)?;
-    // Only a clean add removes the spool: a refused op keeps the text so it
+    // Only a clean add leaves the spool: a refused op keeps the text so it
     // can be re-filed, and the report says where it is.
     if report["failed"].as_array().is_none_or(|f| f.is_empty()) {
-        let _ = fs::remove_file(&spooled);
+        // The notes are filed, so a failed move does not fail the job: the
+        // report says so and the text stays in the spool.
+        let moved = (|| -> Result<()> {
+            let _lock = lock(root)?;
+            let arrivals = root.join("arrivals");
+            fs::create_dir_all(&arrivals)?;
+            fs::rename(&spooled, arrivals.join(format!("{id}.md")))?;
+            if sidecar.exists() {
+                fs::rename(&sidecar, arrivals.join(format!("{id}.json")))?;
+            }
+            Ok(())
+        })();
+        if let Err(e) = moved {
+            report["arrivals_error"] = json!(e.to_string());
+        }
     } else {
         report["spool"] = json!(spooled.display().to_string());
     }
@@ -2782,10 +2817,10 @@ mod tests {
         check_add("text", "cli", None).unwrap();
         assert!(check_add("  ", "cli", None).is_err());
         assert!(check_add(&"x".repeat(ADD_MAX + 1), "cli", None).is_err());
-        let id = spool(&root, "Miso is the cat.").unwrap();
+        let id = spool(&root, "Miso is the cat.", "cli", None).unwrap();
         assert!(valid_spool_id(&id));
         let mut call = |_p: &str, _s: &str| Ok(json!({"ops": [create("pets", "cat", "Miso.")]}));
-        let r = run_add_job(&root, &id, "cli", Some("sess-1"), &mut call).unwrap();
+        let r = run_add_job(&root, &id, Some("cli"), Some("sess-1"), &mut call).unwrap();
         assert_eq!(r["applied"].as_array().unwrap().len(), 1);
         assert_eq!(
             show(&root, "topics/pets/cat.md").unwrap().sessions,
@@ -2793,19 +2828,90 @@ mod tests {
         );
         assert!(!root.join("spool").join(format!("{id}.md")).exists());
         // a failing call keeps the spool
-        let id = spool(&root, "more").unwrap();
+        let id = spool(&root, "more", "cli", None).unwrap();
         let mut down =
             |_: &str, _: &str| -> std::result::Result<Value, String> { Err("down".into()) };
-        assert!(run_add_job(&root, &id, "cli", None, &mut down).is_err());
+        assert!(run_add_job(&root, &id, Some("cli"), None, &mut down).is_err());
         assert!(root.join("spool").join(format!("{id}.md")).exists());
-        assert!(run_add_job(&root, "../x", "cli", None, &mut down).is_err());
+        assert!(run_add_job(&root, "../x", Some("cli"), None, &mut down).is_err());
         // a refused op keeps the spool too, and the report names it
-        let id = spool(&root, "bad").unwrap();
+        let id = spool(&root, "bad", "cli", None).unwrap();
         let mut bad = |_p: &str, _s: &str| Ok(json!({"ops": [create("Bad Topic", "x", "b")]}));
-        let r = run_add_job(&root, &id, "cli", None, &mut bad).unwrap();
+        let r = run_add_job(&root, &id, Some("cli"), None, &mut bad).unwrap();
         assert_eq!(r["failed"].as_array().unwrap().len(), 1);
         assert!(root.join("spool").join(format!("{id}.md")).exists());
         assert!(r["spool"].as_str().unwrap().ends_with(&format!("{id}.md")));
+    }
+
+    #[test]
+    fn arrivals_keep_raw_text_and_origin() {
+        let (_d, root) = kb();
+        // a clean add moves the text, byte for byte, and its sidecar to arrivals/
+        let raw = "Miso is the cat.\r\n  trailing space \n\n\u{e9}\t";
+        let id = spool(&root, raw, "src-a", Some("sess-a")).unwrap();
+        let mut call = |_p: &str, _s: &str| Ok(json!({"ops": [create("pets", "cat", "Miso.")]}));
+        run_add_job(&root, &id, None, None, &mut call).unwrap();
+        let kept = fs::read(root.join("arrivals").join(format!("{id}.md"))).unwrap();
+        assert_eq!(kept, raw.as_bytes());
+        let origin: Value = serde_json::from_str(
+            &fs::read_to_string(root.join("arrivals").join(format!("{id}.json"))).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            (origin["source"].as_str(), origin["session"].as_str()),
+            (Some("src-a"), Some("sess-a"))
+        );
+        assert!(origin["machine"].is_string());
+        assert!(!root.join("spool").join(format!("{id}.md")).exists());
+        assert!(!root.join("spool").join(format!("{id}.json")).exists());
+        // a refused add stays in the spool with its sidecar; a re-run with no
+        // flags files it under the original source and session
+        let id = spool(&root, "Rex is the dog.", "src-b", Some("sess-b")).unwrap();
+        let mut bad = |_p: &str, _s: &str| Ok(json!({"ops": [create("Bad Topic", "x", "b")]}));
+        let r = run_add_job(&root, &id, Some("src-b"), Some("sess-b"), &mut bad).unwrap();
+        assert_eq!(r["failed"].as_array().unwrap().len(), 1);
+        assert!(root.join("spool").join(format!("{id}.json")).exists());
+        let mut good = |_p: &str, _s: &str| Ok(json!({"ops": [create("pets", "dog", "Rex.")]}));
+        run_add_job(&root, &id, None, None, &mut good).unwrap();
+        let rows = sightings(&root);
+        let row = rows.iter().find(|r| r["arrival"] == id.as_str()).unwrap();
+        let source_lost =
+            usize::from(row["source"] != "src-b") + usize::from(row["session"] != "sess-b");
+        assert_eq!(source_lost, 0, "{row}");
+        assert_eq!(
+            show(&root, "topics/pets/dog.md").unwrap().sessions,
+            ["sess-b"]
+        );
+        assert!(root.join("arrivals").join(format!("{id}.md")).exists());
+        // flags still win over the sidecar, and no sidecar falls back to cli
+        let id = spool(&root, "Tom is the fish.", "src-c", Some("sess-c")).unwrap();
+        let mut fish = |_p: &str, _s: &str| Ok(json!({"ops": [create("pets", "fish", "Tom.")]}));
+        run_add_job(&root, &id, Some("flag"), Some("sess-f"), &mut fish).unwrap();
+        let row = sightings(&root)
+            .into_iter()
+            .find(|r| r["arrival"] == id.as_str())
+            .unwrap();
+        assert_eq!(
+            (row["source"].as_str(), row["session"].as_str()),
+            (Some("flag"), Some("sess-f"))
+        );
+        let id = spool(&root, "Bo is the bird.", "src-d", None).unwrap();
+        fs::remove_file(root.join("spool").join(format!("{id}.json"))).unwrap();
+        let mut bird = |_p: &str, _s: &str| Ok(json!({"ops": [create("pets", "bird", "Bo.")]}));
+        run_add_job(&root, &id, None, None, &mut bird).unwrap();
+        let row = sightings(&root)
+            .into_iter()
+            .find(|r| r["arrival"] == id.as_str())
+            .unwrap();
+        assert_eq!(
+            (row["source"].as_str(), row["session"].is_null()),
+            (Some("cli"), true)
+        );
+        assert!(!root.join("arrivals").join(format!("{id}.json")).exists());
+        // unspool takes the sidecar with it
+        let id = spool(&root, "gone", "cli", None).unwrap();
+        unspool(&root, &id);
+        assert!(fs::read_dir(root.join("spool")).unwrap().next().is_none());
     }
 
     #[test]
@@ -2890,9 +2996,9 @@ mod tests {
         assert_eq!(topic_count(&root), TOPICS_MAX);
         let heron = json!({"op": "create", "topic": "brand-new", "slug": "heron", "title":
             "Heron pump seals", "tags": ["heron"], "body": "Heron pump seals wear out yearly."});
-        let id = spool(&root, "raw").unwrap();
+        let id = spool(&root, "raw", "cli", None).unwrap();
         let mut call = |_p: &str, _s: &str| Ok(json!({"ops": [heron]}));
-        let r = run_add_job(&root, &id, "cli", None, &mut call).unwrap();
+        let r = run_add_job(&root, &id, Some("cli"), None, &mut call).unwrap();
         assert!(r["failed"].as_array().unwrap().is_empty(), "{r}");
         assert_eq!(r["applied"].as_array().unwrap().len(), 1, "{r}");
         // the best-matching note's topic, and a free slug beside the taken one
@@ -3743,9 +3849,9 @@ mod tests {
         ];
         let mut arrivals = Vec::new();
         for (session, op) in &ops_by_session {
-            let id = spool(&root, "raw").unwrap();
+            let id = spool(&root, "raw", "cli", None).unwrap();
             let mut call = |_p: &str, _s: &str| Ok(json!({"ops": [op.clone()]}));
-            let r = run_add_job(&root, &id, "cli", Some(session), &mut call).unwrap();
+            let r = run_add_job(&root, &id, Some("cli"), Some(session), &mut call).unwrap();
             assert_eq!(r["applied"].as_array().unwrap().len(), 1, "{r}");
             arrivals.push(id);
         }
@@ -3816,9 +3922,9 @@ mod tests {
             ),
         ];
         for (session, op) in &bodies {
-            let id = spool(&root, "raw").unwrap();
+            let id = spool(&root, "raw", "cli", None).unwrap();
             let mut call = |_p: &str, _s: &str| Ok(json!({"ops": [op.clone()]}));
-            run_add_job(&root, &id, "cli", Some(session), &mut call).unwrap();
+            run_add_job(&root, &id, Some("cli"), Some(session), &mut call).unwrap();
         }
         let rows = sightings(&root);
         let oldest = rows
@@ -3919,9 +4025,9 @@ mod tests {
     fn merge_keeps_the_drops_sightings() {
         let (_d, root) = kb();
         let file = |op: Value| {
-            let id = spool(&root, "raw").unwrap();
+            let id = spool(&root, "raw", "cli", None).unwrap();
             let mut call = |_p: &str, _s: &str| Ok(json!({"ops": [op.clone()]}));
-            run_add_job(&root, &id, "cli", Some("s"), &mut call).unwrap();
+            run_add_job(&root, &id, Some("cli"), Some("s"), &mut call).unwrap();
         };
         file(create("pets", "a", "Cat a."));
         file(json!({"op":"append","topic":"pets","slug":"a","body":"Cat a is grey."}));

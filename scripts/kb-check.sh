@@ -165,7 +165,7 @@ wait_jobs 1
 [ "$(jq -r '.applied | length' "$JOBLOG")" = "1" ] || fail "job report: $(cat "$JOBLOG")"
 run 0 "$MESA" kb list
 [ "$(jqs length)" = "1" ] && [ "$(jqs '.[0].path')" = "topics/pets/cat.md" ] || fail "list: $STDOUT"
-[ "$(jqs '.[0] | keys | join(",")')" = "path,sessions,tags,title,topic,updated" ] || fail "list keys: $STDOUT"
+[ "$(jqs '.[0] | keys | join(",")')" = "first_seen,id,last_seen,path,seen,sessions,tags,title,topic,updated" ] || fail "list keys: $STDOUT"
 [ "$(jqs '.[0].tags | join(",")')" = "pets,cat" ] || fail "tags: $STDOUT"
 [ "$(wc -l < "$KB/INDEX.md" | tr -d ' ')" = "1" ] || fail "INDEX.md: $(cat "$KB/INDEX.md")"
 grep -q '^topics/pets/cat.md | The cat | pets, cat | ' "$KB/INDEX.md" || fail "INDEX.md line: $(cat "$KB/INDEX.md")"
@@ -173,10 +173,12 @@ grep -q '^topics/pets/cat.md | The cat | pets, cat | ' "$KB/INDEX.md" || fail "I
 [ "$(jq -r '.op + "|" + .path + "|" + .source' "$KB/log.jsonl")" = "create|topics/pets/cat.md|standup" ] ||
   fail "log line: $(cat "$KB/log.jsonl")"
 [ ! -e "$KB/spool/$ADD_ID.md" ] || fail "the spool file must be removed after a good add"
+[ -e "$KB/arrivals/$ADD_ID.md" ] && [ "$(jq -r .source "$KB/arrivals/$ADD_ID.json")" = "standup" ] ||
+  fail "a good add must move its text and sidecar to arrivals/: $(ls "$KB/arrivals" 2>&1)"
 run 0 "$MESA" kb show topics/pets/cat.md
 [ "$(jqs .body)" = "The cat is named Miso." ] || fail "show: $STDOUT"
 run 0 "$MESA" kb show topics/pets/cat.md --quiet
-[ "$(jqs 'keys | join(",")')" = "path,sessions" ] || fail "show --quiet keys: $STDOUT"
+[ "$(jqs 'keys | join(",")')" = "first_seen,id,last_seen,path,seen,sessions" ] || fail "show --quiet keys: $STDOUT"
 run 0 "$MESA" kb list --topic nope
 [ "$STDOUT" = "[]" ] || fail "list --topic nope: $STDOUT"
 run 0 "$MESA" kb list --topic pets --quiet
@@ -252,7 +254,8 @@ run 0 "$MESA" kb show topics/pets/cat.md
 [ "$(wc -l < "$KB/log.jsonl" | tr -d ' ')" = "1" ] || fail "refused ops must not be logged as writes"
 HOSTILE_SPOOL=$(jq -r '.spool // empty' <<<"$LAST")
 [ -n "$HOSTILE_SPOOL" ] && [ -e "$HOSTILE_SPOOL" ] || fail "refused ops must keep the spool and report its path: $LAST"
-rm -f "$HOSTILE_SPOOL"
+[ -e "${HOSTILE_SPOOL%.md}.json" ] || fail "a refused add must keep its spool sidecar"
+rm -f "$HOSTILE_SPOOL" "${HOSTILE_SPOOL%.md}.json"
 ok "hostile ops (../ topic and slug, absolute, append-to-missing, create-over-existing) all refused; nothing outside the kb; the note intact; spool kept with its path reported"
 
 # ---- append and a hostile body, byte for byte ----

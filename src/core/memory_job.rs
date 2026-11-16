@@ -59,10 +59,11 @@ pub enum Job {
     Retro { run_id: i64 },
     /// File one spooled `naru kb add` text into the knowledge base (naru task
     /// 1919): haiku `-p` calls, applied by `core::kb`. `session` is the
-    /// source Claude Code session the notes record (naru task 2575).
+    /// source Claude Code session the notes record (naru task 2575); a
+    /// `source` or `session` left out comes from the spool sidecar (task 2841).
     KbAdd {
         id: String,
-        source: String,
+        source: Option<String>,
         session: Option<String>,
     },
     /// Execute one claimed workflow run (naru task 1958): the `running` row
@@ -109,7 +110,9 @@ impl Job {
             } => {
                 a.extend(["kb-add".into(), "--id".into(), id.clone()]);
                 // `=` form: a source label starting with `-` stays a value.
-                a.push(format!("--source={source}"));
+                if let Some(source) = source {
+                    a.push(format!("--source={source}"));
+                }
                 if let Some(s) = session {
                     a.push(format!("--session={s}"));
                 }
@@ -378,7 +381,7 @@ pub fn run_with(store: &mut Store, job: &Job, dir: &str, timeout: Duration) -> R
         } => kb::run_add_job(
             &kb::kb_dir(),
             id,
-            source,
+            source.as_deref(),
             session.as_deref(),
             &mut |prompt, schema| {
                 llm::complete_structured(

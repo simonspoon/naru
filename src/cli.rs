@@ -691,8 +691,9 @@ enum JobCmd {
         /// The spool id
         #[arg(long)]
         id: String,
-        #[arg(long, default_value = "cli")]
-        source: String,
+        /// The source label (default: the spool sidecar's, else `cli`)
+        #[arg(long)]
+        source: Option<String>,
         /// The source Claude Code session the notes record
         #[arg(long)]
         session: Option<String>,
@@ -8310,11 +8311,11 @@ fn run_kb(cmd: KbCmd) -> Result<()> {
             });
             kb::check_add(&raw, &source, session.as_deref())?;
             let store = Store::open_default()?;
-            let id = kb::spool(&root, &raw)?;
+            let id = kb::spool(&root, &raw, &source, session.as_deref())?;
             let dir = config::workspace_dir().to_string_lossy().into_owned();
             let job = memory_job::Job::KbAdd {
                 id: id.clone(),
-                source,
+                source: Some(source),
                 session,
             };
             if let Err(e) = memory_job::spawn(&job, &dir, store.db_path().as_deref()) {
