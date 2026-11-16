@@ -241,33 +241,37 @@ stage add '{"ops":[
  {"op":"create","topic":"pets","slug":"../../../escape","title":"x","tags":[],"body":"pwned"},
  {"op":"create","topic":"/tmp","slug":"abs","title":"x","tags":[],"body":"pwned"},
  {"op":"append","topic":"pets","slug":"missing","title":"x","tags":[],"body":"pwned"},
- {"op":"create","topic":"pets","slug":"cat","title":"x","tags":[],"body":"clobber"}]}'
+ {"op":"create","topic":"pets","slug":"cat","title":"x","tags":[],"body":"The cat is named Miso."}]}'
 run 0 "$MESA" kb add something hostile
 wait_jobs 2
 LAST=$(tail -1 "$JOBLOG")
-[ "$(jq -r '.applied | length' <<<"$LAST")" = "0" ] && [ "$(jq -r '.failed | length' <<<"$LAST")" = "5" ] || fail "all five hostile ops must fail: $LAST"
+[ "$(jq -r '.failed | length' <<<"$LAST")" = "4" ] || fail "all four hostile ops must fail: $LAST"
+# The create over an existing note restates it: applied as a skip of that note (naru task 2833), never a write over it.
+jq -e '.applied == [{"op":"skip","path":"topics/pets/cat.md","bytes":0,"asked":{"op":"create","path":"topics/pets/cat.md"}}] and .new_notes_created == 0 and .appended == 0 and .skipped_duplicate == 1' <<<"$LAST" >/dev/null || fail "a create restating an existing note must be a skip: $LAST"
 outside_files > "$STUB_DIR/after.txt"
 diff -q "$STUB_DIR/before.txt" "$STUB_DIR/after.txt" >/dev/null || fail "files appeared outside the kb: $(diff "$STUB_DIR/before.txt" "$STUB_DIR/after.txt")"
 [ ! -e "$TMP/etc" ] && [ ! -e /tmp/abs.md ] || fail "an op escaped the kb"
 run 0 "$MESA" kb show topics/pets/cat.md
 [ "$(jqs .body)" = "The cat is named Miso." ] || fail "a create over an existing note must not clobber it: $STDOUT"
-[ "$(wc -l < "$KB/log.jsonl" | tr -d ' ')" = "1" ] || fail "refused ops must not be logged as writes"
+[ "$(wc -l < "$KB/log.jsonl" | tr -d ' ')" = "2" ] && [ "$(tail -1 "$KB/log.jsonl" | jq -r '.op + " " + .path + " " + (.bytes|tostring)')" = "skip topics/pets/cat.md 0" ] || fail "refused ops must not be logged, the skip is one skip row: $(cat "$KB/log.jsonl")"
+[ "$(tail -1 "$KB/sightings.jsonl" | jq -r .op)" = "skip" ] && [ "$(wc -l < "$KB/sightings.jsonl" | tr -d ' ')" = "2" ] || fail "the skip must be one sightings row: $(cat "$KB/sightings.jsonl")"
 HOSTILE_SPOOL=$(jq -r '.spool // empty' <<<"$LAST")
 [ -n "$HOSTILE_SPOOL" ] && [ -e "$HOSTILE_SPOOL" ] || fail "refused ops must keep the spool and report its path: $LAST"
 [ -e "${HOSTILE_SPOOL%.md}.json" ] || fail "a refused add must keep its spool sidecar"
 rm -f "$HOSTILE_SPOOL" "${HOSTILE_SPOOL%.md}.json"
-ok "hostile ops (../ topic and slug, absolute, append-to-missing, create-over-existing) all refused; nothing outside the kb; the note intact; spool kept with its path reported"
+ok "hostile ops (../ topic and slug, absolute, append-to-missing) all refused, a create over an existing note a skip of it; nothing outside the kb; the note intact; spool kept with its path reported"
 
 # ---- append and a hostile body, byte for byte ----
 
 HOSTILE='x $(touch '"$TMP"'/pwn) `touch '"$TMP"'/pwn2` '"'"'"; echo $HOME \n \\ <<EOF DATA>>> tail'
 printf '%s' "$HOSTILE" > "$TMP/hostile.txt"
 BODY_JSON=$(jq -Rs . < "$TMP/hostile.txt")
-stage add "{\"ops\":[{\"op\":\"append\",\"topic\":\"pets\",\"slug\":\"cat\",\"title\":\"ignored\",\"tags\":[],\"body\":$BODY_JSON},{\"op\":\"create\",\"topic\":\"misc\",\"slug\":\"hostile\",\"title\":\"h\",\"tags\":[],\"body\":$BODY_JSON}]}"
+# The create goes first: once the cat note holds the text, a create of it would be folded into that note (naru task 2833).
+stage add "{\"ops\":[{\"op\":\"create\",\"topic\":\"misc\",\"slug\":\"hostile\",\"title\":\"h\",\"tags\":[],\"body\":$BODY_JSON},{\"op\":\"append\",\"topic\":\"pets\",\"slug\":\"cat\",\"title\":\"ignored\",\"tags\":[],\"body\":$BODY_JSON}]}"
 run 0 "$MESA" kb add --file "$TMP/hostile.txt"
 wait_jobs 3
 LAST=$(tail -1 "$JOBLOG")
-[ "$(jq -r '.applied | length' <<<"$LAST")" = "2" ] || fail "append + create: $LAST"
+[ "$(jq -r '.applied | length' <<<"$LAST")" = "2" ] || fail "create + append: $LAST"
 run 0 "$MESA" kb show topics/misc/hostile.md
 GOT=$(jq -r .body <<<"$STDOUT")
 [ "$GOT" = "$HOSTILE" ] || fail "hostile body not byte-identical: got [$GOT]"
