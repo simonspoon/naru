@@ -65,6 +65,14 @@ const FILER_BODIES: usize = 8;
 /// against the existing notes ([`nearest_duplicate`]): the overlap of a few
 /// words is noise.
 const DEDUPE_MIN_WORDS: usize = 8;
+/// A model `skip` stands when the named note holds at least this share of its
+/// body's words ([`holds_restated`], naru task 2854). The share cannot tell a
+/// restatement from a new detail (on the task 2854 rehearsal restatements
+/// scored 0.36 to 1.00, new details 0.20 to 0.81), so the model's skip is
+/// trusted unless it names a note about something else: a body against the
+/// topic's other notes scored 0.29 or less in 42 of 45 cases. A trusted skip
+/// keeps its body in the sighting row and the raw text in `arrivals/`.
+const SKIP_HELD: f64 = 0.3;
 const ASK_NOTE_BYTES: usize = 3 * 1024;
 const ASK_NOTES_TOTAL: usize = 12 * 1024;
 /// Notes filed from the same session as one of the top [`SIBLING_SEEDS`]
@@ -880,9 +888,10 @@ fn topic_count(root: &Path) -> usize {
 /// note: one `skip` row in `log.jsonl` and one in `sightings.jsonl` naming
 /// the existing note, once per add and note ([`sighted`]), so re-running a
 /// held spool text changes nothing. A `skip` of an op with a body is checked
-/// against the note it names (naru task 2845): a note lacking the fact gets an
-/// `append`, a missing one a `create`; only an empty-body skip of a missing
-/// note records nothing and is marked `missing`.
+/// against the note it names (naru task 2845): it stands unless the note is
+/// about something else ([`holds_restated`], task 2854), when a note lacking
+/// the fact gets an `append`; a missing one is a `create`; only an empty-body
+/// skip of a missing note records nothing and is marked `missing`.
 fn apply_one(
     root: &Path,
     raw: &Value,
@@ -908,19 +917,25 @@ fn apply_one(
     let mut kind = op.op.as_str();
     let mut redirect = false;
     // A model's `skip` is a claim that the named note holds the fact: checked
-    // against its text (naru task 2845). A note that lacks it is appended to;
-    // one that does not exist is a `create`; neither is ever a silent drop.
+    // against its text (naru task 2845). A note about something else (task
+    // 2854) is appended to; one that does not exist is a `create`; neither is
+    // ever a silent drop.
     if kind == "skip" && !body.is_empty() {
         match existing_note_file(root, &topic, &slug).and_then(|f| fs::read_to_string(f).ok()) {
             None => kind = "create",
             Some(text) => {
-                // No room to append: it is filed as a note of its own.
-                if let Some(joined) = fold_body(&parse_note(&text, &slug).body, body) {
-                    kind = if joined.len() <= NOTE_MAX {
-                        "append"
-                    } else {
-                        "create"
-                    };
+                let note = parse_note(&text, &slug);
+                // Naru task 2854: the body is the model's one-line restatement,
+                // a paraphrase the strict drop test nearly always keeps.
+                if !holds_restated(&note, body) {
+                    // No room to append: it is filed as a note of its own.
+                    if let Some(joined) = fold_body(&note.body, body) {
+                        kind = if joined.len() <= NOTE_MAX {
+                            "append"
+                        } else {
+                            "create"
+                        };
+                    }
                 }
             }
         }
@@ -1158,6 +1173,22 @@ fn fold_body(existing: &str, incoming: &str) -> Option<String> {
         last_bullet = *bullet;
     }
     Some(body)
+}
+
+/// Whether a model `skip` whose body is `text` stands against the note it
+/// names (naru task 2854): the note's title and body together hold at least
+/// [`SKIP_HELD`] of `text`'s distinct words ([`word_ids`]). Below that the
+/// skip named a note about something else; a text with no such words is never
+/// held.
+fn holds_restated(note: &Parsed, text: &str) -> bool {
+    let mut ids = std::collections::HashMap::new();
+    let held = word_ids(&format!("{} {}", note.title, note.body), &mut ids);
+    let words = word_ids(text, &mut ids);
+    let share = words
+        .iter()
+        .filter(|w| held.binary_search(w).is_ok())
+        .count() as f64;
+    !words.is_empty() && share >= SKIP_HELD * words.len() as f64
 }
 
 /// The existing notes a `create` would be a near-duplicate of, best first, as
@@ -4721,6 +4752,69 @@ mod tests {
         // a skip naming a note that does hold it stays a skip
         let (_, r) = file_as(&root, "s7", "src-7", json!([skip("quokka-flange")]));
         assert_eq!(counts(&r), (0, 0, 1, 0), "{r}");
+    }
+
+    /// Naru task 2854: a model skip whose body paraphrases a note that holds
+    /// the fact writes nothing; one naming a note about something else is an
+    /// append.
+    #[test]
+    fn paraphrased_skip_of_a_holding_note_stands() {
+        let (_d, root) = kb();
+        let quokka = "topics/tools/quokka-flange.md";
+        put(
+            &root,
+            "tools",
+            "quokka-flange",
+            "Quokka flange calibration",
+            &["quokka"],
+            FACT,
+        );
+        let before = fs::read_to_string(root.join(quokka)).unwrap();
+        let skip = |body: &str| json!({"op":"skip","topic":"tools","slug":"quokka-flange","title":"","tags":[],"body":body});
+        // a one-line restatement: the strict drop test alone would append it
+        let para = "Each month the quokka flange drifts out of calibration; recalibrate with a zirconium shim before the bake.";
+        assert!(fold_body(FACT, para).is_some());
+        let (_, r) = file_as(&root, "s1", "src-1", json!([skip(para)]));
+        assert_eq!(counts(&r), (0, 0, 1, 0), "{r}");
+        assert_eq!(r["applied"][0]["path"], quokka, "{r}");
+        // the only write a skip makes is the id a note without one gets
+        let after = fs::read_to_string(root.join(quokka)).unwrap();
+        let no_id: String = after
+            .lines()
+            .filter(|l| !l.starts_with("id: "))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        assert_eq!(no_id, before);
+        let log = fs::read_to_string(root.join("log.jsonl")).unwrap();
+        assert_eq!(
+            log.lines()
+                .filter(|l| l.contains("\"op\":\"skip\""))
+                .count(),
+            1,
+            "{log}"
+        );
+        let note = parse_note(&after, "quokka-flange");
+        assert!(holds_restated(&note, para));
+        assert!(!holds_restated(&note, "`x`"));
+        // the 30% floor: 3 of 10 words held stands, 2 of 10 does not
+        let few = "alpha beta gamma delta epsilon zeta theta";
+        assert!(holds_restated(
+            &note,
+            &format!("quokka flange calibration {few}")
+        ));
+        assert!(!holds_restated(&note, &format!("quokka flange {few} iota")));
+        // the title counts as held text
+        let titled = parse_note("---\ntitle: Wombat press nitrogen\n---\nUnrelated.\n", "w");
+        assert!(holds_restated(&titled, "wombat press nitrogen"));
+        // a skip naming the note for a fact it lacks is still appended
+        let lacks =
+            "A wombat press needs forty bar of nitrogen and a cold start below ten degrees.";
+        let (_, r) = file_as(&root, "s2", "src-2", json!([skip(lacks)]));
+        assert_eq!(counts(&r), (0, 1, 0, 0), "{r}");
+        assert_eq!(
+            show(&root, quokka).unwrap().body,
+            format!("{FACT}\n\n{lacks}")
+        );
     }
 
     #[test]

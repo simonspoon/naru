@@ -90,9 +90,15 @@ new one, and it had no way to say "already there".
   fact in one line and may be empty; `title` and `tags` are not used. A skip
   naming a note that does not exist (the model misnamed it) is never a drop
   (naru task 2845): a `create` of that name, so the text is filed. A skip is
-  also checked against the named note's text: when the note lacks the fact it
-  is an `append`. Only an empty-body skip of a missing note is the old
-  `missing: true` no-op. The raw text is always kept in `arrivals/`.
+  also checked against the named note's text (naru task 2854): the body is a
+  paraphrase, which the strict drop test below would nearly always keep, and
+  no word measure tells a restatement from a new detail, so the skip is
+  trusted when the note's title and body hold at least 30% of the body's
+  distinct words (stemmed, 3+ characters, stopwords out). Below that, or
+  when the body has no such word, the skip named a note about something else
+  and it is an `append` of what the note lacks. A trusted skip keeps its body
+  as the sighting row's `text`. Only an empty-body skip of a missing note is
+  the old `missing: true` no-op. The raw text is always kept in `arrivals/`.
 - **Naru checks every op itself**, whatever the model answered:
   - a `create` is scored against every note with `kb dupes`' own measure
     and, at or above its 0.3 threshold, applied to the best-scoring note
