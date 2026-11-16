@@ -1093,6 +1093,30 @@ only `~/.naru-dev`; backups go to `<home>/kb-backups/`, run files to
   `enabled` kept — and any other is left untouched, with no built-in installed
   beside it (the name is reported in `skipped`). Delete or rename yours to get
   the built-in.
+- **Only when the kb changed (naru task 2861).** Step 1 fingerprints the
+  notes (`cksum` of every `topics/**/*.md`, sorted) and compares it with
+  `<home>/kb-cleanup/fingerprint`, which the report step writes after a
+  finished pass (so the pass's own merges and moves do not count as a
+  change). Equal: every later step exits at once — no backup, no run dir of
+  its own (a shared `<home>/kb-cleanup/skip/settings.env` holds `SKIP=1`), no
+  model call, no notice — and step 16 logs a "skipped" line naming the open
+  conflict count. Input `force=1` runs it anyway. A pass where a conflict
+  check got no answer (claude failed) writes no fingerprint, so the next
+  firing runs it again. A note written by something else while a pass runs
+  lands in that pass's fingerprint and waits for the next change. So a
+  schedule node on a copy costs one local `find` per firing until a note
+  changes. (The 2026-11 burst of a notice every ~3 minutes was a copy's
+  schedule `* 4 */2 * *`: `*` in the minute field fires every minute of
+  04:00 UTC, re-firing as each ~3-minute pass finished; `0 4 */2 * *` is
+  once.)
+- **A notice only on a changed result.** Each conflicting cluster is keyed by
+  its sorted note paths; step 11 files a notice only when that set changed
+  against `<home>/kb-cleanup/conflicts-reported.txt` (the set last noticed),
+  saying how many are new (judged CONFLICT, not reported yet) and how many
+  resolved (judged OK this pass, or a note of it is gone — merged, deleted,
+  moved; one past the `conflicts` batch or not checked stays open). A pass with an unanswered check files none. The groups
+  the last pass judged CONFLICT, with haiku's one-line reason, are in
+  `<home>/kb-cleanup/conflicts.txt`.
 
 **Why backlog.** The review's output must never be `todo`: `serve --watch-queue`
 dispatches an agent onto every unblocked `todo` leaf, and a digest of overheard

@@ -8373,6 +8373,174 @@ esac
         assert!(out.contains("work-1: sent 2 facts to kb add"), "{out}");
     }
 
+    /// Runs every step of the "KB: cleanup" built-in, in order, against stub
+    /// `naru` (one dupes cluster, notices appended to `notices`) and `claude`
+    /// (each call counted in `calls`, answering `$HOME/answer`) binaries.
+    #[cfg(unix)]
+    fn run_kb_cleanup(home: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = home.join("bin");
+        if !bin.exists() {
+            std::fs::create_dir(&bin).unwrap();
+            let naru = r#"#!/bin/bash
+case "$1 $2" in
+  "kb dupes") [ -e "$NARU_KB_DIR/topics/a/y.md" ] || { echo '[]'; exit; }
+    echo '[{"score":0.3,"notes":[{"path":"topics/a/y.md"},{"path":"topics/a/x.md"}]}]' ;;
+  "kb list") echo '[]' ;;
+  "ask --notice") printf '%s\n' "$3" | head -1 >> "$HOME/notices" ;;
+esac
+"#;
+            let claude = "#!/bin/bash\ncat > /dev/null\necho call >> \"$HOME/calls\"\ncat \"$HOME/answer\"\n";
+            for (name, body) in [("naru", naru), ("claude", claude)] {
+                std::fs::write(bin.join(name), body).unwrap();
+                std::fs::set_permissions(bin.join(name), std::fs::Permissions::from_mode(0o755))
+                    .unwrap();
+            }
+        }
+        let def: Value = serde_json::from_str(KB_CLEANUP_DEF).unwrap();
+        for n in def["nodes"].as_array().unwrap() {
+            let Some(cmd) = n["config"]["command"].as_str() else {
+                continue;
+            };
+            let out = std::process::Command::new("bash")
+                .args(["-c", cmd])
+                .env("HOME", home)
+                .env("NARU_HOME", home.join(".naru"))
+                .env("NARU_KB_DIR", home.join("kb"))
+                .env(
+                    "PATH",
+                    format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+                )
+                .env_remove("NARU_INPUT")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}: {}",
+                n["title"],
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+
+    /// naru task 2861: a pass over a kb no note of which changed since the
+    /// last finished pass makes no model call and files no notice; a changed
+    /// kb is cleaned again, and a notice goes out only when the set of
+    /// conflicting groups differs from the one last reported.
+    #[cfg(unix)]
+    #[test]
+    fn kb_cleanup_skips_an_unchanged_kb_and_notices_only_a_changed_result() {
+        for tool in ["jq", "bc"] {
+            if std::process::Command::new(tool)
+                .arg("--version")
+                .output()
+                .is_err()
+            {
+                return;
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let topic = home.join("kb/topics/a");
+        std::fs::create_dir_all(&topic).unwrap();
+        std::fs::write(topic.join("x.md"), "---\ntitle: x\n---\nport 7771\n").unwrap();
+        std::fs::write(topic.join("y.md"), "---\ntitle: y\n---\nport 7772\n").unwrap();
+        std::fs::write(home.join("answer"), "CONFLICT: x y - the ports differ\n").unwrap();
+        let count = |f: &str| {
+            std::fs::read_to_string(home.join(f))
+                .unwrap_or_default()
+                .lines()
+                .count()
+        };
+        // Run dirs and backups are named by the second.
+        let next_second = || std::thread::sleep(std::time::Duration::from_millis(1100));
+
+        run_kb_cleanup(home);
+        assert_eq!((count("calls"), count("notices")), (1, 1));
+        assert!(
+            std::fs::read_to_string(home.join("notices"))
+                .unwrap()
+                .starts_with("KB cleanup: 1 contradicting note groups open (1 new, 0 resolved")
+        );
+        assert_eq!(count(".naru/kb-cleanup/conflicts.txt"), 1);
+
+        // Unchanged kb: the whole pass is skipped, again and again, with no
+        // run dir or backup of its own.
+        let dirs = |sub: &str| std::fs::read_dir(home.join(sub)).unwrap().count();
+        let before = (dirs(".naru/kb-cleanup"), dirs(".naru/kb-backups"));
+        for _ in 0..3 {
+            run_kb_cleanup(home);
+        }
+        assert_eq!((count("calls"), count("notices")), (1, 1));
+        assert_eq!(
+            (dirs(".naru/kb-cleanup"), dirs(".naru/kb-backups")),
+            (before.0 + 1, before.1),
+            "only the shared skip dir is new"
+        );
+
+        // Changed kb, same conflicts: cleaned again, nothing new to report.
+        next_second();
+        std::fs::write(topic.join("x.md"), "---\ntitle: x\n---\nport 7773\n").unwrap();
+        run_kb_cleanup(home);
+        assert_eq!((count("calls"), count("notices")), (2, 1));
+
+        // Changed kb, conflict resolved: exactly one notice, then quiet.
+        next_second();
+        std::fs::write(topic.join("x.md"), "---\ntitle: x\n---\nport 7772\n").unwrap();
+        std::fs::write(home.join("answer"), "OK\n").unwrap();
+        run_kb_cleanup(home);
+        run_kb_cleanup(home);
+        assert_eq!((count("calls"), count("notices")), (3, 2));
+        assert!(
+            std::fs::read_to_string(home.join("notices"))
+                .unwrap()
+                .contains("KB cleanup: 0 contradicting note groups open (0 new, 1 resolved")
+        );
+        assert_eq!(count(".naru/kb-cleanup/conflicts.txt"), 0);
+
+        // A conflict check with no answer (claude failed) is neither a notice
+        // nor a finished pass: the next firing runs the pass again.
+        next_second();
+        std::fs::write(topic.join("y.md"), "---\ntitle: y\n---\nport 7771\n").unwrap();
+        std::fs::write(home.join("answer"), "").unwrap();
+        run_kb_cleanup(home);
+        assert_eq!((count("calls"), count("notices")), (4, 2));
+        next_second();
+        std::fs::write(home.join("answer"), "CONFLICT: x y - the ports differ\n").unwrap();
+        run_kb_cleanup(home);
+        assert_eq!((count("calls"), count("notices")), (5, 3));
+        run_kb_cleanup(home);
+        assert_eq!((count("calls"), count("notices")), (5, 3));
+
+        // A reported group one of whose notes is gone is resolved: one notice.
+        next_second();
+        std::fs::remove_file(topic.join("y.md")).unwrap();
+        run_kb_cleanup(home);
+        assert_eq!((count("calls"), count("notices")), (5, 4));
+        assert!(
+            std::fs::read_to_string(home.join("notices"))
+                .unwrap()
+                .lines()
+                .last()
+                .unwrap()
+                .contains("(0 new, 1 resolved")
+        );
+
+        // force=1 runs an unchanged kb anyway.
+        next_second();
+        let def: Value = serde_json::from_str(KB_CLEANUP_DEF).unwrap();
+        let settings = def["nodes"][1]["config"]["command"].as_str().unwrap();
+        let out = std::process::Command::new("bash")
+            .args(["-c", settings])
+            .env("HOME", home)
+            .env("NARU_HOME", home.join(".naru"))
+            .env("NARU_KB_DIR", home.join("kb"))
+            .env("NARU_INPUT", "force=1")
+            .output()
+            .unwrap();
+        assert!(String::from_utf8_lossy(&out.stdout).contains("SKIP=0"));
+    }
+
     #[test]
     fn builtins_never_reference_external_scripts() {
         // A home or absolute user path naming a script or a bin dir.
