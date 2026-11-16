@@ -1924,6 +1924,312 @@ pub fn backfill_sessions(root: &Path, apply: bool) -> Result<Value> {
     }))
 }
 
+// ---- backfilling sightings from the log (naru task 2840) ----------------
+
+/// A note file's text with `id` as the first front-matter line. Any `id:`
+/// line already in the head (an invalid one, or the old one of a copied
+/// note) is replaced; everything else is kept byte for byte. `None` for a
+/// file without Naru's front matter.
+fn with_id(text: &str, id: &str) -> Option<String> {
+    let (head, body) = text.strip_prefix("---\n")?.split_once("\n---\n")?;
+    let mut lines = vec![format!("id: {id}")];
+    lines.extend(
+        head.split('\n')
+            .filter(|l| !l.starts_with("id: "))
+            .map(String::from),
+    );
+    Some(format!("---\n{}\n---\n{body}", lines.join("\n")))
+}
+
+/// Whether `ts` is exactly `YYYY-MM-DDTHH:MM:SSZ`; the sightings reader sorts
+/// `ts` as a string.
+fn iso_form(ts: &str) -> bool {
+    ts.len() == 20
+        && ts.bytes().enumerate().all(|(i, c)| match i {
+            4 | 7 => c == b'-',
+            10 => c == b'T',
+            13 | 16 => c == b':',
+            19 => c == b'Z',
+            _ => c.is_ascii_digit(),
+        })
+}
+
+/// The path alias map of `kb backfill-sightings --moves` files: `from` ->
+/// `to`, validated (see [`backfill_sightings`]).
+fn read_moves(
+    moves: &[PathBuf],
+    on_disk: &HashSet<String>,
+) -> Result<std::collections::HashMap<String, String>> {
+    let mut alias: std::collections::HashMap<String, String> = Default::default();
+    for file in moves {
+        let text = fs::read_to_string(file)?;
+        for (n, line) in text.lines().enumerate().filter(|(_, l)| !l.is_empty()) {
+            let bad = |why: &str| Error::Validation(format!("{}:{}: {why}", file.display(), n + 1));
+            let cols: Vec<&str> = line.split('\t').collect();
+            let [from, to] = cols[..] else {
+                return Err(bad("want `from<TAB>to`"));
+            };
+            if parse_rel(from).is_none() || parse_rel(to).is_none() {
+                return Err(bad("not a note path like topics/<topic>/<slug>.md"));
+            }
+            if on_disk.contains(from) {
+                return Err(bad(&format!("{from} still exists as a note")));
+            }
+            if let Some(prev) = alias.insert(from.to_string(), to.to_string())
+                && prev != to
+            {
+                return Err(bad(&format!("{from} moves to both {prev} and {to}")));
+            }
+        }
+    }
+    for from in alias.keys() {
+        let mut at = from;
+        for _ in 0..=alias.len() {
+            match alias.get(at) {
+                Some(next) => at = next,
+                None => break,
+            }
+        }
+        if alias.contains_key(at) {
+            return Err(Error::Validation(format!("moves cycle through {from}")));
+        }
+    }
+    Ok(alias)
+}
+
+/// `kb backfill-sightings` (naru task 2840): gives every note an `id:` and
+/// writes `sightings.jsonl` rows (`backfilled: true`) for the history
+/// `log.jsonl` records, keyed to the id of the note that exists today. The log
+/// is replayed in `ts` order (ties keep file order) with every path first
+/// followed through the `--moves` aliases (`from<TAB>to`, time-free, chains
+/// allowed; a `from` that still exists as a note, two different `to`s or a
+/// cycle are `validation`). Every `create`/`append` counts, whatever its
+/// source; a `kb merge` `delete` carries the dropped note's rows to the note of
+/// the `merge` row before it, any other delete loses them. No alias rows are
+/// written: merged and moved history goes straight to the live note's id.
+/// Rows a real write already made are not doubled: a backfilled row matches on
+/// `(ts, op, source)`, and a real row (whose `ts` is the spool arrival time)
+/// takes the latest unmatched log row with its `(op, source)`. Several notes
+/// sharing one id keep it only on the one with replayed history, the others get
+/// fresh ids; with no such single original the group is left and reported.
+/// Writes only with `apply`, under the kb lock; idempotent.
+pub fn backfill_sightings(root: &Path, moves: &[PathBuf], apply: bool) -> Result<Value> {
+    let _lock = if apply { Some(lock(root)?) } else { None };
+    let mut notes: Vec<(String, Parsed)> = parsed_notes(root)?
+        .into_iter()
+        .map(|(path, _, p)| (path, p))
+        .collect();
+    let on_disk: HashSet<String> = notes.iter().map(|n| n.0.clone()).collect();
+    let alias = read_moves(moves, &on_disk)?;
+    let resolve = |p: String| {
+        let mut at = p;
+        while let Some(next) = alias.get(&at) {
+            at = next.clone();
+        }
+        at
+    };
+    let log = match fs::read_to_string(root.join("log.jsonl")) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e.into()),
+    };
+    let mut rows: Vec<LogRow> = log
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    rows.sort_by(|a, b| a.ts.cmp(&b.ts));
+    // path -> (ts, op, source) of each replayed create/append
+    type Want = (String, String, String);
+    let mut acc: std::collections::HashMap<String, Vec<Want>> = Default::default();
+    let mut keep: Option<String> = None;
+    let (mut unresolved, mut bad_ts) = (0, 0);
+    for r in rows {
+        let path = resolve(r.path);
+        let merging = r.source == "kb merge";
+        match r.op.as_str() {
+            "merge" if merging => {
+                keep = Some(path);
+                continue;
+            }
+            "delete" => {
+                let moved = acc.remove(&path);
+                match (moved, keep.clone().filter(|_| merging)) {
+                    (Some(rows), Some(k)) => acc.entry(k).or_default().extend(rows),
+                    (Some(rows), None) => unresolved += rows.len(),
+                    (None, _) => {}
+                }
+                if merging {
+                    continue;
+                }
+            }
+            "create" | "append" if !iso_form(&r.ts) => bad_ts += 1,
+            "create" | "append" => acc.entry(path).or_default().push((r.ts, r.op, r.source)),
+            _ => {}
+        }
+        keep = None;
+    }
+    for rows in acc.values_mut() {
+        rows.sort_by(|a, b| a.0.cmp(&b.0));
+    }
+
+    // which notes can carry rows, and which ids are shared
+    let at: std::collections::HashMap<&str, usize> = notes
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.0.as_str(), i))
+        .collect();
+    let (mut missing, mut no_front) = (0, 0);
+    let mut texts: Vec<Option<(PathBuf, String)>> = Vec::new();
+    for (path, _) in &notes {
+        let file = parse_rel(path).and_then(|(t, s)| existing_note_file(root, &t, &s));
+        let text = file.and_then(|f| Some((fs::read_to_string(&f).ok()?, f)));
+        texts.push(
+            text.filter(|(t, _)| with_id(t, "x").is_some())
+                .map(|(t, f)| (f, t)),
+        );
+    }
+    let mut wanted: Vec<Vec<Want>> = vec![Vec::new(); notes.len()];
+    let mut paths: Vec<_> = acc.into_iter().collect();
+    paths.sort();
+    for (path, rows) in paths {
+        match at.get(path.as_str()) {
+            None => missing += rows.len(),
+            Some(&i) if texts[i].is_none() => no_front += rows.len(),
+            Some(&i) => wanted[i] = rows,
+        }
+    }
+    let mut groups: std::collections::BTreeMap<String, Vec<usize>> = Default::default();
+    for (i, (_, p)) in notes.iter().enumerate() {
+        if !p.id.is_empty() {
+            groups.entry(p.id.clone()).or_default().push(i);
+        }
+    }
+    let mut fresh: Vec<usize> = (0..notes.len())
+        .filter(|&i| notes[i].1.id.is_empty() && texts[i].is_some())
+        .collect();
+    let (mut duplicates, mut frozen) = (Vec::new(), HashSet::new());
+    for group in groups.values().filter(|g| g.len() > 1) {
+        let with_rows: Vec<usize> = group
+            .iter()
+            .copied()
+            .filter(|&i| !wanted[i].is_empty())
+            .collect();
+        if let [original] = with_rows[..] {
+            fresh.extend(group.iter().copied().filter(|&i| i != original));
+        } else {
+            duplicates.push(
+                group
+                    .iter()
+                    .map(|&i| notes[i].0.clone())
+                    .collect::<Vec<_>>(),
+            );
+            frozen.extend(group.iter().copied());
+        }
+    }
+    fresh.sort();
+    let mut edits: Vec<(PathBuf, String)> = Vec::new();
+    for &i in &fresh {
+        let id = new_id()?;
+        let (file, text) = texts[i].as_ref().expect("front matter checked");
+        edits.push((
+            file.clone(),
+            with_id(text, &id).expect("front matter checked"),
+        ));
+        notes[i].1.id = id;
+    }
+
+    // rows: what the log says minus what the file already records
+    let existing = read_sightings(root)?;
+    let (mut present, mut without, mut dup_rows) = (0, 0, 0);
+    let mut out: Vec<(String, usize, Value)> = Vec::new();
+    for (i, (_, p)) in notes.iter().enumerate() {
+        let have: &[Sighting] = existing.get(&p.id).map_or(&[], |v| v);
+        let want = if frozen.contains(&i) {
+            dup_rows += wanted[i].len();
+            Vec::new()
+        } else if p.id.is_empty() {
+            Vec::new()
+        } else {
+            wanted[i].clone()
+        };
+        let mut taken = vec![false; want.len()];
+        let mut used = 0;
+        for s in have.iter().filter(|s| s.backfilled) {
+            let hit = (0..want.len()).find(|&k| {
+                !taken[k]
+                    && want[k].0 == s.ts
+                    && want[k].1 == s.op
+                    && Some(&want[k].2) == s.source.as_ref()
+            });
+            if let Some(k) = hit {
+                taken[k] = true;
+                used += 1;
+            }
+        }
+        for s in have
+            .iter()
+            .filter(|s| !s.backfilled && matches!(s.op.as_str(), "create" | "append"))
+        {
+            let hit = (0..want.len())
+                .rev()
+                .find(|&k| !taken[k] && want[k].1 == s.op && Some(&want[k].2) == s.source.as_ref());
+            if let Some(k) = hit {
+                taken[k] = true;
+                used += 1;
+            }
+        }
+        present += used;
+        let mut written = 0;
+        for (ts, op, source) in want
+            .into_iter()
+            .zip(taken)
+            .filter_map(|(w, t)| (!t).then_some(w))
+        {
+            let session = source
+                .strip_prefix("mined-session-")
+                .filter(|s| valid_session(s))
+                .map(String::from);
+            out.push((
+                ts.clone(),
+                i,
+                json!({
+                    "ts": ts, "note": p.id, "op": op, "source": source, "session": session,
+                    "machine": "", "arrival": null, "text": null, "backfilled": true,
+                }),
+            ));
+            written += 1;
+        }
+        if have.is_empty() && used + written == 0 {
+            without += 1;
+        }
+    }
+    out.sort_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)));
+    let backfilled = out.len();
+    if apply {
+        for (file, text) in &edits {
+            write_atomic(file, text)?;
+        }
+        for (_, _, row) in out {
+            sighting(root, row)?;
+        }
+    }
+    Ok(json!({
+        "applied": apply,
+        "notes": notes.len(),
+        "moves": alias.len(),
+        "notes_given_id": edits.len(),
+        "rows_backfilled": backfilled,
+        "rows_already_present": present,
+        "notes_without_sighting": without,
+        "rows_skipped_missing_path": missing,
+        "rows_skipped_unresolved_delete": unresolved,
+        "rows_skipped_no_front_matter": no_front,
+        "rows_skipped_bad_ts": bad_ts,
+        "rows_skipped_duplicate_id": dup_rows,
+        "duplicate_ids": duplicates,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3026,6 +3332,298 @@ mod tests {
             .map(|s| before(&format!("topics/a/{s}.md")))
             .collect();
         assert_eq!(snapshot, after);
+    }
+
+    fn log_row(ts: &str, op: &str, path: &str, source: &str) -> String {
+        json!({"ts": ts, "op": op, "path": path, "bytes": 1, "source": source}).to_string()
+    }
+
+    fn id_of(root: &Path, path: &str) -> String {
+        parse_note(&fs::read_to_string(root.join(path)).unwrap(), "x").id
+    }
+
+    /// Every file under `root` (relative path, bytes), for byte comparisons.
+    fn tree(root: &Path) -> Vec<(String, Vec<u8>)> {
+        let mut out = Vec::new();
+        let mut dirs = vec![root.to_path_buf()];
+        while let Some(d) = dirs.pop() {
+            for e in fs::read_dir(&d).unwrap() {
+                let p = e.unwrap().path();
+                if p.is_dir() {
+                    dirs.push(p);
+                } else {
+                    let rel = p.strip_prefix(root).unwrap().display().to_string();
+                    out.push((rel, fs::read(&p).unwrap()));
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn backfill_sightings_follows_the_log() {
+        let (d, root) = kb();
+        put(&root, "a", "new", "New", &["t"], "moved body\n\n  indented");
+        put(&root, "a", "kept", "Kept", &[], "kept body");
+        put(&root, "a", "real", "Real", &[], "real body");
+        put(&root, "a", "bare", "Bare", &[], "no history");
+        fs::write(root.join("topics/a/hand.md"), "no front matter\n").unwrap();
+        let m = "mined-session-s1";
+        let log = [
+            log_row("2026-01-01T00:00:00Z", "create", "topics/old/x.md", m),
+            log_row("2026-01-02T00:00:00Z", "append", "topics/mid/x.md", "cli"),
+            log_row("2026-01-01T00:00:00Z", "create", "topics/a/gone.md", "cli"),
+            log_row("2026-01-01T00:00:00Z", "create", "topics/a/kept.md", "cli"),
+            log_row(
+                "2026-01-03T00:00:00Z",
+                "merge",
+                "topics/a/kept.md",
+                "kb merge",
+            ),
+            log_row(
+                "2026-01-03T00:00:00Z",
+                "delete",
+                "topics/a/gone.md",
+                "kb merge",
+            ),
+            log_row("2026-01-01T00:00:00Z", "create", "topics/a/real.md", "cli"),
+            log_row("2026-01-02T00:00:00Z", "append", "topics/a/real.md", "cli"),
+            log_row("2026-01-01T00:00:00Z", "create", "topics/a/hand.md", "cli"),
+            log_row(
+                "2026-01-01T00:00:00Z",
+                "create",
+                "topics/a/missing.md",
+                "cli",
+            ),
+            log_row("2026-01-01T00:00:00Z", "create", "topics/a/lost.md", "cli"),
+            log_row("2026-01-04T00:00:00Z", "delete", "topics/a/lost.md", "cli"),
+            log_row("yesterday", "create", "topics/a/kept.md", "cli"),
+            "not json".into(),
+        ];
+        fs::write(root.join("log.jsonl"), log.join("\n") + "\n").unwrap();
+        // a real write already made the row for real.md's latest append
+        let id = new_id().unwrap();
+        let text = fs::read_to_string(root.join("topics/a/real.md")).unwrap();
+        fs::write(root.join("topics/a/real.md"), with_id(&text, &id).unwrap()).unwrap();
+        let real = json!({"ts": "2026-06-01T00:00:00Z", "note": id, "op": "append",
+            "source": "cli", "session": null, "machine": "m", "arrival": "a",
+            "text": "x", "backfilled": false});
+        fs::write(root.join("sightings.jsonl"), format!("{real}\n")).unwrap();
+        let moves = d.path().join("moves.tsv");
+        fs::write(
+            &moves,
+            "topics/old/x.md\ttopics/mid/x.md\n\ntopics/mid/x.md\ttopics/a/new.md\ntopics/old/x.md\ttopics/mid/x.md\n",
+        )
+        .unwrap();
+        let mv = [moves];
+        let before = tree(&root);
+        let new_before = fs::read_to_string(root.join("topics/a/new.md")).unwrap();
+
+        let dry = backfill_sightings(&root, &mv, false).unwrap();
+        assert_eq!(tree(&root), before, "a dry run writes nothing");
+        let got = backfill_sightings(&root, &mv, true).unwrap();
+        for k in dry.as_object().unwrap().keys().filter(|k| *k != "applied") {
+            assert_eq!(dry[k], got[k], "{k}");
+        }
+        assert_eq!(got["notes"], 5, "{got}");
+        assert_eq!(got["moves"], 2, "{got}");
+        assert_eq!(got["notes_given_id"], 3, "{got}");
+        // new: 2, kept: 2 (gone's create + its own), real: 1 (append is real), hand: 0
+        assert_eq!(got["rows_backfilled"], 5, "{got}");
+        assert_eq!(got["rows_already_present"], 1, "{got}");
+        assert_eq!(got["notes_without_sighting"], 2, "{got}");
+        assert_eq!(got["rows_skipped_missing_path"], 1, "{got}");
+        assert_eq!(got["rows_skipped_unresolved_delete"], 1, "{got}");
+        assert_eq!(got["rows_skipped_no_front_matter"], 1, "{got}");
+        assert_eq!(got["rows_skipped_bad_ts"], 1, "{got}");
+        assert_eq!(got["duplicate_ids"], json!([]), "{got}");
+
+        // only the id line was added
+        let new = fs::read_to_string(root.join("topics/a/new.md")).unwrap();
+        let nid = id_of(&root, "topics/a/new.md");
+        assert_eq!(
+            new,
+            new_before.replacen("---\n", &format!("---\nid: {nid}\n"), 1)
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("topics/a/hand.md")).unwrap(),
+            "no front matter\n"
+        );
+        assert_eq!(id_of(&root, "topics/a/real.md"), id);
+        // moved note: its pre-move rows, source and session kept
+        let n = show(&root, "topics/a/new.md").unwrap();
+        assert_eq!(
+            (n.seen, n.first_seen.as_deref()),
+            (2, Some("2026-01-01T00:00:00Z"))
+        );
+        assert_eq!(n.last_seen.as_deref(), Some("2026-01-02T00:00:00Z"));
+        assert_eq!(n.sightings[0].session.as_deref(), Some("s1"));
+        assert!(n.sightings.iter().all(|s| s.backfilled));
+        // merge delete carried gone's create to kept
+        let k = show(&root, "topics/a/kept.md").unwrap();
+        assert_eq!(k.seen, 2);
+        // the real row is kept and its append not doubled
+        let r = show(&root, "topics/a/real.md").unwrap();
+        let flags: Vec<_> = r
+            .sightings
+            .iter()
+            .map(|s| (s.op.as_str(), s.backfilled))
+            .collect();
+        assert_eq!(flags, [("create", true), ("append", false)]);
+        assert_eq!(show(&root, "topics/a/bare.md").unwrap().seen, 0);
+
+        // idempotent, byte for byte
+        let after = tree(&root);
+        let again = backfill_sightings(&root, &mv, true).unwrap();
+        assert_eq!(
+            (&again["notes_given_id"], &again["rows_backfilled"]),
+            (&json!(0), &json!(0))
+        );
+        assert_eq!(again["rows_already_present"], 6, "{again}");
+        assert_eq!(tree(&root), after);
+
+        // backfill-sessions and an append afterwards keep the id
+        backfill_sessions(&root, true).unwrap();
+        let app = json!({"op":"append","topic":"a","slug":"new","body":"more"});
+        apply_ops(&root, &ops(json!([app])), "t", None, None).unwrap();
+        assert_eq!(id_of(&root, "topics/a/new.md"), nid);
+        assert_eq!(show(&root, "topics/a/new.md").unwrap().seen, 3);
+        // the hourly-job case: a real append since changes nothing on a re-run
+        let snap = tree(&root);
+        let hourly = backfill_sightings(&root, &mv, true).unwrap();
+        assert_eq!(hourly["rows_backfilled"], 0, "{hourly}");
+        assert_eq!(hourly["notes_given_id"], 0, "{hourly}");
+        assert_eq!(tree(&root), snap);
+    }
+
+    #[test]
+    fn backfill_sightings_checks_the_moves() {
+        let (d, root) = kb();
+        put(&root, "a", "here", "Here", &[], "body");
+        let run = |text: &str| {
+            let f = d.path().join("m.tsv");
+            fs::write(&f, text).unwrap();
+            backfill_sightings(&root, &[f], false)
+        };
+        let code = |r: Result<Value>| match r {
+            Err(Error::Validation(m)) => m,
+            other => panic!("want validation, got {other:?}"),
+        };
+        code(run("topics/a/x.md\n"));
+        code(run("topics/a/x.md\ttopics/a/y.md\textra\n"));
+        code(run("topics/a/x.md\t../etc/passwd\n"));
+        code(run(
+            "topics/a/x.md\ttopics/a/y.md\ntopics/a/x.md\ttopics/a/z.md\n",
+        ));
+        code(run(
+            "topics/a/x.md\ttopics/a/y.md\ntopics/a/y.md\ttopics/a/x.md\n",
+        ));
+        code(run("topics/a/x.md\ttopics/a/x.md\n"));
+        let m = code(run("topics/a/here.md\ttopics/a/y.md\n"));
+        assert!(m.contains("still exists"), "{m}");
+        assert!(run("topics/a/x.md\ttopics/a/y.md\ntopics/a/x.md\ttopics/a/y.md\n").is_ok());
+        assert!(backfill_sightings(&root, &[d.path().join("none.tsv")], false).is_err());
+    }
+
+    #[test]
+    fn backfill_sightings_repairs_a_lost_or_cut_sightings_file() {
+        let (_d, root) = kb();
+        put(&root, "a", "one", "One", &[], "one");
+        put(&root, "a", "two", "Two", &[], "two");
+        let log = [
+            log_row("2026-01-01T00:00:00Z", "create", "topics/a/one.md", "cli"),
+            log_row("2026-01-02T00:00:00Z", "append", "topics/a/one.md", "cli"),
+            log_row("2026-01-03T00:00:00Z", "create", "topics/a/two.md", "cli"),
+        ];
+        fs::write(root.join("log.jsonl"), log.join("\n") + "\n").unwrap();
+        backfill_sightings(&root, &[], true).unwrap();
+        let full = fs::read_to_string(root.join("sightings.jsonl")).unwrap();
+        assert_eq!(full.lines().count(), 3);
+        for keep in [0, 2] {
+            // missing (0) or cut after two rows (2)
+            let kept: String = full.lines().take(keep).map(|l| format!("{l}\n")).collect();
+            fs::write(root.join("sightings.jsonl"), &kept).unwrap();
+            let got = backfill_sightings(&root, &[], true).unwrap();
+            assert_eq!(got["rows_backfilled"], 3 - keep, "{got}");
+            assert_eq!(got["notes_given_id"], 0, "{got}");
+            let mut rows: Vec<_> = fs::read_to_string(root.join("sightings.jsonl"))
+                .unwrap()
+                .lines()
+                .map(String::from)
+                .collect();
+            let mut want: Vec<_> = full.lines().map(String::from).collect();
+            rows.sort();
+            want.sort();
+            assert_eq!(rows, want);
+        }
+    }
+
+    #[test]
+    fn with_id_edges() {
+        // an invalid id line is replaced, not doubled
+        let t = "---\nid: bad id!\ntitle: T\n---\nbody\n";
+        assert_eq!(
+            with_id(t, "abc").unwrap(),
+            "---\nid: abc\ntitle: T\n---\nbody\n"
+        );
+        // a `---` line in the body is not the end of the front matter
+        let t = "---\ntitle: T\n---\nbody\n---\nmore\n";
+        assert_eq!(
+            with_id(t, "abc").unwrap(),
+            "---\nid: abc\ntitle: T\n---\nbody\n---\nmore\n"
+        );
+        assert_eq!(with_id("no front matter\n", "abc"), None);
+        assert_eq!(with_id("---\ntitle: T\n", "abc"), None);
+    }
+
+    #[test]
+    fn backfill_sightings_settles_duplicate_ids() {
+        let (_d, root) = kb();
+        let log = [
+            log_row("2026-01-01T00:00:00Z", "create", "topics/a/orig.md", "cli"),
+            log_row("2026-01-01T00:00:00Z", "create", "topics/b/one.md", "cli"),
+            log_row("2026-01-01T00:00:00Z", "create", "topics/b/two.md", "cli"),
+        ];
+        put(&root, "a", "orig", "Orig", &[], "body");
+        fs::write(root.join("log.jsonl"), log.join("\n") + "\n").unwrap();
+        let text = fs::read_to_string(root.join("topics/a/orig.md")).unwrap();
+        let id = new_id().unwrap();
+        let shared = with_id(&text, &id).unwrap();
+        fs::write(root.join("topics/a/orig.md"), &shared).unwrap();
+        fs::create_dir_all(root.join("topics/a")).unwrap();
+        fs::write(root.join("topics/a/copy.md"), &shared).unwrap();
+        // a second group where both have history: left alone and reported
+        let other = with_id(&text, &new_id().unwrap()).unwrap();
+        fs::create_dir_all(root.join("topics/b")).unwrap();
+        fs::write(root.join("topics/b/one.md"), &other).unwrap();
+        fs::write(root.join("topics/b/two.md"), &other).unwrap();
+        let got = backfill_sightings(&root, &[], true).unwrap();
+        assert_eq!(got["notes_given_id"], 1, "{got}");
+        assert_eq!(got["rows_backfilled"], 1, "{got}");
+        assert_eq!(
+            got["duplicate_ids"],
+            json!([["topics/b/one.md", "topics/b/two.md"]])
+        );
+        assert_eq!(got["rows_skipped_duplicate_id"], 2, "{got}");
+        assert_eq!(got["notes_without_sighting"], 3, "{got}");
+        assert_eq!(id_of(&root, "topics/a/orig.md"), id);
+        let copy = id_of(&root, "topics/a/copy.md");
+        assert!(!copy.is_empty() && copy != id);
+        assert_eq!(show(&root, "topics/a/orig.md").unwrap().seen, 1);
+        assert_eq!(
+            fs::read_to_string(root.join("topics/b/one.md")).unwrap(),
+            other
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("topics/b/two.md")).unwrap(),
+            other
+        );
+        let again = backfill_sightings(&root, &[], true).unwrap();
+        assert_eq!(
+            (&again["notes_given_id"], &again["rows_backfilled"]),
+            (&json!(0), &json!(0))
+        );
     }
 
     /// A note keeps one id (naru task 2836) across append, merge (the kept

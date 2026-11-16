@@ -93,7 +93,8 @@ changes it. A note without an `id:` line (or with a value that is not 1-64
 of `[A-Za-z0-9_-]`) still parses, with an empty id. `kb list` and `kb show`
 carry it as `id` (null when empty, naru task 2838); `INDEX.md` and the
 prompts do not. A binary from before this
-task drops the line on its next append or merge of that note.
+task drops the line on its next append or merge of that note. `kb backfill-sightings` gives every
+note without one an id (below).
 
 ### Sightings (naru task 2837)
 
@@ -156,6 +157,63 @@ On a copy of the real kb (2026-11-04: 1336 notes, 2020 log rows) it updated
 1311 notes. 25 notes stayed without sessions: the 10 filed with no mined
 session, plus 15 whose 25 rows point at paths moved to another topic outside
 the log.
+
+### Backfilling sightings from the log (naru task 2840)
+
+`naru kb backfill-sightings [--moves <tsv>]... [--apply]` gives every note an
+`id:` and writes `sightings.jsonl` rows (`backfilled: true`) for the history
+`log.jsonl` records, keyed to the id of the note that exists today. A dry run
+unless `--apply`; it prints `{applied, notes, moves, notes_given_id,
+rows_backfilled, rows_already_present, notes_without_sighting,
+rows_skipped_missing_path, rows_skipped_unresolved_delete,
+rows_skipped_no_front_matter, rows_skipped_bad_ts, rows_skipped_duplicate_id,
+duplicate_ids}`.
+
+- The log is replayed in `ts` order (ties keep file order). Every `create` and
+  `append` counts, whatever its source. A `kb merge` `delete` moves the
+  dropped note's rows to the note of the `merge` row before it; any other
+  delete drops them (`rows_skipped_unresolved_delete`).
+- The log has no rename op, so notes moved by hand (the cleanup workflow's
+  step 14) are followed through `--moves`: each file holds non-empty
+  `from<TAB>to` lines of note paths (the cleanup run's `moves-done.tsv`),
+  repeatable. It is a time-free alias map applied to every log path before
+  the replay; chains are followed. A line that is not two note paths, one
+  `from` with two different `to`s, a cycle, or a `from` that exists as a note
+  today (a re-created source would take the old note's history) is a
+  `validation` error; a repeated identical line is fine.
+- A note without an `id:` gets one as the first front-matter line; every other
+  byte of the file stays. A file without Naru's front matter cannot carry
+  one (`rows_skipped_no_front_matter`). A row is written only after its note
+  carries the id. No alias rows are written: merged and moved history is
+  keyed straight to the live note. A row's `ts` is the log's (rows whose `ts`
+  is not `YYYY-MM-DDTHH:MM:SSZ` are skipped, `rows_skipped_bad_ts`),
+  `session` is the id of a `mined-session-<id>` source, `machine` is empty.
+- Several notes sharing one id (a hand `cp`): when exactly one of them has
+  replayed log rows it is the original and each other gets a fresh id;
+  otherwise the group is left alone, gets no rows and is listed in
+  `duplicate_ids`; the rows the log had for its notes are counted in
+  `rows_skipped_duplicate_id`, and a note of it with no rows counts in
+  `notes_without_sighting`.
+- Rows already in `sightings.jsonl` are not doubled, so a second `--apply`
+  changes no byte, and a kb the new binary has been writing real rows to is
+  safe: a backfilled row matches a log row on `(ts, op, source)`; each real
+  `create`/`append` row (its `ts` is the spool arrival time) takes the latest
+  unmatched log row with the same `(op, source)`. Only what stays unmatched
+  is written (`rows_already_present` counts the matched).
+- `rows_skipped_unresolved_delete` counts the rows of ANY note deleted outside
+  a `kb merge` (an ordinary deletion, not an anomaly).
+- Dry-run counts are an unlocked snapshot; only `--apply` holds the lock.
+- A note whose `id:` line was lost after a backfill (e.g. an append by a
+  binary from before task 2836) gets a new id on the next run and its history
+  is written again under it. The rows under the lost id stay in the file as
+  orphans that no reader shows (measured: 3 notes -> 9 re-written rows, 9
+  orphans, the next run 0 changes).
+- `--apply` holds the kb lock for the run and writes the note files, then the
+  rows in `ts` order. `INDEX.md` has no ids and is not rebuilt.
+
+On a scratch copy of the real kb with all 68 cleanup runs' `moves-done.tsv`
+(697 moves) it gave 1750 notes an id and wrote 2344 rows; every note ended
+with at least one sighting and no row was skipped.
 
 Each op is judged alone: a refused one is listed under `failed` in the report
 and the rest still land. Any refused op keeps the spool file (its path is in
@@ -388,8 +446,8 @@ that do not parse; `first_seen`/`last_seen` are their oldest and newest `ts`,
 `seen` their count. The reader follows the `merge` alias rows (`from` ->
 `into`, chains included, nothing rewritten); a self-alias is ignored and a
 cycle stops where it would revisit, so neither loops (naru task 2839). A note
-without an id or without rows (everything filed before sightings, until the
-backfill) has `first_seen`/`last_seen` null and `seen` 0: unknown, not
+without an id or without rows (everything filed before sightings, until `kb
+backfill-sightings`) has `first_seen`/`last_seen` null and `seen` 0: unknown, not
 "never". `first_seen` is only as good as the id: a note copied by hand shares
 its id, and whichever copy is written first moves to a fresh id (see the id
 rules above), so the original can lose its history to the copy and show a

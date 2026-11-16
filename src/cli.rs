@@ -3516,6 +3516,23 @@ EXAMPLES
         #[arg(long)]
         apply: bool,
     },
+    /// Give every note an id and the sightings `log.jsonl` records for it
+    ///
+    /// Replays the log in `ts` order and writes a `backfilled` row to
+    /// `sightings.jsonl` per create/append, keyed to the id of the note that
+    /// exists today (a merged note's rows go to the kept note). Notes without
+    /// an `id:` line get one; nothing else in a note changes. `--moves` takes
+    /// a file of `from<TAB>to` note paths (repeatable) for notes moved by hand,
+    /// so their history follows them. Dry run unless `--apply`; prints counts.
+    /// Idempotent.
+    BackfillSightings {
+        /// A tab-separated `from<TAB>to` file of moved note paths (repeatable)
+        #[arg(long = "moves")]
+        moves: Vec<PathBuf>,
+        /// Write the notes and rows (default: only report what would change)
+        #[arg(long)]
+        apply: bool,
+    },
     /// Run the automatic lookup for a Claude Code `UserPromptSubmit` payload on stdin
     ///
     /// What the `kb-lookup.sh` library hook runs (`docs/kb.md` "Automatic
@@ -8352,6 +8369,9 @@ fn run_kb(cmd: KbCmd) -> Result<()> {
         }
         KbCmd::Merge { keep, drop } => print_json(&kb::merge(&root, &keep, &drop)?),
         KbCmd::BackfillSessions { apply } => print_json(&kb::backfill_sessions(&root, apply)?),
+        KbCmd::BackfillSightings { moves, apply } => {
+            print_json(&kb::backfill_sightings(&root, &moves, apply)?)
+        }
         KbCmd::Hook => run_kb_hook(&root),
         KbCmd::Usage { days } => print_json(&crate::core::kb_lookup::usage(&root, days)),
     }
